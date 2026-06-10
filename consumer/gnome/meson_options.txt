@@ -1,0 +1,48 @@
+option(
+  'extension-uuid',
+  type: 'string',
+  value: 'vivid-consumer-gnome@rikka.local',
+  description: 'GNOME extension UUID used for installation and metadata'
+)
+
+option(
+  'extension-schema',
+  type: 'string',
+  value: 'dev.rikka.vivid.consumer.gnome',
+  description: 'GSettings schema id used by the GNOME extension'
+)
+
+option(
+  'extension-name',
+  type: 'string',
+  value: 'Vivid Consumer',
+  description: 'GNOME extension display name'
+)
+
+option(
+  'extension-description',
+  type: 'string',
+  value: 'GNOME Shell display consumer for display-v1 producers',
+  description: 'GNOME extension metadata description'
+)
+
+option(
+  'extension-url',
+  type: 'string',
+  value: 'https://github.com/waywallen/waywallen-display',
+  description: 'GNOME extension metadata URL'
+)
+
+option(
+  'extension-author',
+  type: 'string',
+  value: 'rikka',
+  description: 'GNOME extension metadata author'
+)
+
+option(
+  'extension-log-prefix',
+  type: 'string',
+  value: 'Vivid Consumer:',
+  description: 'Prefix used for GNOME extension log messages'
+)

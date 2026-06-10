@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.ayasa520.Vivid</id>
+  <name>Vivid Wallpaper</name>
+  <summary>Live wallpaper application</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <description>
+    <p>
+      Vivid Wallpaper is a live wallpaper application.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.ayasa520.Vivid.desktop</launchable>
+</component>

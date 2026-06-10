@@ -1,0 +1,2 @@
+export const displayConsumerLibDir = '@display_consumer_libdir@';
+export const displayConsumerTypelibDir = '@display_consumer_typelib_dir@';

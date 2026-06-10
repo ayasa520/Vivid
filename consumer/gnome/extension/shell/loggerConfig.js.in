@@ -1,0 +1,2 @@
+export const settingsSchema = @settings_schema@;
+export const logPrefix = @log_prefix@;

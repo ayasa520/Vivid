@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vivid Wallpaper</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='8' y1='8' x2='56' y2='56'%3E%3Cstop stop-color='%2300a1d6'/%3E%3Cstop offset='1' stop-color='%23fb7299'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='url(%23g)'/%3E%3Cpath d='M20 20l11 27 13-27' fill='none' stroke='white' stroke-width='7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <script>
+    /*
+     * Apply the persisted theme before the stylesheet loads so dark mode does
+     * not briefly flash the light palette. main.js owns the same storage key
+     * and keeps this bootstrap state synchronized after the app starts.
+     */
+    (() => {
+      const key = 'vivid-webui-theme-mode';
+      const mode = localStorage.getItem(key) || 'system';
+      const prefersDark = matchMedia('(prefers-color-scheme: dark)').matches;
+      const theme = mode === 'dark' || (mode !== 'light' && prefersDark) ? 'dark' : 'light';
+      document.documentElement.dataset.themeMode = mode;
+      document.documentElement.dataset.theme = theme;
+    })();
+  </script>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div class="topbar-left">
+        <button id="settingsBackButton" class="icon-button secondary-button" type="button" data-i18n-title="action.backToBrowse" title="Back to browse" style="display:none">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
+        </button>
+        <span class="brand">Vivid</span>
+        <span id="statusText" class="status-dot" data-state="neutral" data-i18n="status.disconnected" title="Disconnected"></span>
+      </div>
+      <div class="topbar-center">
+        <div class="topbar-search">
+          <svg class="icon search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+          <input id="projectSearch" type="search" autocomplete="off" data-i18n-placeholder="placeholder.search" placeholder="Search...">
+        </div>
+      </div>
+      <div class="topbar-right">
+        <div class="topbar-filter">
+          <button id="filterDropdownButton" class="secondary-button" type="button">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 21v-7m0-4V3m8 18v-9m0-4V3m8 18v-5m0-4V3M1 14h6m2-6h6m2 8h6"/></svg>
+            <span data-i18n="label.filter">Filter</span>
+          </button>
+          <div id="filterDropdown" class="filter-dropdown">
+            <div class="filter-dropdown-section">
+              <div class="filter-dropdown-label" data-i18n="filter.type">Type</div>
+              <div class="filter-row" aria-label="Wallpaper filters" data-i18n-aria-label="aria.wallpaperFilters">
+                <label><input class="typeFilter" type="checkbox" value="scene" checked> <span data-i18n="type.scene">Scene</span></label>
+                <label><input class="typeFilter" type="checkbox" value="web" checked> <span data-i18n="type.web">Web</span></label>
+                <label><input class="typeFilter" type="checkbox" value="video" checked> <span data-i18n="type.video">Video</span></label>
+              </div>
+            </div>
+            <div id="dynamicFilters" aria-label="Wallpaper metadata filters" data-i18n-aria-label="aria.metadataFilters"></div>
+          </div>
+        </div>
+        <select id="projectSort" aria-label="Sort">
+          <option value="name" data-i18n="sort.name">Name</option>
+          <option value="updated-time" data-i18n="sort.updated">Updated</option>
+          <option value="type" data-i18n="sort.type">Type</option>
+        </select>
+        <button id="settingsButton" class="icon-button secondary-button" type="button" data-i18n-title="tab.settings" title="Settings">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06A2 2 0 1 1 7.04 4.3l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.22.62.8 1 1.51 1H21a2 2 0 1 1 0 4h-.09c-.7 0-1.29.38-1.51 1Z"/></svg>
+        </button>
+        <button id="refreshButton" class="icon-button secondary-button" type="button" data-i18n-title="action.refresh" title="Refresh">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M21 12a9 9 0 0 1-15.5 6.2"></path>
+            <path d="M3 12A9 9 0 0 1 18.5 5.8"></path>
+            <path d="M18 2v4h4"></path>
+            <path d="M6 22v-4H2"></path>
+          </svg>
+        </button>
+        <button id="themeButton" class="icon-button secondary-button theme-button" type="button" title="Theme" aria-label="Theme"></button>
+        <label class="language-field">
+          <span class="visually-hidden" data-i18n="label.language">Language</span>
+          <select id="languageSelect" autocomplete="off">
+            <option value="en">EN</option>
+            <option value="zh-CN">中文</option>
+          </select>
+        </label>
+      </div>
+    </header>
+
+    <section id="browseView" class="view is-active" aria-label="Browse wallpapers" data-i18n-aria-label="aria.browseWallpapers">
+      <section class="browse-layout">
+        <section class="project-column">
+          <div class="project-column-header">
+            <span id="projectCount" class="count-label" data-i18n="count.wallpapers">0</span>
+          </div>
+          <section id="projectGrid" class="project-grid" aria-label="Wallpaper grid" data-i18n-aria-label="aria.wallpaperGrid"></section>
+          <p id="projectEmpty" class="empty-state" data-i18n="empty.setLibrary">Set Steam Library in Settings to browse wallpapers.</p>
+        </section>
+
+        <aside class="inspector" aria-label="Wallpaper properties" data-i18n-aria-label="aria.wallpaperProperties">
+          <div class="inspector-header">
+            <button id="inspectorBackButton" class="secondary-button icon-button inspector-back-button" type="button" title="Back to browse" aria-label="Back to browse" data-i18n-title="action.backToBrowse" data-i18n-aria-label="action.backToBrowse">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m12 19-7-7 7-7"></path>
+                <path d="M19 12H5"></path>
+              </svg>
+            </button>
+            <div>
+              <h2 id="inspectorTitle" data-i18n="inspector.wallpaper">Wallpaper</h2>
+              <p id="inspectorSubtitle" data-i18n="inspector.noneSelected">No wallpaper selected</p>
+            </div>
+            <span id="inspectorType" class="type-badge" data-i18n="type.none">None</span>
+          </div>
+          <div id="inspectorPreview" class="inspector-preview"></div>
+          <div id="inspectorProperties" class="inspector-properties"></div>
+        </aside>
+      </section>
+    </section>
+
+    <section id="settingsView" class="view" aria-label="Producer settings" data-i18n-aria-label="aria.producerSettings">
+      <form id="settingsForm" class="settings-grid">
+        <section class="settings-section">
+          <h2 data-i18n="section.general">General Settings</h2>
+          <div class="setting-list" data-section="general"></div>
+        </section>
+        <section class="settings-section">
+          <h2 data-i18n="section.web">Web Settings</h2>
+          <div class="setting-list" data-section="web"></div>
+        </section>
+        <section class="settings-section">
+          <h2 data-i18n="section.scene">Scene Settings</h2>
+          <div class="setting-list" data-section="scene"></div>
+        </section>
+        <section class="settings-section">
+          <h2 data-i18n="section.autopause">Auto Pause</h2>
+          <div class="setting-list" data-section="autopause"></div>
+        </section>
+        <section class="settings-section">
+          <h2 data-i18n="section.experimental">Experimental</h2>
+          <div class="setting-list" data-section="experimental"></div>
+        </section>
+        <section class="settings-section">
+          <h2 data-i18n="section.developer">Developer</h2>
+          <div class="setting-list" data-section="developer"></div>
+          <details class="state-details">
+            <summary data-i18n="section.producerState">Producer State</summary>
+            <pre id="stateOutput">{}</pre>
+          </details>
+        </section>
+        <section class="settings-section reset-section">
+          <h2 data-i18n="section.reset">Reset</h2>
+          <p class="setting-note" data-i18n="reset.defaultsDescription">Restore all global settings and wallpaper-specific settings to their defaults.</p>
+          <button id="resetDefaultsButton" class="danger-button" type="button" data-i18n="action.restoreDefaults">Restore Defaults</button>
+        </section>
+      </form>
+    </section>
+  </main>
+
+  <script src="./main.js" type="module"></script>
+</body>
+</html>

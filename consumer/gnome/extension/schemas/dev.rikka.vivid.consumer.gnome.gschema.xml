@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+    <schema id="dev.rikka.vivid.consumer.gnome" path="/dev/rikka/vivid-consumer/gnome/">
+        <key name="startup-delay" type="i">
+            <range min="0" max="10000" />
+            <default>1000</default>
+            <summary>Consumer Startup Delay</summary>
+            <description>Delay the GNOME consumer connection during shell startup.</description>
+        </key>
+
+        <key name="display-socket-path" type="s">
+            <default>''</default>
+            <summary>Display Socket Path</summary>
+            <description>Optional override for the display-v1 Unix socket path.</description>
+        </key>
+
+        <key name="debug-mode" type="b">
+            <default>false</default>
+            <summary>Debug Mode</summary>
+            <description>Enable consumer-side debug logging.</description>
+        </key>
+    </schema>
+</schemalist>

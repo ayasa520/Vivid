@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+producer_command="${VIVID_PRODUCER_COMMAND:-vivid-producer}"
+webui_root="${VIVID_WEBUI_ROOT:-/app/share/vivid-producer/webui}"
+webui_server="${VIVID_WEBUI_SERVER:-${webui_root}/vivid_webui_server.py}"
+python_bin="${VIVID_PYTHON:-python3}"
+web_cef_dir="${VIVID_WEB_CEF_DIR:-/app/lib/vivid-web}"
+web_library="${VIVID_WEB_LIBRARY:-${web_cef_dir}/libVividWeb.so}"
+gbm_shim_library="${VIVID_GBM_USAGE_SHIM:-/app/lib/libvivid-gbm-usage-shim.so}"
+original_ld_preload_set=0
+original_ld_preload=""
+if [ "${LD_PRELOAD+x}" = x ]; then
+    original_ld_preload_set=1
+    original_ld_preload="${LD_PRELOAD}"
+fi
+
+# The web backend is installed as a self-contained CEF runtime bundle instead
+# of scattering libcef.so/resources/locales across /app/lib. Publish the exact
+# paths before the producer starts so its dlopen() path, CEF resource lookup,
+# helper executable, and helper rpaths all point at the same bundle.
+export VIVID_WEB_CEF_DIR="${web_cef_dir}"
+export VIVID_WEB_LIBRARY="${web_library}"
+export VIVID_GBM_USAGE_SHIM="${gbm_shim_library}"
+case ":${LD_LIBRARY_PATH:-}:" in
+    *":${web_cef_dir}:"*) ;;
+    *) export LD_LIBRARY_PATH="${web_cef_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" ;;
+esac
+
+gbm_shim_rewrite="${VIVID_GBM_SHIM_REWRITE:-0}"
+gbm_shim_auto="${VIVID_GBM_SHIM_AUTO:-1}"
+gbm_shim_preload=0
+if [ "${gbm_shim_rewrite}" != "0" ]; then
+    gbm_shim_preload=1
+elif [ "${gbm_shim_auto}" != "0" ] && [ -f "${gbm_shim_library}" ]; then
+    gbm_shim_preload=1
+fi
+
+if [ "${gbm_shim_preload}" != "0" ]; then
+    if [ ! -f "${gbm_shim_library}" ]; then
+        echo "GBM usage shim not found: ${gbm_shim_library}" >&2
+        exit 1
+    fi
+
+    # CEF forks its GPU helper after the producer initializes the web backend.
+    # Preloading here is the last process-wide point where every future helper
+    # can inherit the GBM rewrite hooks for NVIDIA shared-texture allocation.
+    case ":${LD_PRELOAD:-}:" in
+        *":${gbm_shim_library}:"*) ;;
+        *) export LD_PRELOAD="${gbm_shim_library}${LD_PRELOAD:+:${LD_PRELOAD}}" ;;
+    esac
+    if [ "${gbm_shim_auto}" != "0" ] && [ "${gbm_shim_rewrite}" = "0" ]; then
+        export VIVID_GBM_SHIM_LOG="${VIVID_GBM_SHIM_LOG:-0}"
+    else
+        export VIVID_GBM_SHIM_LOG="${VIVID_GBM_SHIM_LOG:-1}"
+    fi
+fi
+
+restore_ld_preload() {
+    if [ "${original_ld_preload_set}" = "1" ]; then
+        export LD_PRELOAD="${original_ld_preload}"
+    else
+        unset LD_PRELOAD
+    fi
+}
+
+if [ "${VIVID_PRODUCER_ONLY:-0}" = "1" ]; then
+    exec "${producer_command}" "$@"
+fi
+
+producer_pid=""
+webui_pid=""
+force_kill_pid=""
+cleanup_started=0
+
+# Keep producer, CEF helper processes, and the WebUI in killable process
+# groups owned by this launcher. Flatpak's host-side CLI is not a reliable
+# lifetime boundary when it is closed from a terminal, so the launcher must be
+# the single supervisor that explicitly tears down every child process tree.
+has_setsid=0
+if command -v setsid >/dev/null 2>&1; then
+    has_setsid=1
+fi
+
+launcher_log() {
+    message="$1"
+    printf 'vivid: %s\n' "${message}" >&2
+}
+
+signal_child_group() {
+    pid="$1"
+    signal="$2"
+    label="$3"
+
+    if [ -z "${pid}" ]; then
+        return 0
+    fi
+
+    # Children started through setsid have PGID == PID. Signalling the process
+    # group catches grandchildren such as CEF helpers; the single-PID fallback
+    # keeps the launcher functional on minimal runtimes without setsid.
+    if kill "-${signal}" "-${pid}" 2>/dev/null; then
+        launcher_log "sent ${signal} to ${label} process group ${pid}"
+        return 0
+    fi
+    if kill "-${signal}" "${pid}" 2>/dev/null; then
+        launcher_log "sent ${signal} to ${label} process ${pid}"
+    fi
+}
+
+child_group_alive() {
+    pid="$1"
+    if [ -z "${pid}" ]; then
+        return 1
+    fi
+
+    if [ "${has_setsid}" = "1" ]; then
+        kill -0 "-${pid}" 2>/dev/null
+        return $?
+    fi
+
+    kill -0 "${pid}" 2>/dev/null
+}
+
+wait_for_child_groups() {
+    timeout="${VIVID_LAUNCHER_STOP_TIMEOUT:-5}"
+    elapsed=0
+
+    while child_group_alive "${producer_pid}" || child_group_alive "${webui_pid}"; do
+        if [ "${elapsed}" -ge "${timeout}" ]; then
+            return 1
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    return 0
+}
+
+reap_children() {
+    if [ -n "${producer_pid}" ]; then
+        wait "${producer_pid}" 2>/dev/null || true
+    fi
+    if [ -n "${webui_pid}" ]; then
+        wait "${webui_pid}" 2>/dev/null || true
+    fi
+}
+
+force_kill_after_timeout() {
+    timeout="${VIVID_LAUNCHER_STOP_TIMEOUT:-5}"
+    sleep "${timeout}"
+    launcher_log "children did not exit after ${timeout}s; forcing shutdown"
+    signal_child_group "${producer_pid}" KILL "producer"
+    signal_child_group "${webui_pid}" KILL "webui"
+}
+
+cleanup() {
+    signal="${1:-TERM}"
+    if [ "${cleanup_started}" = "1" ]; then
+        return 0
+    fi
+    cleanup_started=1
+
+    trap - EXIT HUP INT TERM
+    signal_child_group "${producer_pid}" "${signal}" "producer"
+    signal_child_group "${webui_pid}" "${signal}" "webui"
+
+    force_kill_after_timeout &
+    force_kill_pid="$!"
+    reap_children
+
+    if child_group_alive "${producer_pid}" || child_group_alive "${webui_pid}"; then
+        wait "${force_kill_pid}" 2>/dev/null || true
+        wait_for_child_groups || true
+    else
+        kill "${force_kill_pid}" 2>/dev/null || true
+        wait "${force_kill_pid}" 2>/dev/null || true
+    fi
+}
+
+handle_interrupt() {
+    cleanup INT
+    exit 130
+}
+
+handle_hup() {
+    cleanup HUP
+    exit 129
+}
+
+handle_termination() {
+    cleanup
+    exit 143
+}
+
+trap cleanup EXIT
+trap handle_interrupt INT
+trap handle_hup HUP
+trap handle_termination TERM
+
+start_producer() {
+    if [ "${has_setsid}" = "1" ]; then
+        setsid "${producer_command}" "$@" &
+    else
+        "${producer_command}" "$@" &
+    fi
+    producer_pid="$!"
+}
+
+start_webui() {
+    if [ "${has_setsid}" = "1" ]; then
+        setsid "${python_bin}" "${webui_server}" \
+            --web-root "${webui_root}" &
+    else
+        "${python_bin}" "${webui_server}" \
+            --web-root "${webui_root}" &
+    fi
+    webui_pid="$!"
+}
+
+start_producer "$@"
+restore_ld_preload
+
+start_webui
+
+# Keep the launcher as the foreground process. If either child exits, tear
+# down the other child so Ctrl+C and Flatpak stop semantics always affect the
+# producer and the web UI as one unit.
+set +e
+wait -n "${producer_pid}" "${webui_pid}"
+exit_status="$?"
+set -e
+cleanup
+exit "${exit_status}"

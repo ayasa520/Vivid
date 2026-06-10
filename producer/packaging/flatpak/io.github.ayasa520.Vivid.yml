@@ -1,0 +1,72 @@
+# @VIVID_TEMPLATE_COMMENT_BEGIN@
+# Template consumed by tools/producer/flatpak/build.sh and prefetch_sources.sh.
+#
+# Do not pass this file directly to flatpak-builder. Directory sources are
+# convenient for local checkouts, but flatpak-builder documents that `type: dir`
+# sources do not support caching and are rebuilt every time. The wrapper scripts
+# generate a deterministic local source archive under .build and render this
+# template with absolute archive paths and hashes.
+# @VIVID_TEMPLATE_COMMENT_END@
+app-id: io.github.ayasa520.Vivid
+runtime: org.gnome.Platform
+runtime-version: "49"
+sdk: org.gnome.Sdk
+command: vivid
+
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --device=dri
+  - --filesystem=host:ro
+  - --filesystem=xdg-run/vivid:create
+  - --env=GI_TYPELIB_PATH=/app/lib/girepository-1.0:/app/lib/x86_64-linux-gnu/girepository-1.0
+  - --env=LD_LIBRARY_PATH=/app/lib:/app/lib64
+
+build-options:
+  append-path: /app/bin
+  env:
+    GI_TYPELIB_PATH: /app/lib/girepository-1.0:/app/lib/x86_64-linux-gnu/girepository-1.0:/usr/lib/x86_64-linux-gnu/girepository-1.0
+    LD_LIBRARY_PATH: /app/lib:/app/lib64
+    PKG_CONFIG_PATH: /app/lib64/pkgconfig:/app/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
+
+modules:
+  - name: unifdef
+    buildsystem: simple
+    build-commands:
+      - make CFLAGS="${VIVID_UNIFDEF_CFLAGS:--O2 -g -std=gnu17}"
+      - install -Dm755 unifdef "${VIVID_INSTALL_PREFIX:-/app}/bin/unifdef"
+    sources:
+      - type: archive
+        url: https://dotat.at/prog/unifdef/unifdef-2.12.tar.xz
+        sha256: 43ce0f02ecdcdc723b2475575563ddb192e988c886d368260bc0a63aee3ac400
+
+  - name: vivid-producer
+    buildsystem: simple
+    build-options:
+      build-args:
+        - "--filesystem=@NATIVE_BUILD_ROOT@"
+      env:
+        VIVID_FLATPAK_RENDERER_BUILD_ROOT: "@NATIVE_BUILD_ROOT@"
+    build-commands:
+      - sh tools/producer/install_renderers.sh
+      - sh tools/producer/install_webui.sh
+      - sh tools/producer/install_producer_app.sh
+    sources:
+      # The wrapper script builds this archive from the local checkout with
+      # deterministic metadata. That keeps dirty-worktree development builds
+      # possible while giving flatpak-builder a cacheable archive source.
+      - type: archive
+        path: "@SOURCE_ARCHIVE@"
+        sha256: "@SOURCE_ARCHIVE_SHA256@"
+        strip-components: 0
+      # The CEF binary bundle is large and is maintained as an explicit local
+      # packaging input. Let flatpak-builder verify and extract it like any
+      # other archive source so the build script does not manage a parallel CEF
+      # extraction cache outside the module source tree.
+      - type: archive
+        path: "@CEF_ARCHIVE@"
+        sha256: "@CEF_ARCHIVE_SHA256@"
+        dest: producer/packaging/flatpak/cef
+        strip-components: 1

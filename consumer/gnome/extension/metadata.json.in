@@ -1,0 +1,13 @@
+{
+  "author": @metadata_author@,
+  "description": @metadata_description@,
+  "gettext-domain": "@uuid@",
+  "name": @metadata_name@,
+  "settings-schema": "@settings_schema@",
+  "shell-version": [
+    "45", "46", "47", "48", "49", "50"
+  ],
+  "url": @metadata_url@,
+  "uuid": "@uuid@",
+  "version": @version@
+}

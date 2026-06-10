@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Vivid Wallpaper
+Comment=Live wallpaper application
+Exec=vivid
+Icon=io.github.ayasa520.Vivid
+Terminal=false
+Categories=Utility;

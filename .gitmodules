@@ -1,0 +1,3 @@
+[submodule "producer/third_party/wallpaper-scene-renderer"]
+	path = producer/third_party/wallpaper-scene-renderer
+	url = https://github.com/ayasa520/wallpaper-scene-renderer

@@ -1,0 +1,17 @@
+{
+    "KPackageStructure": "Plasma/Wallpaper",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "rikka"
+            }
+        ],
+        "Description": "KDE Plasma display consumer for display-v1 producers",
+        "Icon": "preferences-desktop-wallpaper",
+        "Id": "dev.rikka.vivid.consumer.kde",
+        "License": "GPL-3.0-or-later",
+        "Name": "Vivid Consumer",
+        "Website": "https://github.com/waywallen/waywallen-display"
+    },
+    "X-KDE-ParentApp": "org.kde.plasmashell"
+}
