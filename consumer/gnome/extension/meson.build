@@ -37,7 +37,6 @@ configured_build_config = configure_file(
 root_sources = [
   'extension.js',
   'prefs.js',
-  '../LICENSE',
 ]
 
 common_sources = [
