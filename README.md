@@ -29,8 +29,8 @@ VIVID_FLATPAK_DISABLE_DOWNLOAD=1 tools/vivid.sh build flatpak
 
 The Flatpak manifest is rendered from
 `producer/packaging/flatpak/io.github.ayasa520.Vivid.yml` into
-`producer/.build/flatpak-manifest`. By default it builds the configured GitHub
-`main` commit, so uncommitted local changes are not included in Flatpak builds.
+`producer/.build/flatpak-manifest`. The bundle is written to
+`producer/.build/io.github.ayasa520.Vivid-1.0.0.flatpak` by default.
 
 Set the Flatpak software version with:
 
@@ -45,6 +45,7 @@ Useful cache locations:
 - `producer/.build/flatpak-builder-state`
 - `producer/.build/flatpak-builder-state/ccache`
 - `producer/.build/flatpak-native-cache/native-build`
+- `producer/.build/flatpak-repo/vivid-producer`
 
 ### Direct Run
 

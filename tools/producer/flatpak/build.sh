@@ -16,6 +16,8 @@ GIT_BRANCH="${VIVID_FLATPAK_GIT_BRANCH}"
 GIT_COMMIT="${VIVID_FLATPAK_GIT_COMMIT:-}"
 BUILD_DIR="${VIVID_FLATPAK_BUILD_DIR}"
 REPO_DIR="${VIVID_FLATPAK_REPO_DIR}"
+BUNDLE="${VIVID_FLATPAK_BUNDLE}"
+BUNDLE_BRANCH="${VIVID_FLATPAK_BUNDLE_BRANCH}"
 STATE_DIR="${VIVID_FLATPAK_STATE_DIR}"
 NATIVE_BUILD_ROOT="${VIVID_FLATPAK_NATIVE_BUILD_ROOT}"
 DEFAULT_JOBS="${VIVID_FLATPAK_DEFAULT_JOBS:-12}"
@@ -60,6 +62,11 @@ case "${BUILD_JOBS}" in
         ;;
 esac
 
+if [ -z "${BUNDLE_BRANCH}" ]; then
+    echo "Invalid VIVID_FLATPAK_BUNDLE_BRANCH: expected a non-empty branch name." >&2
+    exit 1
+fi
+
 case "${FORCE_CLEAN}" in
     auto|0|1)
         ;;
@@ -80,6 +87,7 @@ MANIFEST="$(vivid_flatpak_absolute_path "${MANIFEST}")"
 SOURCE_LOCK="$(vivid_flatpak_absolute_path "${SOURCE_LOCK}")"
 BUILD_DIR="$(vivid_flatpak_absolute_path "${BUILD_DIR}")"
 REPO_DIR="$(vivid_flatpak_absolute_path "${REPO_DIR}")"
+BUNDLE="$(vivid_flatpak_absolute_path "${BUNDLE}")"
 STATE_DIR="$(vivid_flatpak_absolute_path "${STATE_DIR}")"
 NATIVE_BUILD_ROOT="$(vivid_flatpak_absolute_path "${NATIVE_BUILD_ROOT}")"
 CCACHE_DIR="$(vivid_flatpak_absolute_path "${CCACHE_DIR}")"
@@ -105,6 +113,7 @@ fi
 mkdir -p \
     "$(dirname "${BUILD_DIR}")" \
     "$(dirname "${REPO_DIR}")" \
+    "$(dirname "${BUNDLE}")" \
     "$(dirname "${MANIFEST}")" \
     "$(dirname "${SOURCE_LOCK}")" \
     "${STATE_DIR}" \
@@ -132,6 +141,8 @@ echo "==> Flatpak producer git commit: ${VIVID_FLATPAK_GIT_COMMIT}"
 echo "==> Flatpak app version: ${APP_VERSION} (${RELEASE_DATE})"
 echo "==> Flatpak producer app dir: ${BUILD_DIR}"
 echo "==> Flatpak producer repository: ${REPO_DIR}"
+echo "==> Flatpak producer bundle: ${BUNDLE}"
+echo "==> Flatpak producer bundle branch: ${BUNDLE_BRANCH}"
 echo "==> Flatpak builder state: ${STATE_DIR}"
 echo "==> Flatpak native CMake root: ${NATIVE_BUILD_ROOT}"
 echo "==> Flatpak producer build jobs: ${BUILD_JOBS}"
@@ -160,6 +171,7 @@ set -- \
     --jobs="${BUILD_JOBS}" \
     --state-dir="${STATE_DIR}" \
     --repo="${REPO_DIR}" \
+    --default-branch="${BUNDLE_BRANCH}" \
     "${BUILD_DIR}" \
     "${MANIFEST}"
 
@@ -184,4 +196,10 @@ if [ -n "${INSTALL_DEPS_FROM}" ]; then
     set -- --install-deps-from="${INSTALL_DEPS_FROM}" "$@"
 fi
 
-exec flatpak-builder "$@"
+flatpak-builder "$@"
+
+flatpak build-bundle \
+    "${REPO_DIR}" \
+    "${BUNDLE}" \
+    "${VIVID_PRODUCER_APP_ID}" \
+    "${BUNDLE_BRANCH}"
