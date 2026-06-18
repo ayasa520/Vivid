@@ -1,11 +1,9 @@
 # @VIVID_TEMPLATE_COMMENT_BEGIN@
 # Template consumed by tools/producer/flatpak/build.sh and prefetch_sources.sh.
 #
-# Do not pass this file directly to flatpak-builder. Directory sources are
-# convenient for local checkouts, but flatpak-builder documents that `type: dir`
-# sources do not support caching and are rebuilt every time. The wrapper scripts
-# generate a deterministic local source archive under .build and render this
-# template with absolute archive paths and hashes.
+# Do not pass this file directly to flatpak-builder. The wrapper scripts render
+# a concrete manifest under .build with the GitHub source pinned to an exact
+# commit, plus absolute paths and hashes for local packaging archives.
 # @VIVID_TEMPLATE_COMMENT_END@
 app-id: io.github.ayasa520.Vivid
 runtime: org.gnome.Platform
@@ -49,18 +47,73 @@ modules:
         - "--filesystem=@NATIVE_BUILD_ROOT@"
       env:
         VIVID_FLATPAK_RENDERER_BUILD_ROOT: "@NATIVE_BUILD_ROOT@"
+        VIVID_FLATPAK_APP_VERSION: "@APP_VERSION@"
+        VIVID_FLATPAK_RELEASE_DATE: "@RELEASE_DATE@"
     build-commands:
       - sh tools/producer/install_renderers.sh
       - sh tools/producer/install_webui.sh
       - sh tools/producer/install_producer_app.sh
+      # Flatpak/AppStream reads the visible application version from the
+      # installed metainfo release entry. Keep this in the local packaging
+      # manifest so a packaging-only version bump does not require the GitHub
+      # source commit itself to already contain the same release metadata.
+      - |
+        python3 - <<'PY'
+        import os
+        import pathlib
+        import re
+        import sys
+        import xml.etree.ElementTree as ET
+
+        app_id = "io.github.ayasa520.Vivid"
+        version = os.environ["VIVID_FLATPAK_APP_VERSION"]
+        release_date = os.environ["VIVID_FLATPAK_RELEASE_DATE"]
+
+        if not re.fullmatch(r"[0-9A-Za-z._+~-]+", version):
+            sys.exit(
+                "Invalid VIVID_FLATPAK_APP_VERSION="
+                f"{version}; expected only 0-9, A-Z, a-z, '.', '_', '+', '~', or '-'."
+            )
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", release_date):
+            sys.exit(
+                "Invalid VIVID_FLATPAK_RELEASE_DATE="
+                f"{release_date}; expected YYYY-MM-DD."
+            )
+
+        metainfo = pathlib.Path(f"/app/share/metainfo/{app_id}.metainfo.xml")
+        tree = ET.parse(metainfo)
+        root = tree.getroot()
+
+        releases = root.find("releases")
+        if releases is None:
+            releases = ET.SubElement(root, "releases")
+
+        release = releases.find("release")
+        if release is None:
+            release = ET.Element("release")
+            releases.insert(0, release)
+
+        release.set("version", version)
+        release.set("date", release_date)
+
+        description = release.find("description")
+        if description is None:
+            description = ET.SubElement(release, "description")
+        if description.find("p") is None:
+            paragraph = ET.SubElement(description, "p")
+            paragraph.text = "Flatpak package release."
+
+        ET.indent(tree, space="  ")
+        tree.write(metainfo, encoding="UTF-8", xml_declaration=True)
+        PY
     sources:
-      # The wrapper script builds this archive from the local checkout with
-      # deterministic metadata. That keeps dirty-worktree development builds
-      # possible while giving flatpak-builder a cacheable archive source.
-      - type: archive
-        path: "@SOURCE_ARCHIVE@"
-        sha256: "@SOURCE_ARCHIVE_SHA256@"
-        strip-components: 0
+      # Use the public GitHub repository as the cacheable, reproducible Vivid
+      # source. Submodules are intentionally left enabled so the renderer tree
+      # is checked out with the commit recorded by this repository.
+      - type: git
+        url: "@SOURCE_GIT_URL@"
+        branch: "@SOURCE_GIT_BRANCH@"
+        commit: "@SOURCE_GIT_COMMIT@"
       # The CEF binary bundle is large and is maintained as an explicit local
       # packaging input. Let flatpak-builder verify and extract it like any
       # other archive source so the build script does not manage a parallel CEF

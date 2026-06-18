@@ -11,4 +11,11 @@
     </p>
   </description>
   <launchable type="desktop-id">io.github.ayasa520.Vivid.desktop</launchable>
+  <releases>
+    <release version="1.0.0" date="2026-06-18">
+      <description>
+        <p>Initial Flatpak package version.</p>
+      </description>
+    </release>
+  </releases>
 </component>

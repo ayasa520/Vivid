@@ -33,7 +33,14 @@ rebuilds do not start from scratch.
 
 ```sh
 tools/vivid.sh flatpak prefetch
-VIVID_FLATPAK_JOBS="$(nproc)" tools/vivid.sh flatpak build
+VIVID_FLATPAK_JOBS="$(nproc)" tools/vivid.sh build flatpak
+```
+
+`tools/vivid.sh flatpak build` is an equivalent spelling for the build command.
+After prefetching, a no-download build can be run with:
+
+```sh
+VIVID_FLATPAK_DISABLE_DOWNLOAD=1 tools/vivid.sh build flatpak
 ```
 
 Flatpak artifacts stay under `.build`:
@@ -41,19 +48,38 @@ Flatpak artifacts stay under `.build`:
 - app dir: `.build/flatpak/vivid-producer`
 - local repository: `.build/flatpak-repo/vivid-producer`
 - builder state and ccache: `.build/flatpak-builder-state`
+- stable native CMake cache: `.build/flatpak-native-cache/native-build`
 - download-only work dir: `.build/flatpak-download`
+- generated manifest and source lock: `.build/flatpak-manifest`
 
-`packaging/flatpak/io.github.ayasa520.Vivid.yml` is the Flatpak manifest passed
-directly to flatpak-builder. Third-party URL sources are listed in the manifest
-with sha256 checksums, and `tools/vivid.sh flatpak prefetch` delegates to
-`flatpak-builder --download-only` instead of maintaining a separate download
-script. The CEF binary bundle is a large local archive source at
+`packaging/flatpak/io.github.ayasa520.Vivid.yml` is a template manifest. The
+wrapper scripts render the concrete manifest into `.build/flatpak-manifest` with
+the Vivid GitHub source pinned to an exact commit. By default the source is
+`https://github.com/ayasa520/Vivid.git` on `main`; set
+`VIVID_FLATPAK_GIT_URL`, `VIVID_FLATPAK_GIT_BRANCH`, or
+`VIVID_FLATPAK_GIT_COMMIT` to override it. Flatpak builds committed GitHub
+sources, so uncommitted local changes are not included.
+
+The software version shown by Flatpak/AppStream is controlled by the release
+entry in the installed metainfo file. The build defaults to `1.0.0` and can be
+overridden with:
+
+```sh
+VIVID_FLATPAK_APP_VERSION=1.0.0 \
+VIVID_FLATPAK_RELEASE_DATE=2026-06-18 \
+  tools/vivid.sh build flatpak
+```
+
+Third-party URL sources are listed in the manifest with sha256 checksums, and
+`tools/vivid.sh flatpak prefetch` delegates to `flatpak-builder --download-only`
+instead of maintaining a separate download script. The CEF binary bundle is a
+large local archive source at
 `packaging/flatpak/sources/cef_binary_current_minimal.tar.bz2`; the manifest
 verifies and extracts it into the module source tree during the build.
 
-The local checkout is included through explicit `type: dir` sources for the
-producer tree and helper scripts. Keep `.build/flatpak-builder-state` if you
-want subsequent Flatpak builds to reuse downloaded sources and ccache.
+Keep `.build/flatpak-builder-state` to reuse downloaded Flatpak sources and
+ccache. Keep `.build/flatpak-native-cache/native-build` to reuse the renderer
+CMake build directories across Flatpak module rebuilds.
 
 To run the built app dir without installing it:
 
