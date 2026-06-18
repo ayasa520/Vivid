@@ -26,6 +26,7 @@ const dom = {
   inspectorPreview: document.querySelector('#inspectorPreview'),
   inspectorProperties: document.querySelector('#inspectorProperties'),
   settingsForm: document.querySelector('#settingsForm'),
+  stateDetails: document.querySelector('.state-details'),
   stateOutput: document.querySelector('#stateOutput'),
 };
 
@@ -33,6 +34,7 @@ const app = {
   state: {},
   global: {},
   projects: [],
+  projectByPath: new Map(),
   browserFilterState: null,
   selectedProject: null,
   selectedOverrides: {},
@@ -41,6 +43,10 @@ const app = {
   settingControls: new Map(),
   configTimers: new Map(),
   propertyTimer: 0,
+  projectRenderToken: 0,
+  projectRenderHandle: null,
+  stateOutputDirty: true,
+  stateOutputRenderHandle: null,
   populatingSettings: false,
   inspectorOpen: false,
   locale: 'en',
@@ -53,6 +59,9 @@ const systemThemeQuery = window.matchMedia('(prefers-color-scheme: dark)');
 
 const localeStorageKey = 'vivid-webui-locale';
 const themeStorageKey = 'vivid-webui-theme-mode';
+const projectRenderBatchSize = 48;
+const projectRenderIdleTimeoutMs = 80;
+const slowWorkLogThresholdMs = 50;
 
 /*
  * Keep WebUI chrome translations centralized so language support stays an
@@ -302,6 +311,39 @@ function tFallback(key, fallback, replacements = {}) {
   const catalog = TRANSLATIONS[app.locale] ?? TRANSLATIONS.en;
   const text = catalog[key] ?? TRANSLATIONS.en[key];
   return template(text ?? fallback, replacements);
+}
+
+function scheduleIdleWork(callback, timeout = projectRenderIdleTimeoutMs) {
+  if ('requestIdleCallback' in window) {
+    return {
+      type: 'idle',
+      id: window.requestIdleCallback(callback, {timeout}),
+    };
+  }
+
+  return {
+    type: 'timeout',
+    id: window.setTimeout(() => callback({
+      didTimeout: true,
+      timeRemaining: () => 0,
+    }), 16),
+  };
+}
+
+function cancelIdleWork(handle) {
+  if (!handle)
+    return;
+  if (handle.type === 'idle' && 'cancelIdleCallback' in window)
+    window.cancelIdleCallback(handle.id);
+  else
+    window.clearTimeout(handle.id);
+}
+
+function logSlowWork(label, startedAt, details = {}) {
+  const elapsedMs = performance.now() - startedAt;
+  if (elapsedMs < slowWorkLogThresholdMs)
+    return;
+  console.info(`Vivid WebUI: ${label} took ${Math.round(elapsedMs)}ms`, details);
 }
 
 function normalizeLocale(value) {
@@ -702,8 +744,37 @@ function rebuildSelectOptions(definition, control, currentValue = '') {
   }
 }
 
-function updateStateOutput() {
+function isStateOutputVisible() {
+  return Boolean(dom.stateOutput && dom.stateDetails?.open);
+}
+
+function renderStateOutputNow() {
+  if (!dom.stateOutput)
+    return;
+  const startedAt = performance.now();
   dom.stateOutput.textContent = JSON.stringify(app.state ?? {}, null, 2);
+  app.stateOutputDirty = false;
+  logSlowWork('state JSON render', startedAt);
+}
+
+function scheduleStateOutputRender() {
+  if (!isStateOutputVisible() || app.stateOutputRenderHandle)
+    return;
+  app.stateOutputRenderHandle = scheduleIdleWork(() => {
+    app.stateOutputRenderHandle = null;
+    if (app.stateOutputDirty && isStateOutputVisible())
+      renderStateOutputNow();
+  }, 120);
+}
+
+function updateStateOutput() {
+  /*
+   * The producer state can grow with per-wallpaper property payloads. Keep the
+   * developer JSON accurate without serializing and painting a large hidden
+   * <pre> on every startup, project refresh, or property edit.
+   */
+  app.stateOutputDirty = true;
+  scheduleStateOutputRender();
 }
 
 function cloneJson(value) {
@@ -1987,7 +2058,7 @@ async function openProjectSettings(project) {
     dom.inspector.scrollIntoView({block: 'start'});
 }
 
-function projectSearchText(project) {
+function buildProjectSearchText(project) {
   return [
     project.title,
     project.basename,
@@ -1997,7 +2068,25 @@ function projectSearchText(project) {
   ].join(' ').toLowerCase();
 }
 
-function renderFilterGroup(title, group, values) {
+function prepareProjects(projects = []) {
+  const prepared = [];
+  app.projectByPath = new Map();
+  for (const project of projects) {
+    const item = {
+      ...project,
+      searchText: buildProjectSearchText(project),
+    };
+    prepared.push(item);
+    app.projectByPath.set(item.path, item);
+  }
+  return prepared;
+}
+
+function projectByPath(path) {
+  return app.projectByPath.get(path) ?? null;
+}
+
+function renderFilterGroup(title, group, values, state) {
   const details = document.createElement('details');
   details.className = 'filter-group';
 
@@ -2006,7 +2095,6 @@ function renderFilterGroup(title, group, values) {
   const options = document.createElement('div');
   options.className = 'filter-options';
 
-  const state = normalizeBrowserFilterState(app.browserFilterState, app.projects);
   for (const value of values) {
     const label = document.createElement('label');
     const control = document.createElement('input');
@@ -2024,9 +2112,10 @@ function renderFilterGroup(title, group, values) {
 
 function renderDynamicFilters() {
   app.browserFilterState = normalizeBrowserFilterState(app.browserFilterState, app.projects);
+  const state = app.browserFilterState;
   dom.dynamicFilters.replaceChildren(
-    renderFilterGroup(t('filter.contentRating'), 'contentrating', contentRatings),
-    renderFilterGroup(t('filter.tags'), 'tags', availableProjectTags(app.projects)),
+    renderFilterGroup(t('filter.contentRating'), 'contentrating', contentRatings, state),
+    renderFilterGroup(t('filter.tags'), 'tags', availableProjectTags(app.projects), state),
   );
 }
 
@@ -2047,7 +2136,7 @@ function syncBrowserControlsFromState() {
 
 function visibleProjects() {
   const query = dom.projectSearch.value.trim().toLowerCase();
-  const filterState = normalizeBrowserFilterState(app.browserFilterState, app.projects);
+  const filterState = app.browserFilterState ?? normalizeBrowserFilterState(app.browserFilterState, app.projects);
   const projects = app.projects.filter(project => {
     if (!filterState.type[project.type])
       return false;
@@ -2055,7 +2144,7 @@ function visibleProjects() {
       return false;
     if (projectFilterTags(project).some(tag => filterState.tags[tag] === false))
       return false;
-    if (query && !projectSearchText(project).includes(query))
+    if (query && !(project.searchText ?? buildProjectSearchText(project)).includes(query))
       return false;
     return true;
   });
@@ -2075,8 +2164,111 @@ function visibleProjects() {
   return projects;
 }
 
+function createProjectCard(project, index) {
+  const card = document.createElement('article');
+  card.className = 'project-card';
+  card.dataset.projectPath = project.path;
+  card.classList.toggle('is-active', app.global['project-path'] === project.path);
+  card.title = project.path;
+
+  const selectButton = document.createElement('button');
+  selectButton.type = 'button';
+  selectButton.className = 'project-select-button';
+
+  const thumb = document.createElement('div');
+  thumb.className = 'project-thumb';
+  if (project.previewPath) {
+    const image = document.createElement('img');
+    image.alt = '';
+    image.loading = index < 12 ? 'eager' : 'lazy';
+    image.decoding = 'async';
+    image.fetchPriority = index < 12 ? 'high' : 'low';
+    image.src = `/api/thumbnail?path=${encodeURIComponent(project.previewPath)}`;
+    thumb.append(image);
+  } else {
+    const fallback = document.createElement('div');
+    fallback.className = 'project-thumb-fallback';
+    fallback.textContent = formatType(project.type);
+    thumb.append(fallback);
+  }
+
+  const meta = document.createElement('div');
+  meta.className = 'project-meta';
+  const title = document.createElement('div');
+  title.className = 'project-title';
+  title.textContent = project.title || project.basename || t('project.untitled');
+  const subtitle = document.createElement('div');
+  subtitle.className = 'project-subtitle';
+  subtitle.textContent = t('project.subtitle', {
+    type: formatType(project.type),
+    detail: formatProjectDetail(project),
+  });
+  meta.append(title, subtitle);
+
+  const settingsButton = document.createElement('button');
+  settingsButton.type = 'button';
+  settingsButton.className = 'project-settings-button';
+  settingsButton.title = t('action.openWallpaperSettings');
+  settingsButton.setAttribute('aria-label', t('action.openWallpaperSettings'));
+  settingsButton.innerHTML = `
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"></path>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06A2 2 0 1 1 7.04 4.3l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.22.62.8 1 1.51 1H21a2 2 0 1 1 0 4h-.09c-.7 0-1.29.38-1.51 1Z"></path>
+    </svg>
+  `;
+
+  selectButton.append(thumb, meta);
+  card.append(selectButton, settingsButton);
+  return card;
+}
+
+function cancelProjectRender() {
+  cancelIdleWork(app.projectRenderHandle);
+  app.projectRenderHandle = null;
+}
+
+function appendProjectRenderBatch(projects, token, startIndex, startedAt, deadline = null) {
+  if (token !== app.projectRenderToken)
+    return;
+
+  /*
+   * Large Workshop libraries can contain hundreds or thousands of projects. A
+   * single synchronous render makes the browser parse metadata, create images,
+   * attach listeners, and recalculate layout in one long task. Build the first
+   * screen immediately, then let idle slices fill the rest so opening the WebUI
+   * remains responsive while the visual design stays unchanged.
+   */
+  const fragment = document.createDocumentFragment();
+  let index = startIndex;
+  let rendered = 0;
+  const hasIdleBudget = () =>
+    deadline && !deadline.didTimeout && typeof deadline.timeRemaining === 'function' && deadline.timeRemaining() > 4;
+
+  while (index < projects.length) {
+    fragment.append(createProjectCard(projects[index], index));
+    index++;
+    rendered++;
+    if (rendered >= projectRenderBatchSize && !hasIdleBudget())
+      break;
+  }
+
+  dom.projectGrid.append(fragment);
+
+  if (index >= projects.length) {
+    app.projectRenderHandle = null;
+    logSlowWork('project grid render', startedAt, {count: projects.length});
+    return;
+  }
+
+  app.projectRenderHandle = scheduleIdleWork(nextDeadline =>
+    appendProjectRenderBatch(projects, token, index, startedAt, nextDeadline));
+}
+
 function renderProjects() {
+  cancelProjectRender();
+  const startedAt = performance.now();
   const projects = visibleProjects();
+  const token = ++app.projectRenderToken;
   dom.projectGrid.replaceChildren();
   dom.projectCount.textContent = formatWallpaperCount(projects.length);
   dom.projectEmpty.classList.toggle('is-visible', projects.length === 0);
@@ -2084,68 +2276,29 @@ function renderProjects() {
     dom.projectEmpty.textContent = app.global['change-wallpaper-directory-path']
       ? t('empty.noMatches')
       : t('empty.setLibrary');
+    return;
   }
 
-  for (const project of projects) {
-    const card = document.createElement('article');
-    card.className = 'project-card';
-    card.dataset.projectPath = project.path;
-    card.classList.toggle('is-active', app.global['project-path'] === project.path);
-    card.title = project.path;
+  appendProjectRenderBatch(projects, token, 0, startedAt);
+}
 
-    const selectButton = document.createElement('button');
-    selectButton.type = 'button';
-    selectButton.className = 'project-select-button';
-    selectButton.addEventListener('click', () => selectProject(project));
-
-    const thumb = document.createElement('div');
-    thumb.className = 'project-thumb';
-    if (project.previewPath) {
-      const image = document.createElement('img');
-      image.alt = '';
-      image.loading = 'lazy';
-      image.src = `/api/thumbnail?path=${encodeURIComponent(project.previewPath)}`;
-      thumb.append(image);
-    } else {
-      const fallback = document.createElement('div');
-      fallback.className = 'project-thumb-fallback';
-      fallback.textContent = formatType(project.type);
-      thumb.append(fallback);
-    }
-
-    const meta = document.createElement('div');
-    meta.className = 'project-meta';
-    const title = document.createElement('div');
-    title.className = 'project-title';
-    title.textContent = project.title || project.basename || t('project.untitled');
-    const subtitle = document.createElement('div');
-    subtitle.className = 'project-subtitle';
-    subtitle.textContent = t('project.subtitle', {
-      type: formatType(project.type),
-      detail: formatProjectDetail(project),
-    });
-    meta.append(title, subtitle);
-
-    const settingsButton = document.createElement('button');
-    settingsButton.type = 'button';
-    settingsButton.className = 'project-settings-button';
-    settingsButton.title = t('action.openWallpaperSettings');
-    settingsButton.setAttribute('aria-label', t('action.openWallpaperSettings'));
-    settingsButton.innerHTML = `
-      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"></path>
-        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06A2 2 0 1 1 7.04 4.3l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.22.62.8 1 1.51 1H21a2 2 0 1 1 0 4h-.09c-.7 0-1.29.38-1.51 1Z"></path>
-      </svg>
-    `;
-    settingsButton.addEventListener('click', event => {
-      event.stopPropagation();
-      openProjectSettings(project);
-    });
-
-    selectButton.append(thumb, meta);
-    card.append(selectButton, settingsButton);
-    dom.projectGrid.append(card);
+function handleProjectGridClick(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target)
+    return;
+  const card = target.closest('.project-card');
+  if (!card || !dom.projectGrid.contains(card))
+    return;
+  const project = projectByPath(card.dataset.projectPath);
+  if (!project)
+    return;
+  if (target.closest('.project-settings-button')) {
+    event.stopPropagation();
+    openProjectSettings(project);
+    return;
   }
+  if (target.closest('.project-select-button'))
+    selectProject(project);
 }
 
 async function refreshState({projects = false} = {}) {
@@ -2166,13 +2319,26 @@ async function refreshState({projects = false} = {}) {
   }
 }
 
+function projectsRequestPath() {
+  const libraryPath = app.global['change-wallpaper-directory-path'] ?? '';
+  if (!libraryPath)
+    return '/api/projects';
+  const params = new URLSearchParams({
+    libraryPath,
+    includeState: '0',
+  });
+  return `/api/projects?${params}`;
+}
+
 async function refreshProjects() {
   setLocalizedStatus('status.loadingWallpapers', 'working');
   try {
-    const response = await requestJson('/api/projects');
-    app.state = response.state ?? app.state;
-    app.global = app.state.global ?? app.global;
-    app.projects = response.projects ?? [];
+    const response = await requestJson(projectsRequestPath());
+    if (response.state) {
+      app.state = response.state;
+      app.global = app.state.global ?? app.global;
+    }
+    app.projects = prepareProjects(response.projects ?? []);
     app.global['change-wallpaper-directory-path'] = response.libraryPath ?? '';
     applySettingControlValue(
       SETTINGS.find(item => item.key === 'change-wallpaper-directory-path'),
@@ -2180,7 +2346,7 @@ async function refreshProjects() {
     );
     const activePath = app.global['project-path'];
     app.selectedProject = activePath
-      ? app.projects.find(project => project.path === activePath) ?? null
+      ? projectByPath(activePath)
       : null;
     if (app.selectedProject)
       app.selectedOverrides = payloadToOverrides(app.selectedProject, storedPayloadForProject(app.selectedProject));
@@ -2193,7 +2359,7 @@ async function refreshProjects() {
     setLocalizedStatus('status.loadedWallpapers', 'ok', {count: app.projects.length});
   } catch (error) {
     setStatus(error.message, 'error');
-    app.projects = [];
+    app.projects = prepareProjects([]);
     renderProjects();
   }
 }
@@ -2242,6 +2408,8 @@ function installEventHandlers() {
   dom.settingsBackButton?.addEventListener('click', () => showView('browseView'));
   dom.refreshButton.addEventListener('click', () => refreshState({projects: true}));
   dom.inspectorBackButton.addEventListener('click', closeInspectorAndRestoreProject);
+  dom.projectGrid.addEventListener('click', handleProjectGridClick);
+  dom.stateDetails?.addEventListener('toggle', scheduleStateOutputRender);
   wideBrowseQuery.addEventListener('change', updateInspectorPanelState);
   dom.projectSearch.addEventListener('input', renderProjects);
   dom.projectSort.addEventListener('change', () => {

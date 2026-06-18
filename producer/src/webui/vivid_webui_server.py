@@ -535,6 +535,12 @@ def parse_query(path):
     return parsed.path, {key: values[-1] if values else "" for key, values in query.items()}
 
 
+def parse_query_bool(value, default=True):
+    if value is None or value == "":
+        return default
+    return str(value).strip().lower() not in ("0", "false", "no", "off")
+
+
 def validate_remote_image_url(url):
     try:
         parsed = urllib.parse.urlsplit(url)
@@ -653,20 +659,27 @@ class VividWebUIHandler(BaseHTTPRequestHandler):
 
         if request_path == "/api/projects":
             try:
-                control, state = self._producer_state()
+                include_state = parse_query_bool(query.get("includeState"), True)
+                requested_library_path = query.get("libraryPath", "")
+                if include_state or not requested_library_path:
+                    control, state = self._producer_state()
+                else:
+                    control, state = None, {}
                 global_config = state.get("global", {}) if isinstance(state, dict) else {}
-                library_path = query.get("libraryPath") or global_config.get("change-wallpaper-directory-path", "")
+                library_path = requested_library_path or global_config.get("change-wallpaper-directory-path", "")
                 normalized_library_path = normalize_library_root_path(library_path)
                 projects = list_projects(normalized_library_path) if normalized_library_path else []
-                self._send_json(200, {
+                payload = {
                     "ok": True,
                     "libraryPath": normalized_library_path,
                     "roots": wallpaper_engine_project_roots(normalized_library_path),
                     "projects": projects,
-                    "state": state,
-                    "control": control,
                     "timestamp": int(time.time()),
-                })
+                }
+                if include_state:
+                    payload["state"] = state
+                    payload["control"] = control
+                self._send_json(200, payload)
             except Exception as error:
                 self._send_json(502, {"ok": False, "error": str(error)})
             return
