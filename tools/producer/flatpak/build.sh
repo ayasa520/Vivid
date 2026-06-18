@@ -198,8 +198,10 @@ fi
 
 flatpak-builder "$@"
 
+echo "==> Building Flatpak bundle: ${BUNDLE}"
 flatpak build-bundle \
     "${REPO_DIR}" \
     "${BUNDLE}" \
     "${VIVID_PRODUCER_APP_ID}" \
     "${BUNDLE_BRANCH}"
+echo "==> Flatpak bundle written: ${BUNDLE}"
