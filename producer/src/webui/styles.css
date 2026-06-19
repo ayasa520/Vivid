@@ -92,10 +92,6 @@
                inset -1px -1px 1px -0.5px rgba(255, 255, 255, 0.14),
                inset 0 0 10px rgba(255, 255, 255, 0.6);
 
-  /* Frosted glass filters */
-  --glass-1: blur(20px) saturate(180%);
-  --glass-2: blur(30px) saturate(180%);
-
   /* Layout */
   --page-max-width: 1560px;
   --topbar-height: 64px;
@@ -592,8 +588,6 @@ h2 {
   border-radius: var(--radius);
   background: var(--content);
   box-shadow: var(--edge-glow), var(--shadow-2);
-  backdrop-filter: var(--glass-1);
-  -webkit-backdrop-filter: var(--glass-1);
 }
 
 /* ---- Left zone: brand + back button ---- */
@@ -694,8 +688,6 @@ h2 {
   border-radius: var(--radius);
   background: var(--elevated-solid);
   box-shadow: var(--shadow-3);
-  backdrop-filter: var(--glass-1);
-  -webkit-backdrop-filter: var(--glass-1);
   padding: 12px;
 }
 .filter-dropdown.is-open { display: block; }
@@ -810,8 +802,6 @@ h2 {
   border-radius: var(--radius);
   background: var(--content);
   box-shadow: var(--edge-glow), var(--shadow-3);
-  backdrop-filter: var(--glass-1);
-  -webkit-backdrop-filter: var(--glass-1);
 }
 
 .project-column {
@@ -1763,8 +1753,6 @@ pre {
   border-radius: var(--radius);
   background: var(--elevated-solid);
   box-shadow: var(--shadow-3);
-  backdrop-filter: var(--glass-1);
-  -webkit-backdrop-filter: var(--glass-1);
   opacity: 0;
   transform: translateY(-4px) scale(0.96);
   pointer-events: none;

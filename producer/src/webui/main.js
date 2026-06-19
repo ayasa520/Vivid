@@ -2411,7 +2411,17 @@ function installEventHandlers() {
   dom.projectGrid.addEventListener('click', handleProjectGridClick);
   dom.stateDetails?.addEventListener('toggle', scheduleStateOutputRender);
   wideBrowseQuery.addEventListener('change', updateInspectorPanelState);
-  dom.projectSearch.addEventListener('input', renderProjects);
+  let searchRenderTimer = 0;
+  dom.projectSearch.addEventListener('input', () => {
+    window.clearTimeout(searchRenderTimer);
+    // Empty queries reset immediately; typing is debounced so each keystroke
+    // doesn't filter+sort the whole library and rebuild the grid.
+    if (!dom.projectSearch.value.trim()) {
+      renderProjects();
+      return;
+    }
+    searchRenderTimer = window.setTimeout(renderProjects, 160);
+  });
   dom.projectSort.addEventListener('change', () => {
     renderProjects();
     persistBrowserSortKey();
