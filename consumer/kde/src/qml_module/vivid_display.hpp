@@ -17,6 +17,7 @@
 #include <QString>
 #include <QTimer>
 #include <QVector>
+#include <QVulkanInstance>
 #include <qqml.h>
 
 #include <EGL/egl.h>
@@ -200,6 +201,7 @@ private:
         quint64 releaseAttachedUsec { 0 };
         ww_vk_imported_image_t vkImage {};
         bool hasVkImage { false };
+        VkSemaphore acquireSemaphore { VK_NULL_HANDLE };
     };
 
     struct Generation {
@@ -234,6 +236,17 @@ private:
         qreal scale { 1.0 };
         int physicalWidth { 1 };
         int physicalHeight { 1 };
+    };
+
+    struct PendingVulkanFrame {
+        bool valid { false };
+        quint64 generation { 0 };
+        quint32 bufferIndex { 0 };
+        VkSemaphore acquireSemaphore { VK_NULL_HANDLE };
+        QString renderNode;
+        int releaseSyncobjFd { -1 };
+        QString releaseSyncContext;
+        quint64 releaseAttachedUsec { 0 };
     };
 
     QString effectiveSocketPath() const;
@@ -287,6 +300,7 @@ private:
                                      Buffer&     buffer,
                                      const QString& reason);
     void flushPendingReleaseSyncobj(const QString& reason);
+    void signalPendingVulkanFrame(const QString& reason);
 
     void setConnState(ConnState state);
     void setStreamState(StreamState state);
@@ -347,6 +361,7 @@ private:
     VkQueue m_vkQueue { VK_NULL_HANDLE };
     quint32 m_vkQueueFamilyIndex { 0 };
     ww_vk_get_instance_proc_addr_fn m_vkGetInstanceProcAddr { nullptr };
+    PendingVulkanFrame m_pendingVulkanFrame;
     quint64 m_currentGeneration { 0 };
     quint32 m_currentBuffer { 0 };
     QRectF m_sourceRect;

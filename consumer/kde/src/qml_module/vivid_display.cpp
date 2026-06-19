@@ -21,10 +21,12 @@
 #include <QMouseEvent>
 #include <QOpenGLContext>
 #include <QOpenGLExtraFunctions>
+#include <QQuickGraphicsConfiguration>
 #include <QQuickWindow>
 #include <QSGRendererInterface>
 #include <QSGSimpleTextureNode>
 #include <QSGTransformNode>
+#include <QVulkanInstance>
 #include <QWheelEvent>
 #include <QtGui/qopenglcontext_platform.h>
 #include <QtQuick/qsgtexture_platform.h>
@@ -63,6 +65,91 @@ namespace
 {
 constexpr quint64 DrmFormatModInvalid = (1ull << 56) - 1ull;
 constexpr quint64 DrmFormatModLinear = 0;
+
+constexpr const char BackendKdeEgl[] = "kde-qt6-egl-gl-texture-2d";
+constexpr const char BackendKdeVulkan[] = "kde-qt6-vulkan-shadow-image";
+constexpr const char BackendKdeUnsupported[] = "kde-qt6-unsupported";
+constexpr const char RendererQt6Egl[] = "qt6-egl-image";
+constexpr const char RendererQt6VulkanShadow[] = "qt6-vulkan-shadow-image";
+constexpr const char RendererNone[] = "none";
+constexpr const char RelayDirectImport[] = "direct-import-v1";
+constexpr const char RelayShadowCopy[] = "shadow-copy-v1";
+constexpr const char MemoryHostVisible[] = "host-visible";
+constexpr const char MemoryDeviceLocal[] = "device-local";
+constexpr const char MemoryImplicitLinear[] = "implicit-linear";
+constexpr const char SyncImplicit[] = "implicit";
+constexpr const char SyncExplicitFd[] = "explicit-sync-fd";
+constexpr const char SyncDrmSyncobjRelease[] = "drm-syncobj-release";
+constexpr const char ColorSrgb[] = "srgb";
+constexpr const char ColorLimitedRange[] = "limited-range";
+constexpr const char ColorPremultipliedAlpha[] = "premultiplied-alpha";
+constexpr const char TextureTargetGl2D[] = "GL_TEXTURE_2D";
+constexpr const char TextureTargetVulkanShadow[] = "QSGVulkanTextureShadowVkImage";
+constexpr const char FeatureDmaBufShadowCopy[] = "dmabuf-shadow-copy-v1";
+
+constexpr const char* VulkanDeviceExtensions[] = {
+    "VK_KHR_external_memory",
+    "VK_KHR_external_memory_fd",
+    "VK_EXT_external_memory_dma_buf",
+    "VK_EXT_queue_family_foreign",
+    "VK_EXT_image_drm_format_modifier",
+    "VK_KHR_external_semaphore",
+    "VK_KHR_external_semaphore_fd",
+};
+
+QJsonArray jsonStringArray(std::initializer_list<const char*> values)
+{
+    QJsonArray array;
+    for (const char* value : values)
+        array.append(QString::fromLatin1(value));
+    return array;
+}
+
+QJsonArray eglRelayModes()
+{
+    return jsonStringArray({ RelayDirectImport, RelayShadowCopy });
+}
+
+QJsonArray shadowCopyRelayModes()
+{
+    return jsonStringArray({ RelayShadowCopy });
+}
+
+QJsonArray syncCaps()
+{
+    return jsonStringArray({ SyncImplicit, SyncExplicitFd, SyncDrmSyncobjRelease });
+}
+
+QJsonArray colorCaps()
+{
+    return jsonStringArray({ ColorSrgb, ColorLimitedRange, ColorPremultipliedAlpha });
+}
+
+QJsonArray hostVisibleMemoryHints()
+{
+    return jsonStringArray({ MemoryHostVisible });
+}
+
+QJsonArray legacyBufferImportFourccNames()
+{
+    return jsonStringArray({ "XRGB8888", "ARGB8888", "XBGR8888", "ABGR8888" });
+}
+
+QJsonObject unlimitedExtentCaps()
+{
+    return QJsonObject {
+        { QStringLiteral("width"), 0 },
+        { QStringLiteral("height"), 0 },
+    };
+}
+
+QList<QByteArray> vulkanDeviceExtensionNames()
+{
+    QList<QByteArray> extensions;
+    for (const char* extension : VulkanDeviceExtensions)
+        extensions.append(QByteArray(extension));
+    return extensions;
+}
 
 quint64 monotonicUsec()
 {
@@ -288,6 +375,19 @@ bool signalReleaseSyncobj(const QString& renderNode, int syncobjFd, const QStrin
     return true;
 }
 
+struct VulkanReleaseSignalContext {
+    QString renderNode;
+    QString context;
+};
+
+int signalReleaseSyncobjFromVulkanBlit(int releaseSyncobjFd, void* userData)
+{
+    auto* context = static_cast<VulkanReleaseSignalContext*>(userData);
+    if (!context)
+        return -EINVAL;
+    return signalReleaseSyncobj(context->renderNode, releaseSyncobjFd, context->context) ? 0 : -EIO;
+}
+
 quint64 jsonUInt64(const QJsonValue& value, quint64 fallback = 0)
 {
     if (value.isString()) {
@@ -458,6 +558,15 @@ QJsonObject dmabufModifierEntry(quint32 fourcc, quint64 modifier, quint32 planeC
         { QStringLiteral("modifier"), QString::number(modifier) },
         { QStringLiteral("planeCount"), static_cast<int>(planeCount) },
     };
+}
+
+const char* sceneGraphApiName(QSGRendererInterface::GraphicsApi api)
+{
+    if (api == QSGRendererInterface::OpenGL)
+        return "OpenGL";
+    if (api == QSGRendererInterface::Vulkan)
+        return "Vulkan";
+    return "Other";
 }
 
 QString jsonStringMember(const QJsonObject& object,
@@ -1088,7 +1197,7 @@ bool appendSmokeTestedLinearFallbackCaps(EGLDisplay eglDisplay,
     return appended;
 }
 
-QJsonObject buildDmaBufCaps(EGLDisplay eglDisplay)
+QJsonObject buildEglDmaBufCaps(EGLDisplay eglDisplay)
 {
     const GpuIdentity identity = currentPlasmaGpuIdentity(eglDisplay);
     const auto queryFormats = resolveEglProc<EglQueryDmaBufFormatsExt>(
@@ -1185,9 +1294,9 @@ QJsonObject buildDmaBufCaps(EGLDisplay eglDisplay)
         }
     }
 
-    QJsonArray memoryHints { QStringLiteral("host-visible") };
+    QJsonArray memoryHints = hostVisibleMemoryHints();
     if (!implicitLinearFourccs.isEmpty())
-        memoryHints.append(QStringLiteral("implicit-linear"));
+        memoryHints.append(QString::fromLatin1(MemoryImplicitLinear));
     if (fourccs.isEmpty()) {
         const bool fallbackAdded =
             appendSmokeTestedLinearFallbackCaps(eglDisplay,
@@ -1211,13 +1320,9 @@ QJsonObject buildDmaBufCaps(EGLDisplay eglDisplay)
 
     return QJsonObject {
         { QStringLiteral("version"), 3 },
-        { QStringLiteral("backend"), QStringLiteral("kde-qt6-egl-gl-texture-2d") },
+        { QStringLiteral("backend"), QString::fromLatin1(BackendKdeEgl) },
         { QStringLiteral("probe"), probeMode },
-        { QStringLiteral("relayModes"),
-          QJsonArray {
-              QStringLiteral("direct-import-v1"),
-              QStringLiteral("shadow-copy-v1"),
-          } },
+        { QStringLiteral("relayModes"), eglRelayModes() },
         { QStringLiteral("renderNode"), identity.renderNode },
         { QStringLiteral("deviceUuid"), identity.deviceUuid },
         { QStringLiteral("driverUuid"), identity.driverUuid },
@@ -1227,26 +1332,147 @@ QJsonObject buildDmaBufCaps(EGLDisplay eglDisplay)
         { QStringLiteral("modifiers"), modifiers },
         { QStringLiteral("implicitLinearFourccs"), implicitLinearFourccs },
         { QStringLiteral("memoryHints"), memoryHints },
-        { QStringLiteral("syncCaps"),
-          QJsonArray {
-              QStringLiteral("implicit"),
-              QStringLiteral("explicit-sync-fd"),
-              QStringLiteral("drm-syncobj-release"),
-          } },
-        { QStringLiteral("colorCaps"),
-          QJsonArray {
-              QStringLiteral("srgb"),
-              QStringLiteral("limited-range"),
-              QStringLiteral("premultiplied-alpha"),
-          } },
-        { QStringLiteral("extentMax"),
-          QJsonObject {
-              { QStringLiteral("width"), 0 },
-              { QStringLiteral("height"), 0 },
-          } },
-        { QStringLiteral("textureTarget"), QStringLiteral("GL_TEXTURE_2D") },
+        { QStringLiteral("syncCaps"), syncCaps() },
+        { QStringLiteral("colorCaps"), colorCaps() },
+        { QStringLiteral("extentMax"), unlimitedExtentCaps() },
+        { QStringLiteral("textureTarget"), QString::fromLatin1(TextureTargetGl2D) },
         { QStringLiteral("skipsExternalOnlyModifiers"), true },
         { QStringLiteral("diagnostics"), probeDiagnostics },
+    };
+}
+
+struct VulkanCapsAccumulator {
+    QJsonArray fourccs;
+    QJsonArray modifiers;
+};
+
+void appendVulkanModifierCap(uint32_t fourcc, uint64_t modifier, uint32_t planeCount, void* userData)
+{
+    auto* caps = static_cast<VulkanCapsAccumulator*>(userData);
+    if (!caps)
+        return;
+    appendFourccOnce(caps->fourccs, fourcc);
+    caps->modifiers.append(dmabufModifierEntry(fourcc, modifier, planeCount));
+}
+
+QJsonObject buildEmptyVulkanDmaBufCaps(const QString& diagnostics)
+{
+    return QJsonObject {
+        { QStringLiteral("version"), 3 },
+        { QStringLiteral("backend"), QString::fromLatin1(BackendKdeVulkan) },
+        { QStringLiteral("probe"), QStringLiteral("vulkan-unavailable") },
+        { QStringLiteral("relayModes"), shadowCopyRelayModes() },
+        { QStringLiteral("fourccs"), QJsonArray {} },
+        { QStringLiteral("modifiers"), QJsonArray {} },
+        { QStringLiteral("implicitLinearFourccs"), QJsonArray {} },
+        { QStringLiteral("memoryHints"), hostVisibleMemoryHints() },
+        { QStringLiteral("syncCaps"), syncCaps() },
+        { QStringLiteral("colorCaps"), colorCaps() },
+        { QStringLiteral("extentMax"), unlimitedExtentCaps() },
+        { QStringLiteral("textureTarget"), QString::fromLatin1(TextureTargetVulkanShadow) },
+        { QStringLiteral("diagnostics"), diagnostics },
+    };
+}
+
+QJsonObject buildUnsupportedDmaBufCaps(const QString& diagnostics)
+{
+    return QJsonObject {
+        { QStringLiteral("version"), 3 },
+        { QStringLiteral("backend"), QString::fromLatin1(BackendKdeUnsupported) },
+        { QStringLiteral("probe"), QStringLiteral("unsupported-scene-graph") },
+        { QStringLiteral("relayModes"), QJsonArray {} },
+        { QStringLiteral("fourccs"), QJsonArray {} },
+        { QStringLiteral("modifiers"), QJsonArray {} },
+        { QStringLiteral("implicitLinearFourccs"), QJsonArray {} },
+        { QStringLiteral("memoryHints"), QJsonArray {} },
+        { QStringLiteral("syncCaps"), syncCaps() },
+        { QStringLiteral("colorCaps"), colorCaps() },
+        { QStringLiteral("extentMax"), unlimitedExtentCaps() },
+        { QStringLiteral("textureTarget"), QStringLiteral("none") },
+        { QStringLiteral("diagnostics"), diagnostics },
+    };
+}
+
+QJsonObject buildVulkanDmaBufCaps(const ww_vk_backend_t* backend)
+{
+    if (!backend || !backend->loaded) {
+        return buildEmptyVulkanDmaBufCaps(
+            QStringLiteral("Qt scene graph selected Vulkan but Vivid could not bind the Qt Vulkan backend; refusing to advertise EGL caps for a Vulkan scene graph."));
+    }
+
+    VulkanCapsAccumulator caps;
+    QString diagnostics;
+    const quint32 wantFeatures =
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+    const int capsRc = ww_vk_query_format_caps(backend,
+                                               wantFeatures,
+                                               appendVulkanModifierCap,
+                                               &caps);
+    QString probe = QStringLiteral("vulkan-query");
+    if (capsRc != 0) {
+        probe = QStringLiteral("vulkan-query-failed");
+        diagnostics += QStringLiteral(" ww_vk_query_format_caps failed rc=%1;").arg(capsRc);
+    } else if (caps.modifiers.isEmpty()) {
+        probe = QStringLiteral("vulkan-query-empty");
+        diagnostics += QStringLiteral(" Vulkan probe returned no importable RGBA modifier tuples;");
+    }
+
+    quint8 deviceUuid[16] = {};
+    quint8 driverUuid[16] = {};
+    QString deviceUuidText;
+    QString driverUuidText;
+    const int uuidRc = ww_vk_query_device_uuid(backend, deviceUuid, driverUuid);
+    if (uuidRc == 0) {
+        deviceUuidText = uuidBytesToHex(deviceUuid);
+        driverUuidText = uuidBytesToHex(driverUuid);
+    } else {
+        diagnostics += QStringLiteral(" ww_vk_query_device_uuid failed rc=%1;").arg(uuidRc);
+    }
+
+    quint32 renderMajor = 0;
+    quint32 renderMinor = 0;
+    QString renderNode;
+    const int drmRc = ww_vk_query_drm_render_node(backend, &renderMajor, &renderMinor);
+    if (drmRc == 0) {
+        renderNode = renderNodeForDrmIds(renderMajor, renderMinor);
+        if (renderNode.isEmpty()) {
+            diagnostics += QStringLiteral(" Vulkan DRM identity %1:%2 did not map to a render node;")
+                               .arg(renderMajor)
+                               .arg(renderMinor);
+        }
+    } else {
+        diagnostics += QStringLiteral(" ww_vk_query_drm_render_node failed rc=%1;").arg(drmRc);
+    }
+
+    QJsonArray memoryHints = hostVisibleMemoryHints();
+    int hasDeviceLocal = 0;
+    const int deviceLocalRc = ww_vk_query_supports_device_local(backend, &hasDeviceLocal);
+    if (deviceLocalRc == 0 && hasDeviceLocal != 0) {
+        memoryHints.append(QString::fromLatin1(MemoryDeviceLocal));
+    } else if (deviceLocalRc != 0) {
+        diagnostics += QStringLiteral(" ww_vk_query_supports_device_local failed rc=%1;")
+                           .arg(deviceLocalRc);
+    }
+
+    return QJsonObject {
+        { QStringLiteral("version"), 3 },
+        { QStringLiteral("backend"), QString::fromLatin1(BackendKdeVulkan) },
+        { QStringLiteral("probe"), probe },
+        { QStringLiteral("relayModes"), shadowCopyRelayModes() },
+        { QStringLiteral("renderNode"), renderNode },
+        { QStringLiteral("deviceUuid"), deviceUuidText },
+        { QStringLiteral("driverUuid"), driverUuidText },
+        { QStringLiteral("drmRenderMajor"), static_cast<int>(renderMajor) },
+        { QStringLiteral("drmRenderMinor"), static_cast<int>(renderMinor) },
+        { QStringLiteral("fourccs"), caps.fourccs },
+        { QStringLiteral("modifiers"), caps.modifiers },
+        { QStringLiteral("implicitLinearFourccs"), QJsonArray {} },
+        { QStringLiteral("memoryHints"), memoryHints },
+        { QStringLiteral("syncCaps"), syncCaps() },
+        { QStringLiteral("colorCaps"), colorCaps() },
+        { QStringLiteral("extentMax"), unlimitedExtentCaps() },
+        { QStringLiteral("textureTarget"), QString::fromLatin1(TextureTargetVulkanShadow) },
+        { QStringLiteral("diagnostics"), diagnostics },
     };
 }
 
@@ -1302,7 +1528,8 @@ VividDisplay::VividDisplay(QQuickItem* parent): QQuickItem(parent)
 VividDisplay::~VividDisplay()
 {
     closeTransport(false);
-    clearGenerations(QOpenGLContext::currentContext() != nullptr);
+    clearGenerations(QOpenGLContext::currentContext() != nullptr || m_vkBackendReady);
+    shutdownVulkanBackend();
 }
 
 void VividDisplay::componentComplete()
@@ -1586,11 +1813,179 @@ void VividDisplay::armSceneGraphReadyConnection()
     if (!currentWindow || currentWindow->isSceneGraphInitialized())
         return;
 
+    auto config = currentWindow->graphicsConfiguration();
+    const QList<QByteArray> extensions = vulkanDeviceExtensionNames();
+    config.setDeviceExtensions(extensions);
+    currentWindow->setGraphicsConfiguration(config);
+
     connect(currentWindow,
             &QQuickWindow::sceneGraphInitialized,
             this,
             &VividDisplay::onSceneGraphInitialized,
             Qt::UniqueConnection);
+}
+
+void VividDisplay::configureSceneGraphForProtocol()
+{
+    QQuickWindow* currentWindow = window();
+    auto* rendererInterface = currentWindow ? currentWindow->rendererInterface() : nullptr;
+    if (!currentWindow || !rendererInterface || !currentWindow->isSceneGraphInitialized()) {
+        m_activeBackend = BackendNone;
+        qCWarning(lcWallpaperKde, "scene graph is not ready for protocol backend selection");
+        return;
+    }
+
+    const QSGRendererInterface::GraphicsApi api = rendererInterface->graphicsApi();
+    if (api == QSGRendererInterface::OpenGL) {
+        const ActiveBackend previousBackend = m_activeBackend;
+        if (m_activeBackend == BackendVulkan)
+            shutdownVulkanBackend();
+        m_activeBackend = BackendEgl;
+        if (previousBackend != m_activeBackend) {
+            qCInfo(lcWallpaperKde,
+                   "Qt scene graph api=%s selected Vivid backend=BackendEgl",
+                   sceneGraphApiName(api));
+        }
+        return;
+    }
+
+    if (api == QSGRendererInterface::Vulkan) {
+        const ActiveBackend previousBackend = m_activeBackend;
+        m_activeBackend = bindVulkanBackend() ? BackendVulkan : BackendNone;
+        if (previousBackend != m_activeBackend) {
+            qCInfo(lcWallpaperKde,
+                   "Qt scene graph api=%s selected Vivid backend=%s",
+                   sceneGraphApiName(api),
+                   m_activeBackend == BackendVulkan ? "BackendVulkan" : "BackendNone");
+        }
+        return;
+    }
+
+    if (m_activeBackend == BackendVulkan)
+        shutdownVulkanBackend();
+    m_activeBackend = BackendNone;
+    qCWarning(lcWallpaperKde,
+              "Qt scene graph api=%s has no Vivid DMA-BUF backend",
+              sceneGraphApiName(api));
+}
+
+bool VividDisplay::bindVulkanBackend()
+{
+    if (m_vkBackendReady)
+        return true;
+
+    QQuickWindow* currentWindow = window();
+    auto* qvkInstance = currentWindow ? currentWindow->vulkanInstance() : nullptr;
+    auto* rendererInterface = currentWindow ? currentWindow->rendererInterface() : nullptr;
+    if (!currentWindow || !rendererInterface || !qvkInstance || !qvkInstance->isValid()) {
+        qCWarning(lcWallpaperKde, "Vulkan backend bind failed: Qt Vulkan instance is unavailable");
+        return false;
+    }
+
+    auto* physicalDevice = static_cast<VkPhysicalDevice*>(
+        rendererInterface->getResource(currentWindow,
+                                       QSGRendererInterface::PhysicalDeviceResource));
+    auto* device = static_cast<VkDevice*>(
+        rendererInterface->getResource(currentWindow, QSGRendererInterface::DeviceResource));
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+    auto* queueFamily = static_cast<uint32_t*>(
+        rendererInterface->getResource(currentWindow,
+                                       QSGRendererInterface::GraphicsQueueFamilyIndexResource));
+#else
+    uint32_t fallbackQueueFamily = 0;
+    auto* queueFamily = &fallbackQueueFamily;
+#endif
+    auto* queue = static_cast<VkQueue*>(
+        rendererInterface->getResource(currentWindow,
+                                       QSGRendererInterface::CommandQueueResource));
+    if (!physicalDevice || !*physicalDevice || !device || !*device) {
+        qCWarning(lcWallpaperKde,
+                  "Vulkan backend bind failed: missing Qt render resources phys=%p device=%p",
+                  physicalDevice ? reinterpret_cast<void*>(*physicalDevice) : nullptr,
+                  device ? reinterpret_cast<void*>(*device) : nullptr);
+        return false;
+    }
+
+    const VkInstance instance = qvkInstance->vkInstance();
+    const VkPhysicalDevice vkPhysicalDevice = *physicalDevice;
+    const VkDevice vkDevice = *device;
+    const uint32_t vkQueueFamilyIndex = queueFamily ? *queueFamily : 0;
+    VkQueue vkQueue = queue ? *queue : VK_NULL_HANDLE;
+    auto getInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+        qvkInstance->getInstanceProcAddr("vkGetInstanceProcAddr"));
+    if (!getInstanceProcAddr) {
+        qCWarning(lcWallpaperKde, "Vulkan backend bind failed: vkGetInstanceProcAddr unavailable");
+        return false;
+    }
+    if (vkQueue == VK_NULL_HANDLE) {
+        /*
+         * Keep this fallback aligned with waywallen's KDE Vulkan route:
+         * when Qt does not expose CommandQueueResource, use queue 0 from
+         * the graphics family returned by Qt. The warning is intentional
+         * because correct ordering still depends on Qt submitting through
+         * that same queue.
+         */
+        auto getDeviceQueue = reinterpret_cast<PFN_vkGetDeviceQueue>(
+            getInstanceProcAddr(instance, "vkGetDeviceQueue"));
+        if (getDeviceQueue) {
+            getDeviceQueue(vkDevice, vkQueueFamilyIndex, 0, &vkQueue);
+            qCWarning(lcWallpaperKde,
+                      "Qt CommandQueueResource is unavailable; using vkGetDeviceQueue family=%u index=0, which assumes Qt submits on the same queue",
+                      vkQueueFamilyIndex);
+        }
+    }
+    if (vkQueue == VK_NULL_HANDLE) {
+        qCWarning(lcWallpaperKde, "Vulkan backend bind failed: no VkQueue available");
+        return false;
+    }
+
+    const int rc = ww_vk_backend_load(&m_vkBackend,
+                                      instance,
+                                      vkPhysicalDevice,
+                                      vkDevice,
+                                      vkQueueFamilyIndex,
+                                      reinterpret_cast<ww_vk_get_instance_proc_addr_fn>(
+                                          getInstanceProcAddr),
+                                      false);
+    if (rc != 0) {
+        qCWarning(lcWallpaperKde, "Vulkan backend bind failed: ww_vk_backend_load rc=%d", rc);
+        return false;
+    }
+
+    m_vkInstance = instance;
+    m_vkPhysicalDevice = vkPhysicalDevice;
+    m_vkDevice = vkDevice;
+    m_vkQueue = vkQueue;
+    m_vkQueueFamilyIndex = vkQueueFamilyIndex;
+    m_vkGetInstanceProcAddr =
+        reinterpret_cast<ww_vk_get_instance_proc_addr_fn>(getInstanceProcAddr);
+    m_vkBackendReady = true;
+    qCDebug(lcWallpaperKde,
+            "Vulkan backend bound instance=%p physical=%p device=%p queue=%p queue-family=%u",
+            reinterpret_cast<void*>(m_vkInstance),
+            reinterpret_cast<void*>(m_vkPhysicalDevice),
+            reinterpret_cast<void*>(m_vkDevice),
+            reinterpret_cast<void*>(m_vkQueue),
+            m_vkQueueFamilyIndex);
+    return true;
+}
+
+void VividDisplay::shutdownVulkanBackend()
+{
+    if (m_vkBlitterReady) {
+        ww_vk_blitter_shutdown(&m_vkBlitter);
+        m_vkBlitterReady = false;
+    }
+    if (m_vkBackendReady) {
+        ww_vk_backend_unload(&m_vkBackend);
+        m_vkBackendReady = false;
+    }
+    m_vkInstance = VK_NULL_HANDLE;
+    m_vkPhysicalDevice = VK_NULL_HANDLE;
+    m_vkDevice = VK_NULL_HANDLE;
+    m_vkQueue = VK_NULL_HANDLE;
+    m_vkQueueFamilyIndex = 0;
+    m_vkGetInstanceProcAddr = nullptr;
 }
 
 void VividDisplay::scheduleReconnect(int delayMs)
@@ -1622,6 +2017,7 @@ void VividDisplay::tryConnect()
     }
     if (m_fd >= 0 || m_connecting)
         return;
+    configureSceneGraphForProtocol();
 
     const QString path = effectiveSocketPath();
     const QByteArray nativePath = QFile::encodeName(path);
@@ -1714,10 +2110,13 @@ void VividDisplay::closeTransport(bool keepLastFrame)
         emit outputIdChanged();
     }
 
+    signalPendingVulkanFrame(QStringLiteral("transport-close"));
+
     if (!keepLastFrame) {
         m_currentGeneration = 0;
         m_currentBuffer = 0;
-        clearGenerations(QOpenGLContext::currentContext() != nullptr);
+        clearGenerations(QOpenGLContext::currentContext() != nullptr || m_vkBackendReady);
+        shutdownVulkanBackend();
         update();
     }
 
@@ -1794,7 +2193,7 @@ void VividDisplay::sendHello()
                              QStringLiteral("explicit-sync-fd-v1"),
                              QStringLiteral("dmabuf-bind-failed-v1"),
                              QStringLiteral("dmabuf-unbind-done-v1"),
-                             QStringLiteral("dmabuf-shadow-copy-v1"),
+                             QString::fromLatin1(FeatureDmaBufShadowCopy),
                              QStringLiteral("pointer-events-v1"),
                              QStringLiteral("window-state-v1"),
                              QStringLiteral("media-state-v1"),
@@ -1805,16 +2204,32 @@ void VividDisplay::sendHello()
 
 void VividDisplay::sendConsumerCaps()
 {
-    const EGLDisplay eglDisplay = qtWindowEglDisplay(window());
-    const QJsonObject dmabufCaps = buildDmaBufCaps(eglDisplay);
+    QJsonObject dmabufCaps;
+    QString renderer = QString::fromLatin1(RendererQt6Egl);
+    QJsonArray relayModes = eglRelayModes();
+    if (m_activeBackend == BackendVulkan) {
+        dmabufCaps = buildVulkanDmaBufCaps(m_vkBackendReady ? &m_vkBackend : nullptr);
+        renderer = QString::fromLatin1(RendererQt6VulkanShadow);
+        relayModes = shadowCopyRelayModes();
+    } else if (m_activeBackend == BackendEgl) {
+        const EGLDisplay eglDisplay = qtWindowEglDisplay(window());
+        dmabufCaps = buildEglDmaBufCaps(eglDisplay);
+    } else {
+        dmabufCaps = buildUnsupportedDmaBufCaps(
+            QStringLiteral("Qt scene graph did not expose a supported OpenGL or Vulkan backend"));
+        renderer = QString::fromLatin1(RendererNone);
+        relayModes = QJsonArray {};
+    }
     qCInfo(lcWallpaperKde,
-           "sending consumer caps backend=%s probe=%s render-node=%s fourccs=%lld modifiers=%lld implicit-linear=%lld",
+           "sending consumer caps backend=%s probe=%s render-node=%s fourccs=%lld modifiers=%lld implicit-linear=%lld relay-modes=%lld memory-hints=%lld",
            qPrintable(dmabufCaps.value(QStringLiteral("backend")).toString(QStringLiteral("(unknown)"))),
            qPrintable(dmabufCaps.value(QStringLiteral("probe")).toString(QStringLiteral("(unknown)"))),
            qPrintable(dmabufCaps.value(QStringLiteral("renderNode")).toString(QStringLiteral("(unknown)"))),
            static_cast<long long>(dmabufCaps.value(QStringLiteral("fourccs")).toArray().size()),
            static_cast<long long>(dmabufCaps.value(QStringLiteral("modifiers")).toArray().size()),
-           static_cast<long long>(dmabufCaps.value(QStringLiteral("implicitLinearFourccs")).toArray().size()));
+           static_cast<long long>(dmabufCaps.value(QStringLiteral("implicitLinearFourccs")).toArray().size()),
+           static_cast<long long>(dmabufCaps.value(QStringLiteral("relayModes")).toArray().size()),
+           static_cast<long long>(dmabufCaps.value(QStringLiteral("memoryHints")).toArray().size()));
 
     queueJsonFrame(VIVID_DISPLAY_REQ_CONSUMER_CAPS,
                    QJsonObject {
@@ -1822,20 +2237,10 @@ void VividDisplay::sendConsumerCaps()
                          QJsonArray {
                              QJsonObject {
                                  { QStringLiteral("memoryType"), QStringLiteral("dmabuf") },
-                                 { QStringLiteral("renderer"), QStringLiteral("qt6-egl-image") },
-                                 { QStringLiteral("fourcc"),
-                                   QJsonArray {
-                                       QStringLiteral("XRGB8888"),
-                                       QStringLiteral("ARGB8888"),
-                                       QStringLiteral("XBGR8888"),
-                                       QStringLiteral("ABGR8888"),
-                                   } },
+                                 { QStringLiteral("renderer"), renderer },
+                                 { QStringLiteral("fourcc"), legacyBufferImportFourccNames() },
                                  { QStringLiteral("modifiers"), true },
-                                 { QStringLiteral("relayModes"),
-                                   QJsonArray {
-                                       QStringLiteral("direct-import-v1"),
-                                       QStringLiteral("shadow-copy-v1"),
-                                   } },
+                                 { QStringLiteral("relayModes"), relayModes },
                              },
                          } },
                        { QStringLiteral("explicitSync"), true },
@@ -2261,7 +2666,6 @@ void VividDisplay::handleFrameReady(const QByteArray& body, VividDisplayRecvStat
         closeFd(acquireFd);
         closeFd(releaseFd);
     };
-    flushPendingReleaseSyncobj(QStringLiteral("frame-ready"));
     if (acquireFd < 0 || releaseFd < 0) {
         closeFrameFds();
         setLastError(QStringLiteral("FRAME_READY explicit sync fd extraction failed"));
@@ -2305,18 +2709,69 @@ void VividDisplay::handleFrameReady(const QByteArray& body, VividDisplayRecvStat
             .arg(outputId)
             .arg(generation)
             .arg(bufferIndex);
-    if (!waitSyncFile(acquireFd, 1000, syncContext)) {
-        signalReleaseSyncobj(generationState->renderNode, releaseFd, QStringLiteral("acquire-wait-failed"));
-        closeFrameFds();
-        return;
-    }
-    closeFd(acquireFd);
+    if (m_activeBackend == BackendVulkan) {
+        signalPendingVulkanFrame(QStringLiteral("superseded"));
+        if (!m_vkBackendReady) {
+            signalReleaseSyncobj(generationState->renderNode,
+                                 releaseFd,
+                                 QStringLiteral("vulkan-backend-not-ready"));
+            closeFrameFds();
+            return;
+        }
+        if (buffer->acquireSemaphore == VK_NULL_HANDLE) {
+            const VkSemaphoreCreateInfo createInfo {
+                .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+            };
+            const VkResult createResult =
+                m_vkBackend.vkCreateSemaphore(m_vkDevice, &createInfo, nullptr, &buffer->acquireSemaphore);
+            if (createResult != VK_SUCCESS) {
+                setLastError(QStringLiteral("vkCreateSemaphore(acquire) failed result=%1")
+                                 .arg(static_cast<int>(createResult)));
+                signalReleaseSyncobj(generationState->renderNode,
+                                     releaseFd,
+                                     QStringLiteral("acquire-semaphore-create-failed"));
+                closeFrameFds();
+                return;
+            }
+        }
+        const int importRc = ww_vk_import_sync_fd(&m_vkBackend, buffer->acquireSemaphore, acquireFd);
+        if (importRc != 0) {
+            setLastError(QStringLiteral("ww_vk_import_sync_fd failed generation=%1 buffer=%2 rc=%3")
+                             .arg(generation)
+                             .arg(bufferIndex)
+                             .arg(importRc));
+            signalReleaseSyncobj(generationState->renderNode,
+                                 releaseFd,
+                                 QStringLiteral("acquire-sync-import-failed"));
+            closeFrameFds();
+            return;
+        }
+        acquireFd = -1;
+        m_pendingVulkanFrame.valid = true;
+        m_pendingVulkanFrame.generation = generation;
+        m_pendingVulkanFrame.bufferIndex = bufferIndex;
+        m_pendingVulkanFrame.acquireSemaphore = buffer->acquireSemaphore;
+        m_pendingVulkanFrame.renderNode = generationState->renderNode;
+        m_pendingVulkanFrame.releaseSyncobjFd = releaseFd;
+        releaseFd = -1;
+        m_pendingVulkanFrame.releaseSyncContext = syncContext;
+        m_pendingVulkanFrame.releaseAttachedUsec = monotonicUsec();
+    } else {
+        signalPendingReleaseSyncobj(*generationState, *buffer, QStringLiteral("superseded"));
+        if (!waitSyncFile(acquireFd, 1000, syncContext)) {
+            signalReleaseSyncobj(generationState->renderNode, releaseFd, QStringLiteral("acquire-wait-failed"));
+            closeFrameFds();
+            return;
+        }
+        closeFd(acquireFd);
 
-    signalPendingReleaseSyncobj(*generationState, *buffer, QStringLiteral("superseded"));
-    buffer->releaseSyncobjFd = releaseFd;
-    releaseFd = -1;
-    buffer->releaseSyncContext = syncContext;
-    buffer->releaseAttachedUsec = monotonicUsec();
+        buffer->releaseSyncobjFd = releaseFd;
+        releaseFd = -1;
+        buffer->releaseSyncContext = syncContext;
+        buffer->releaseAttachedUsec = monotonicUsec();
+    }
 
     m_currentGeneration = generation;
     m_currentBuffer = bufferIndex;
@@ -2401,6 +2856,9 @@ VividDisplay::Buffer* VividDisplay::findBuffer(Generation* generation, quint32 i
 
 void VividDisplay::retireGeneration(quint64 generation)
 {
+    if (m_pendingVulkanFrame.valid && m_pendingVulkanFrame.generation == generation)
+        signalPendingVulkanFrame(QStringLiteral("generation-retired"));
+
     for (Generation& item : m_generations) {
         if (item.id == generation)
             item.retired = true;
@@ -2409,6 +2867,9 @@ void VividDisplay::retireGeneration(quint64 generation)
 
 void VividDisplay::closeGenerationFds(Generation& generation)
 {
+    if (m_pendingVulkanFrame.valid && m_pendingVulkanFrame.generation == generation.id)
+        signalPendingVulkanFrame(QStringLiteral("generation-close"));
+
     for (Buffer& buffer : generation.buffers) {
         signalPendingReleaseSyncobj(generation, buffer, QStringLiteral("generation-close"));
         for (Plane& plane : buffer.planes) {
@@ -2467,6 +2928,37 @@ void VividDisplay::flushPendingReleaseSyncobj(const QString& reason)
     signalPendingReleaseSyncobj(*generation, *buffer, reason);
 }
 
+void VividDisplay::signalPendingVulkanFrame(const QString& reason)
+{
+    if (!m_pendingVulkanFrame.valid)
+        return;
+
+    if (m_pendingVulkanFrame.releaseSyncobjFd >= 0) {
+        const QString context = m_pendingVulkanFrame.releaseSyncContext.isEmpty()
+            ? reason
+            : QStringLiteral("%1 %2").arg(m_pendingVulkanFrame.releaseSyncContext, reason);
+        signalReleaseSyncobj(m_pendingVulkanFrame.renderNode,
+                             m_pendingVulkanFrame.releaseSyncobjFd,
+                             context);
+        const quint64 ageUsec = m_pendingVulkanFrame.releaseAttachedUsec > 0
+            ? monotonicUsec() - m_pendingVulkanFrame.releaseAttachedUsec
+            : 0;
+        if (ageUsec >= 100000) {
+            qCInfo(lcWallpaperKde,
+                   "Vulkan pending release syncobj signal was slow generation=%llu buffer=%u "
+                   "context=%s reason=%s age=%.2fms",
+                   static_cast<unsigned long long>(m_pendingVulkanFrame.generation),
+                   m_pendingVulkanFrame.bufferIndex,
+                   qPrintable(context),
+                   qPrintable(reason),
+                   static_cast<double>(ageUsec) / 1000.0);
+        }
+        closeFd(m_pendingVulkanFrame.releaseSyncobjFd);
+    }
+
+    m_pendingVulkanFrame = PendingVulkanFrame {};
+}
+
 void VividDisplay::destroyImportedResources(Generation& generation)
 {
     auto* gl = QOpenGLContext::currentContext()
@@ -2494,6 +2986,15 @@ void VividDisplay::destroyImportedResources(Generation& generation)
         if (destroyImage && eglDisplay != EGL_NO_DISPLAY && buffer.eglImage != EGL_NO_IMAGE_KHR) {
             destroyImage(eglDisplay, buffer.eglImage);
             buffer.eglImage = EGL_NO_IMAGE_KHR;
+        }
+        if (buffer.hasVkImage) {
+            ww_vk_destroy_imported_image(&m_vkBackend, &buffer.vkImage);
+            buffer.hasVkImage = false;
+        }
+        if (buffer.acquireSemaphore != VK_NULL_HANDLE && m_vkBackendReady &&
+            m_vkBackend.vkDestroySemaphore) {
+            m_vkBackend.vkDestroySemaphore(m_vkDevice, buffer.acquireSemaphore, nullptr);
+            buffer.acquireSemaphore = VK_NULL_HANDLE;
         }
         buffer.importAttempted = false;
     }
@@ -2663,6 +3164,68 @@ bool VividDisplay::ensureBufferImported(Generation& generation, Buffer& buffer)
     return true;
 }
 
+bool VividDisplay::ensureVulkanBufferImported(Generation& generation, Buffer& buffer)
+{
+    if (buffer.hasVkImage)
+        return true;
+    if (buffer.importAttempted)
+        return false;
+    buffer.importAttempted = true;
+
+    if (!m_vkBackendReady) {
+        setLastError(QStringLiteral("Vulkan backend is not bound"));
+        return false;
+    }
+    if (generation.planesPerBuffer == 0 || generation.planesPerBuffer > WW_VK_MAX_PLANES ||
+        buffer.planes.size() != static_cast<int>(generation.planesPerBuffer)) {
+        setLastError(QStringLiteral("invalid Vulkan DMA-BUF plane count generation=%1 planes=%2 expected=%3")
+                         .arg(generation.id)
+                         .arg(buffer.planes.size())
+                         .arg(generation.planesPerBuffer));
+        return false;
+    }
+
+    ww_vk_dmabuf_import_t import {};
+    import.fourcc = generation.fourcc;
+    import.width = static_cast<uint32_t>(generation.width);
+    import.height = static_cast<uint32_t>(generation.height);
+    import.modifier = generation.modifier;
+    import.n_planes = generation.planesPerBuffer;
+    for (uint32_t i = 0; i < import.n_planes; i++) {
+        const Plane& plane = buffer.planes.at(static_cast<int>(i));
+        import.fds[i] = plane.fd;
+        import.strides[i] = plane.stride;
+        import.offsets[i] = plane.offset;
+    }
+
+    const int rc = ww_vk_import_dmabuf(&m_vkBackend, &import, &buffer.vkImage);
+    if (rc != 0) {
+        setLastError(QStringLiteral("Vulkan DMA-BUF import failed generation=%1 buffer=%2 fourcc=0x%3 modifier=0x%4 planes=%5 rc=%6")
+                         .arg(generation.id)
+                         .arg(buffer.index)
+                         .arg(generation.fourcc, 8, 16, QLatin1Char('0'))
+                         .arg(static_cast<qulonglong>(generation.modifier), 16, 16, QLatin1Char('0'))
+                         .arg(generation.planesPerBuffer)
+                         .arg(rc));
+        qCWarning(lcWallpaperKde, "%s", qPrintable(m_lastError));
+        return false;
+    }
+
+    /*
+     * ww_vk_import_dmabuf consumes plane 0's DMA-BUF fd on success because the
+     * Vulkan external-memory import owns that handle. Additional plane fds are
+     * only descriptors for the same image layout after import, so close them
+     * now to avoid accidentally closing a reused fd later from closeGenerationFds.
+     */
+    if (!buffer.planes.isEmpty())
+        buffer.planes[0].fd = -1;
+    for (int i = 1; i < buffer.planes.size(); i++)
+        closeFd(buffer.planes[i].fd);
+
+    buffer.hasVkImage = true;
+    return true;
+}
+
 bool VividDisplay::generationUsesShadowCopy(const Generation& generation) const
 {
     return generation.presentationPath == QStringLiteral("shadow-copy");
@@ -2804,9 +3367,103 @@ bool VividDisplay::ensureBufferPresentedThroughShadow(Generation& generation, Bu
     return true;
 }
 
+VkFormat VividDisplay::vkFormatForFourcc(quint32 fourcc) const
+{
+    return ww_fourcc_to_vk_format(fourcc);
+}
+
+bool VividDisplay::ensureVulkanShadowCopy(Generation& generation, Buffer& buffer)
+{
+    if (!ensureVulkanBufferImported(generation, buffer))
+        return false;
+    const bool hasPendingFrame =
+        m_pendingVulkanFrame.valid &&
+        m_pendingVulkanFrame.generation == generation.id &&
+        m_pendingVulkanFrame.bufferIndex == buffer.index;
+    if (!hasPendingFrame)
+        return ww_vk_blitter_shadow_has_content(&m_vkBlitter);
+    if (m_pendingVulkanFrame.acquireSemaphore == VK_NULL_HANDLE) {
+        setLastError(QStringLiteral("Vulkan frame has no imported acquire semaphore generation=%1 buffer=%2")
+                         .arg(generation.id)
+                         .arg(buffer.index));
+        return false;
+    }
+    if (!m_vkBlitterReady) {
+        const int rc = ww_vk_blitter_init(&m_vkBlitter,
+                                          m_vkInstance,
+                                          m_vkPhysicalDevice,
+                                          m_vkDevice,
+                                          m_vkQueueFamilyIndex,
+                                          m_vkQueue,
+                                          m_vkGetInstanceProcAddr);
+        if (rc != 0) {
+            setLastError(QStringLiteral("ww_vk_blitter_init failed rc=%1").arg(rc));
+            return false;
+        }
+        m_vkBlitterReady = true;
+    }
+
+    const VkFormat format = vkFormatForFourcc(generation.fourcc);
+    if (format == VK_FORMAT_UNDEFINED) {
+        setLastError(QStringLiteral("unsupported Vulkan fourcc=0x%1")
+                         .arg(generation.fourcc, 8, 16, QLatin1Char('0')));
+        return false;
+    }
+    const int shadowRc = ww_vk_blitter_ensure_shadow(&m_vkBlitter,
+                                                     static_cast<uint32_t>(generation.width),
+                                                     static_cast<uint32_t>(generation.height),
+                                                     format);
+    if (shadowRc != 0) {
+        setLastError(QStringLiteral("ww_vk_blitter_ensure_shadow failed generation=%1 size=%2x%3 format=%4 rc=%5")
+                         .arg(generation.id)
+                         .arg(generation.width)
+                         .arg(generation.height)
+                         .arg(static_cast<int>(format))
+                         .arg(shadowRc));
+        return false;
+    }
+
+    VulkanReleaseSignalContext releaseContext {
+        m_pendingVulkanFrame.renderNode,
+        m_pendingVulkanFrame.releaseSyncContext.isEmpty()
+            ? QStringLiteral("vulkan-shadow-copy-complete")
+            : QStringLiteral("%1 vulkan-shadow-copy-complete").arg(m_pendingVulkanFrame.releaseSyncContext),
+    };
+    int releaseFd = m_pendingVulkanFrame.releaseSyncobjFd;
+    m_pendingVulkanFrame.releaseSyncobjFd = -1;
+
+    /*
+     * The blitter waits on the imported acquire semaphore, copies the producer
+     * VkImage into the consumer-owned shadow VkImage, waits for its fence, and
+     * only then invokes the release-syncobj callback. Qt samples only the
+     * shadow image, so producer buffer lifetime ends at the completed copy, not
+     * at the later QSG sample submission.
+     */
+    const int blitRc = ww_vk_blitter_blit(&m_vkBlitter,
+                                          buffer.vkImage.image,
+                                          static_cast<uint32_t>(generation.width),
+                                          static_cast<uint32_t>(generation.height),
+                                          m_pendingVulkanFrame.acquireSemaphore,
+                                          releaseFd,
+                                          signalReleaseSyncobjFromVulkanBlit,
+                                          &releaseContext);
+    if (blitRc != 0) {
+        m_pendingVulkanFrame = PendingVulkanFrame {};
+        setLastError(QStringLiteral("ww_vk_blitter_blit failed generation=%1 buffer=%2 rc=%3")
+                         .arg(generation.id)
+                         .arg(buffer.index)
+                         .arg(blitRc));
+        return false;
+    }
+    m_pendingVulkanFrame = PendingVulkanFrame {};
+    return true;
+}
+
 QSGNode* VividDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*)
 {
     destroyRetiredResources();
+    if (m_vkBlitterReady)
+        ww_vk_blitter_tick_pending_destroys(&m_vkBlitter);
 
     Generation* generation = findGeneration(m_currentGeneration);
     Buffer* buffer = findBuffer(generation, m_currentBuffer);
@@ -2815,33 +3472,78 @@ QSGNode* VividDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*)
         return nullptr;
     }
 
-    if (!ensureBufferImported(*generation, *buffer) ||
-        !ensureBufferPresentedThroughShadow(*generation, *buffer)) {
-        sendBindFailed(*generation,
-                       2,
-                       m_lastError.isEmpty()
-                           ? QStringLiteral("EGL/GL DMA-BUF import or shadow-copy failed")
-                           : m_lastError);
-        signalPendingReleaseSyncobj(*generation, *buffer, QStringLiteral("import-failed"));
-        retireGeneration(generation->id);
-        if (m_currentGeneration == generation->id) {
-            m_currentGeneration = 0;
-            m_currentBuffer = 0;
-            setStreamState(Inactive);
-        }
-        destroyRetiredResources();
+    const bool useVulkan = m_activeBackend == BackendVulkan;
+    QQuickWindow* quickWindow = window();
+    if (!quickWindow) {
         delete oldNode;
+        if (useVulkan)
+            signalPendingVulkanFrame(QStringLiteral("window-missing"));
+        else
+            signalPendingReleaseSyncobj(*generation, *buffer, QStringLiteral("window-missing"));
         return nullptr;
     }
 
-    QQuickWindow* quickWindow = window();
-    const GLuint presentationTexture = generationUsesShadowCopy(*generation)
-        ? buffer->shadowTexture
-        : buffer->glTexture;
-    if (!quickWindow || presentationTexture == 0) {
-        delete oldNode;
-        signalPendingReleaseSyncobj(*generation, *buffer, QStringLiteral("window-or-texture-missing"));
-        return nullptr;
+    if (useVulkan) {
+        const VkFormat nextFormat = vkFormatForFourcc(generation->fourcc);
+        /*
+         * Qt owns the QSGVulkanTexture wrapper and its VkImageView. When the
+         * shadow image size/format changes, drop the node before asking the
+         * blitter to replace the shadow so Qt can release the old view through
+         * its normal scene-graph lifetime path.
+         */
+        if (oldNode && m_vkBlitterReady &&
+            (m_vkBlitter.shadow_image == VK_NULL_HANDLE ||
+             m_vkBlitter.shadow_w != static_cast<uint32_t>(generation->width) ||
+             m_vkBlitter.shadow_h != static_cast<uint32_t>(generation->height) ||
+             m_vkBlitter.shadow_fmt != nextFormat)) {
+            delete oldNode;
+            oldNode = nullptr;
+        }
+        if (!ensureVulkanShadowCopy(*generation, *buffer) ||
+            !ww_vk_blitter_shadow_has_content(&m_vkBlitter)) {
+            sendBindFailed(*generation,
+                           2,
+                           m_lastError.isEmpty()
+                               ? QStringLiteral("Vulkan DMA-BUF import or shadow-copy failed")
+                               : m_lastError);
+            signalPendingVulkanFrame(QStringLiteral("vulkan-import-failed"));
+            retireGeneration(generation->id);
+            if (m_currentGeneration == generation->id) {
+                m_currentGeneration = 0;
+                m_currentBuffer = 0;
+                setStreamState(Inactive);
+            }
+            destroyRetiredResources();
+            delete oldNode;
+            return nullptr;
+        }
+    } else {
+        if (!ensureBufferImported(*generation, *buffer) ||
+            !ensureBufferPresentedThroughShadow(*generation, *buffer)) {
+            sendBindFailed(*generation,
+                           2,
+                           m_lastError.isEmpty()
+                               ? QStringLiteral("EGL/GL DMA-BUF import or shadow-copy failed")
+                               : m_lastError);
+            signalPendingReleaseSyncobj(*generation, *buffer, QStringLiteral("import-failed"));
+            retireGeneration(generation->id);
+            if (m_currentGeneration == generation->id) {
+                m_currentGeneration = 0;
+                m_currentBuffer = 0;
+                setStreamState(Inactive);
+            }
+            destroyRetiredResources();
+            delete oldNode;
+            return nullptr;
+        }
+        const GLuint presentationTexture = generationUsesShadowCopy(*generation)
+            ? buffer->shadowTexture
+            : buffer->glTexture;
+        if (presentationTexture == 0) {
+            delete oldNode;
+            signalPendingReleaseSyncobj(*generation, *buffer, QStringLiteral("texture-missing"));
+            return nullptr;
+        }
     }
 
     QSGTransformNode* transformNode = nullptr;
@@ -2858,14 +3560,30 @@ QSGNode* VividDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*)
         transformNode->appendChildNode(textureNode);
     }
 
-    QSGTexture* texture = QNativeInterface::QSGOpenGLTexture::fromNative(
-        presentationTexture,
-        quickWindow,
-        QSize(generation->width, generation->height),
-        QQuickWindow::TextureHasAlphaChannel);
+    QSGTexture* texture = nullptr;
+    if (useVulkan) {
+        texture = QNativeInterface::QSGVulkanTexture::fromNative(
+            ww_vk_blitter_shadow(&m_vkBlitter),
+            ww_vk_blitter_shadow_layout(&m_vkBlitter),
+            quickWindow,
+            QSize(generation->width, generation->height),
+            QQuickWindow::TextureHasAlphaChannel);
+    } else {
+        const GLuint presentationTexture = generationUsesShadowCopy(*generation)
+            ? buffer->shadowTexture
+            : buffer->glTexture;
+        texture = QNativeInterface::QSGOpenGLTexture::fromNative(
+            presentationTexture,
+            quickWindow,
+            QSize(generation->width, generation->height),
+            QQuickWindow::TextureHasAlphaChannel);
+    }
     if (!texture) {
         delete transformNode;
-        signalPendingReleaseSyncobj(*generation, *buffer, QStringLiteral("texture-node-failed"));
+        if (useVulkan)
+            signalPendingVulkanFrame(QStringLiteral("texture-node-failed"));
+        else
+            signalPendingReleaseSyncobj(*generation, *buffer, QStringLiteral("texture-node-failed"));
         return nullptr;
     }
     textureNode->setTexture(texture);
@@ -2905,7 +3623,7 @@ QSGNode* VividDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*)
     }
 
     textureNode->markDirty(QSGNode::DirtyGeometry);
-    if (!generationUsesShadowCopy(*generation))
+    if (!useVulkan && !generationUsesShadowCopy(*generation))
         signalPendingReleaseSyncobj(*generation, *buffer, QStringLiteral("texture-node-updated"));
     return transformNode;
 }

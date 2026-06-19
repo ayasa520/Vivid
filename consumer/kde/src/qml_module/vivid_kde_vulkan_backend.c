@@ -945,6 +945,7 @@ int ww_vk_create_owned(ww_vk_owned_t* out) {
 
     const char* want[] = {
         "VK_EXT_external_memory_dma_buf",
+        "VK_EXT_queue_family_foreign",
         "VK_EXT_image_drm_format_modifier",
         "VK_KHR_external_memory_fd",
         "VK_KHR_external_semaphore_fd",
@@ -998,6 +999,7 @@ int ww_vk_create_owned(ww_vk_owned_t* out) {
         ww_log(WAYWALLEN_LOG_ERROR,
                "vk owned: no GPU with required extensions+queue family "
                "(VK_EXT_external_memory_dma_buf + "
+               "VK_EXT_queue_family_foreign + "
                "VK_EXT_image_drm_format_modifier + VK_KHR_external_memory_fd)");
         free(pds);
         ww_vk_destroy_owned(out);

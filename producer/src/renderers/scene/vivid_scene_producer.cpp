@@ -191,6 +191,16 @@ bool scene_dmabuf_requests_equal(const SceneDmaBufRequest& a,
         a.memory_preference == b.memory_preference;
 }
 
+bool scene_size_contract_changed(const VividSceneProducer* self,
+                                 guint32                   width,
+                                 guint32                   height,
+                                 double                    render_scale)
+{
+    return self->width != width ||
+        self->height != height ||
+        std::abs(self->render_scale - render_scale) > 0.0001;
+}
+
 wallpaper::ExternalFrameMemoryPreference
 to_wallpaper_memory_preference(VividSceneProducerDmaBufMemoryPreference preference)
 {
@@ -595,21 +605,21 @@ vivid_scene_producer_prepare_buffers_with_request(
         return FALSE;
     }
 
-    const bool contract_changed = self->render_ready &&
-        (self->width != width ||
-         self->height != height ||
-         std::abs(self->render_scale - render_scale) > 0.0001 ||
-         !scene_dmabuf_requests_equal(self->dmabuf_request, dmabuf_request));
+    const bool size_contract_changed =
+        self->render_ready &&
+        scene_size_contract_changed(self, width, height, render_scale);
+    const bool dmabuf_contract_changed =
+        self->render_ready &&
+        !scene_dmabuf_requests_equal(self->dmabuf_request, dmabuf_request);
 
-    if (contract_changed) {
+    if (size_contract_changed) {
         /*
-         * SceneWallpaper does not expose a live swapchain resize, render-scale
-         * mutation, or export-modifier mutation operation. Recreate the scene
-         * renderer when the consumer output contract changes so the
-         * exported DMA-BUF set, modifier, memory class, and text rasterization
-         * scale exactly match the display protocol generation.
+         * Size and render-scale still define the scene's framebuffer and text
+         * rasterization contract.  Keep those as scene rebuild triggers, while
+         * modifier/memory-only retries are handled by the route swapchain below
+         * so consumer import failures do not reload the wallpaper project.
          */
-        g_message("VividSceneProducer: render contract changed %ux%u scale=%.3f "
+        g_message("VividSceneProducer: scene size contract changed %ux%u scale=%.3f "
                   "modifier=0x%016" G_GINT64_MODIFIER "x memory=%s -> %ux%u "
                   "scale=%.3f modifier=0x%016" G_GINT64_MODIFIER
                   "x memory=%s; recreating scene",
@@ -726,7 +736,7 @@ vivid_scene_producer_prepare_buffers_with_request(
                       static_cast<void*>(handles.physical_device),
                       static_cast<void*>(handles.graphics_queue),
                       handles.graphics_queue_family);
-            return wallpaper::vulkan::CreateExSwapchain(
+            auto swapchain = wallpaper::vulkan::CreateExSwapchain(
                 *handles.renderer_device,
                 width,
                 height,
@@ -737,6 +747,7 @@ vivid_scene_producer_prepare_buffers_with_request(
                 fourcc,
                 modifiers,
                 memory_preference);
+            return swapchain;
         };
         info.redraw_callback = []() {
             /*
@@ -803,7 +814,57 @@ vivid_scene_producer_prepare_buffers_with_request(
         return FALSE;
     }
 
-    const auto& handles = swapchain->handles();
+    if (dmabuf_contract_changed && !size_contract_changed) {
+        const bool explicit_non_linear_modifier =
+            dmabuf_request.require_modifier &&
+            dmabuf_request.modifier != DRM_FORMAT_MOD_LINEAR &&
+            dmabuf_request.modifier != DRM_FORMAT_MOD_INVALID;
+        const wallpaper::TexTiling tiling = explicit_non_linear_modifier
+            ? wallpaper::TexTiling::OPTIMAL
+            : wallpaper::TexTiling::LINEAR;
+        const std::vector<uint64_t> modifiers = explicit_non_linear_modifier
+            ? std::vector<uint64_t> { dmabuf_request.modifier }
+            : std::vector<uint64_t> {};
+
+        /*
+         * This is the waywallen-style long-lived scene route: consumer
+         * BIND_FAILED changes the export slot contract, not the wallpaper scene.
+         * The call is synchronous but executes allocation on SceneWallpaper's
+         * render thread, so TextureCache and the Vulkan device remain
+         * renderer-thread-owned while prepare_buffers still reports allocation
+         * failure through the existing producer-side blacklist path.
+         */
+        g_message("VividSceneProducer: DMA-BUF route contract changed "
+                  "modifier=0x%016" G_GINT64_MODIFIER "x memory=%s -> "
+                  "modifier=0x%016" G_GINT64_MODIFIER "x memory=%s; "
+                  "reconfiguring export route without recreating scene",
+                  static_cast<guint64>(self->dmabuf_request.modifier),
+                  scene_memory_preference_name(self->dmabuf_request.memory_preference),
+                  static_cast<guint64>(dmabuf_request.modifier),
+                  scene_memory_preference_name(dmabuf_request.memory_preference));
+        if (!self->scene->reconfigureOffscreenExport(
+                width,
+                height,
+                tiling,
+                wallpaper::ExternalFrameExportMode::DMA_BUF,
+                dmabuf_request.fourcc,
+                modifiers,
+                to_wallpaper_memory_preference(dmabuf_request.memory_preference))) {
+            g_warning("VividSceneProducer: failed to reconfigure scene DMA-BUF "
+                      "route modifier=0x%016" G_GINT64_MODIFIER "x memory=%s",
+                      static_cast<guint64>(dmabuf_request.modifier),
+                      scene_memory_preference_name(dmabuf_request.memory_preference));
+            self->last_dmabuf_prepare_status =
+                VIVID_SCENE_PRODUCER_DMABUF_PREPARE_UNSUPPORTED;
+            return FALSE;
+        }
+        self->dmabuf_request = dmabuf_request;
+        self->logged_waiting_for_frame = false;
+        self->logged_waiting_for_swapchain = false;
+        self->logged_empty_swapchain_handles = false;
+    }
+
+    auto handles = swapchain->handlesSnapshot();
     if (handles.empty()) {
         if (!self->logged_empty_swapchain_handles) {
             g_warning("VividSceneProducer: Vulkan DMA-BUF swapchain has no handles");
@@ -821,8 +882,7 @@ vivid_scene_producer_prepare_buffers_with_request(
     route_set.modifier = wallpaper::ExHandle::INVALID_DRM_MODIFIER;
     route_set.premultiplied = FALSE;
 
-    for (const auto& native_handle : handles) {
-        const auto& frame = native_handle.handle;
+    for (const auto& frame : handles) {
         if (!frame.isDmabuf() || frame.n_planes == 0 ||
             frame.n_planes > vivid::producer::kFrameRouteMaxPlanes) {
             g_warning("VividSceneProducer: exported frame id=%d is not a "

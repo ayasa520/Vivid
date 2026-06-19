@@ -241,6 +241,50 @@ test_same_device_shadow_copy_allows_linear_without_direct(void)
 }
 
 static void
+test_kde_egl_caps_remain_host_visible(void)
+{
+    const guint64 tiled = 0x0100000000000001ull;
+    VividDmaBufPeerCaps producer = make_caps(0x42);
+    VividDmaBufPeerCaps consumer = make_caps(0x42);
+    consumer.memory_hints = VIVID_DMABUF_MEMORY_HINT_HOST_VISIBLE;
+    consumer.relay_modes =
+        VIVID_DMABUF_RELAY_MODE_DIRECT_IMPORT |
+        VIVID_DMABUF_RELAY_MODE_SHADOW_COPY;
+    vivid_dmabuf_peer_caps_add_modifier(&producer, DRM_FORMAT_ABGR8888, tiled, 1);
+    vivid_dmabuf_peer_caps_add_modifier(&consumer, DRM_FORMAT_ABGR8888, tiled, 1);
+
+    VividDmaBufNegotiatedScheme scheme = {0};
+    assert(vivid_dmabuf_negotiate_pick(&producer, &consumer, &scheme, NULL));
+    assert(scheme.memory_hint == VIVID_DMABUF_MEMORY_HINT_HOST_VISIBLE);
+    assert(scheme.relay_mode == VIVID_DMABUF_RELAY_MODE_DIRECT_IMPORT);
+}
+
+static void
+test_kde_vulkan_shadow_copy_uses_device_local_only_when_both_advertise(void)
+{
+    const guint64 tiled = 0x0100000000000001ull;
+    VividDmaBufPeerCaps producer = make_caps(0x42);
+    VividDmaBufPeerCaps consumer = make_caps(0x42);
+    consumer.memory_hints = VIVID_DMABUF_MEMORY_HINT_HOST_VISIBLE;
+    consumer.relay_modes = VIVID_DMABUF_RELAY_MODE_SHADOW_COPY;
+    vivid_dmabuf_peer_caps_add_modifier(&producer, DRM_FORMAT_ABGR8888, tiled, 1);
+    vivid_dmabuf_peer_caps_add_modifier(&consumer, DRM_FORMAT_ABGR8888, tiled, 1);
+
+    VividDmaBufNegotiatedScheme scheme = {0};
+    assert(vivid_dmabuf_negotiate_pick(&producer, &consumer, &scheme, NULL));
+    assert(scheme.memory_hint == VIVID_DMABUF_MEMORY_HINT_HOST_VISIBLE);
+    assert(scheme.relay_mode == VIVID_DMABUF_RELAY_MODE_SHADOW_COPY);
+
+    consumer.memory_hints =
+        VIVID_DMABUF_MEMORY_HINT_HOST_VISIBLE |
+        VIVID_DMABUF_MEMORY_HINT_DEVICE_LOCAL;
+    memset(&scheme, 0, sizeof(scheme));
+    assert(vivid_dmabuf_negotiate_pick(&producer, &consumer, &scheme, NULL));
+    assert(scheme.memory_hint == VIVID_DMABUF_MEMORY_HINT_DEVICE_LOCAL);
+    assert(scheme.relay_mode == VIVID_DMABUF_RELAY_MODE_SHADOW_COPY);
+}
+
+static void
 test_missing_sync_caps_rejects(void)
 {
     VividDmaBufPeerCaps producer = make_caps(0x42);
@@ -299,6 +343,8 @@ main(void)
     test_cross_device_requires_shadow_copy();
     test_same_device_shadow_copy_prefers_non_linear_without_direct();
     test_same_device_shadow_copy_allows_linear_without_direct();
+    test_kde_egl_caps_remain_host_visible();
+    test_kde_vulkan_shadow_copy_uses_device_local_only_when_both_advertise();
     test_missing_sync_caps_rejects();
     test_extent_zero_is_unbounded();
     test_extent_limit_rejects_oversized_buffer();

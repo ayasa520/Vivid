@@ -631,14 +631,43 @@ static VkImageSubresourceRange full_color_range(void) {
     return r;
 }
 
+static void close_release_syncobj_fd(int* release_syncobj_fd) {
+    if (release_syncobj_fd && *release_syncobj_fd >= 0) {
+        close(*release_syncobj_fd);
+        *release_syncobj_fd = -1;
+    }
+}
+
+static void finish_release_syncobj_fd(int* release_syncobj_fd,
+                                      ww_vk_release_syncobj_fn signal_release_syncobj,
+                                      void* signal_release_user_data,
+                                      const char* context) {
+    if (! release_syncobj_fd || *release_syncobj_fd < 0) return;
+
+    if (signal_release_syncobj) {
+        int rc = signal_release_syncobj(*release_syncobj_fd, signal_release_user_data);
+        if (rc != 0) {
+            ww_log(WAYWALLEN_LOG_WARN,
+                   "vk blitter: release syncobj signal failed rc=%d context=%s",
+                   rc,
+                   context ? context : "unknown");
+        }
+    }
+    close_release_syncobj_fd(release_syncobj_fd);
+}
+
 int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_t h,
-                       VkSemaphore acquire_sem, int release_syncobj_fd) {
+                       VkSemaphore acquire_sem, int release_syncobj_fd,
+                       ww_vk_release_syncobj_fn signal_release_syncobj,
+                       void* signal_release_user_data) {
     if (! b || ! b->initialized || b->shadow_image == VK_NULL_HANDLE) {
-        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        finish_release_syncobj_fd(
+            &release_syncobj_fd, signal_release_syncobj, signal_release_user_data, "invalid-blitter");
         return -EINVAL;
     }
     if (imported == VK_NULL_HANDLE || w == 0 || h == 0) {
-        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        finish_release_syncobj_fd(
+            &release_syncobj_fd, signal_release_syncobj, signal_release_user_data, "invalid-frame");
         return -EINVAL;
     }
     if (w != b->shadow_w || h != b->shadow_h) {
@@ -648,7 +677,8 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
                h,
                b->shadow_w,
                b->shadow_h);
-        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        finish_release_syncobj_fd(
+            &release_syncobj_fd, signal_release_syncobj, signal_release_user_data, "size-mismatch");
         return -EINVAL;
     }
 
@@ -669,7 +699,10 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
                    "vk blitter: pre-submit fence wait timed out (>%llu ms); "
                    "skipping this blit",
                    (unsigned long long)(WW_BLIT_FENCE_WAIT_NS / 1000000ull));
-            if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+            finish_release_syncobj_fd(&release_syncobj_fd,
+                                      signal_release_syncobj,
+                                      signal_release_user_data,
+                                      "pre-submit-fence-timeout");
             return -EIO;
         }
         if (vrw != VK_SUCCESS) {
@@ -691,21 +724,26 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
         ww_log(WAYWALLEN_LOG_ERROR,
                "vk blitter: vkBeginCommandBuffer failed: %s",
                ww_vk_result_str(vr));
-        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        finish_release_syncobj_fd(&release_syncobj_fd,
+                                  signal_release_syncobj,
+                                  signal_release_user_data,
+                                  "begin-command-buffer-failed");
         return -EIO;
     }
 
-    /* Acquire imported image: implicit acquire from EXTERNAL via
-     * UNDEFINED layout. After acquire_sem signals, the producer's
-     * GPU work is visible, so this barrier is safe. */
+    /* The producer releases DMA-BUF images to FOREIGN in GENERAL layout.
+     * Acquiring from UNDEFINED would legally discard contents on drivers that
+     * keep modifier metadata such as DCC, so mirror waywallen's ownership
+     * boundary exactly: FOREIGN/GENERAL -> local TRANSFER_SRC, then release
+     * the image back to FOREIGN/GENERAL after the copy. */
     VkImageMemoryBarrier in_bar = {
         .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .srcAccessMask       = 0,
         .dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT,
-        .oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED,
+        .oldLayout           = VK_IMAGE_LAYOUT_GENERAL,
         .newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
+        .dstQueueFamilyIndex = b->backend.queue_family_index,
         .image               = imported,
         .subresourceRange    = full_color_range(),
     };
@@ -763,6 +801,17 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
                       1,
                       &region);
 
+    VkImageMemoryBarrier out_bar = {
+        .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask       = VK_ACCESS_TRANSFER_READ_BIT,
+        .dstAccessMask       = 0,
+        .oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        .newLayout           = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = b->backend.queue_family_index,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
+        .image               = imported,
+        .subresourceRange    = full_color_range(),
+    };
     /* Plain layout transition to SHADER_READ_ONLY_OPTIMAL. The external
      * reader (GSK) gets write-fence visibility via the dma_resv
      * injection below, so QUEUE_FAMILY_IGNORED is correct here. */
@@ -777,22 +826,27 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
         .image               = b->shadow_image,
         .subresourceRange    = full_color_range(),
     };
+    VkImageMemoryBarrier post_bars[2] = { out_bar, shadow_bar1 };
     b->vkCmdPipelineBarrier(b->cb,
                             VK_PIPELINE_STAGE_TRANSFER_BIT,
-                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT |
+                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                             0,
                             0,
                             NULL,
                             0,
                             NULL,
-                            1,
-                            &shadow_bar1);
+                            2,
+                            post_bars);
 
     vr = b->vkEndCommandBuffer(b->cb);
     if (vr != VK_SUCCESS) {
         ww_log(
             WAYWALLEN_LOG_ERROR, "vk blitter: vkEndCommandBuffer failed: %s", ww_vk_result_str(vr));
-        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        finish_release_syncobj_fd(&release_syncobj_fd,
+                                  signal_release_syncobj,
+                                  signal_release_user_data,
+                                  "end-command-buffer-failed");
         return -EIO;
     }
 
@@ -816,7 +870,10 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
     vr = b->vkQueueSubmit(b->queue, 1, &si, b->fence);
     if (vr != VK_SUCCESS) {
         ww_log(WAYWALLEN_LOG_ERROR, "vk blitter: vkQueueSubmit failed: %s", ww_vk_result_str(vr));
-        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        finish_release_syncobj_fd(&release_syncobj_fd,
+                                  signal_release_syncobj,
+                                  signal_release_user_data,
+                                  "queue-submit-failed");
         return -EIO;
     }
     b->fence_armed = true;
@@ -832,14 +889,14 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
                "vk blitter: post-submit fence wait timed out (>%llu ms); "
                "shadow may be stale until GPU recovers",
                (unsigned long long)(WW_BLIT_FENCE_WAIT_NS / 1000000ull));
-        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        close_release_syncobj_fd(&release_syncobj_fd);
         return -EIO;
     }
     if (vr != VK_SUCCESS) {
         ww_log(WAYWALLEN_LOG_ERROR,
                "vk blitter: vkWaitForFences post-submit failed: %s",
                ww_vk_result_str(vr));
-        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        close_release_syncobj_fd(&release_syncobj_fd);
         return -EIO;
     }
     /* Publish blit's signal as a sync_file → ioctl-import into shadow
@@ -882,7 +939,8 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
      * host can now safely sample it. */
     b->shadow_has_content = true;
 
-    if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+    finish_release_syncobj_fd(
+        &release_syncobj_fd, signal_release_syncobj, signal_release_user_data, "shadow-copy-complete");
     return 0;
 }
 

@@ -731,17 +731,19 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
         return -EIO;
     }
 
-    /* Acquire imported image: implicit acquire from EXTERNAL via
-     * UNDEFINED layout. After acquire_sem signals, the producer's
-     * GPU work is visible, so this barrier is safe. */
+    /* The producer releases DMA-BUF images to FOREIGN in GENERAL layout.
+     * Acquiring from UNDEFINED would legally discard contents on drivers that
+     * keep modifier metadata such as DCC, so mirror waywallen's ownership
+     * boundary exactly: FOREIGN/GENERAL -> local TRANSFER_SRC, then release
+     * the image back to FOREIGN/GENERAL after the copy. */
     VkImageMemoryBarrier in_bar = {
         .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .srcAccessMask       = 0,
         .dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT,
-        .oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED,
+        .oldLayout           = VK_IMAGE_LAYOUT_GENERAL,
         .newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
+        .dstQueueFamilyIndex = b->backend.queue_family_index,
         .image               = imported,
         .subresourceRange    = full_color_range(),
     };
@@ -799,6 +801,17 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
                       1,
                       &region);
 
+    VkImageMemoryBarrier out_bar = {
+        .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask       = VK_ACCESS_TRANSFER_READ_BIT,
+        .dstAccessMask       = 0,
+        .oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        .newLayout           = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = b->backend.queue_family_index,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
+        .image               = imported,
+        .subresourceRange    = full_color_range(),
+    };
     /* Plain layout transition to SHADER_READ_ONLY_OPTIMAL. The external
      * reader (GSK) gets write-fence visibility via the dma_resv
      * injection below, so QUEUE_FAMILY_IGNORED is correct here. */
@@ -813,16 +826,18 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
         .image               = b->shadow_image,
         .subresourceRange    = full_color_range(),
     };
+    VkImageMemoryBarrier post_bars[2] = { out_bar, shadow_bar1 };
     b->vkCmdPipelineBarrier(b->cb,
                             VK_PIPELINE_STAGE_TRANSFER_BIT,
-                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT |
+                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                             0,
                             0,
                             NULL,
                             0,
                             NULL,
-                            1,
-                            &shadow_bar1);
+                            2,
+                            post_bars);
 
     vr = b->vkEndCommandBuffer(b->cb);
     if (vr != VK_SUCCESS) {

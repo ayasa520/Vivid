@@ -88,19 +88,15 @@ vk_result_name(VkResult result)
 }
 
 VkFormat
-target_vk_format_for_transfer_path(VideoFrameTransferPath path)
+target_vk_format_for_transfer_path(VideoFrameTransferPath)
 {
-    return path == VideoFrameTransferPath::VaMemoryBgra
-        ? VK_FORMAT_B8G8R8A8_UNORM
-        : VK_FORMAT_R8G8B8A8_UNORM;
+    return VK_FORMAT_R8G8B8A8_UNORM;
 }
 
 guint32
-target_drm_fourcc_for_transfer_path(VideoFrameTransferPath path)
+target_drm_fourcc_for_transfer_path(VideoFrameTransferPath)
 {
-    return path == VideoFrameTransferPath::VaMemoryBgra
-        ? DRM_FORMAT_ARGB8888
-        : DRM_FORMAT_ABGR8888;
+    return DRM_FORMAT_ABGR8888;
 }
 
 struct VideoBlitRegions

@@ -175,18 +175,28 @@ int ww_vk_blitter_get_export(const ww_vk_blitter_t* b, int* out_fd, uint32_t* ou
                              uint64_t* out_modifier);
 
 /*
- * Copy `imported` (UNDEFINED layout, TRANSFER_SRC contents valid) into
- * the shadow. Waits on `acquire_sem` (may be VK_NULL_HANDLE), then
- * blocks the calling thread until the copy completes (vkWaitForFences).
+ * Copy `imported` into the shadow. The producer releases imported
+ * DMA-BUF images to VK_QUEUE_FAMILY_FOREIGN_EXT in GENERAL layout; the
+ * blitter acquires that ownership, copies from TRANSFER_SRC_OPTIMAL, and
+ * releases the image back to FOREIGN/GENERAL before completing. Waits on
+ * `acquire_sem` (may be VK_NULL_HANDLE), then blocks the calling thread
+ * until the copy completes (vkWaitForFences).
  *
- * `release_syncobj_fd` ownership transfers in: signaled host-side via
- * waywallen_display_signal_release_syncobj after the wait, or closed
- * on early failure. Pass -1 if the caller has no syncobj to signal.
+ * `release_syncobj_fd` ownership transfers in. On success, the blitter
+ * invokes `signal_release_syncobj` after the copy fence signals, then
+ * closes the fd. Failures before submit also signal because the source
+ * DMA-BUF is no longer queued for GPU reads; failures after submit only
+ * close because the copy may still be in flight. Pass -1 if the caller
+ * has no syncobj to signal.
  *
  * Returns 0 on success, negative errno on failure.
  */
+typedef int (*ww_vk_release_syncobj_fn)(int release_syncobj_fd, void* user_data);
+
 int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_t h,
-                       VkSemaphore acquire_sem, int release_syncobj_fd);
+                       VkSemaphore acquire_sem, int release_syncobj_fd,
+                       ww_vk_release_syncobj_fn signal_release_syncobj,
+                       void* signal_release_user_data);
 
 static inline VkImage ww_vk_blitter_shadow(const ww_vk_blitter_t* b) {
     return b ? b->shadow_image : VK_NULL_HANDLE;

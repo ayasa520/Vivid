@@ -175,9 +175,12 @@ int ww_vk_blitter_get_export(const ww_vk_blitter_t* b, int* out_fd, uint32_t* ou
                              uint64_t* out_modifier);
 
 /*
- * Copy `imported` (UNDEFINED layout, TRANSFER_SRC contents valid) into
- * the shadow. Waits on `acquire_sem` (may be VK_NULL_HANDLE), then
- * blocks the calling thread until the copy completes (vkWaitForFences).
+ * Copy `imported` into the shadow. The producer releases imported
+ * DMA-BUF images to VK_QUEUE_FAMILY_FOREIGN_EXT in GENERAL layout; the
+ * blitter acquires that ownership, copies from TRANSFER_SRC_OPTIMAL, and
+ * releases the image back to FOREIGN/GENERAL before completing. Waits on
+ * `acquire_sem` (may be VK_NULL_HANDLE), then blocks the calling thread
+ * until the copy completes (vkWaitForFences).
  *
  * `release_syncobj_fd` ownership transfers in. On success, the blitter
  * invokes `signal_release_syncobj` after the copy fence signals, then

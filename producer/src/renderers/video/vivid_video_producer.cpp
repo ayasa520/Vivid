@@ -693,11 +693,9 @@ video_export_memory_from_request(VividVideoProducerDmaBufMemoryPreference prefer
 }
 
 guint32
-video_target_fourcc_for_transfer_path(VideoFrameTransferPath transfer_path)
+video_target_fourcc_for_transfer_path(VideoFrameTransferPath)
 {
-    return transfer_path == VideoFrameTransferPath::VaMemoryBgra
-        ? DRM_FORMAT_ARGB8888
-        : DRM_FORMAT_ABGR8888;
+    return DRM_FORMAT_ABGR8888;
 }
 
 VividVideoVulkanExportRequest
