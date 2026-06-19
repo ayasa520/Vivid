@@ -17,7 +17,10 @@ case "${1:-help}" in
     install)
         shift
         rm -rf "${VIVID_CONSUMER_BUILD_DIR}"
-        meson setup "${VIVID_CONSUMER_BUILD_DIR}" "${ROOT_DIR}" --prefix="${VIVID_CONSUMER_INSTALL_PREFIX}" "$@"
+        meson setup "${VIVID_CONSUMER_BUILD_DIR}" "${ROOT_DIR}" \
+            --prefix="${VIVID_CONSUMER_INSTALL_PREFIX}" \
+            -Dpackage-version="${VIVID_CONSUMER_PACKAGE_VERSION}" \
+            "$@"
         ninja -C "${VIVID_CONSUMER_BUILD_DIR}" install
         ;;
     zip)

@@ -1,7 +1,12 @@
 metaconf = configuration_data()
+package_version = get_option('package-version')
+metadata_version = package_version.split('.')[0].to_int()
 metaconf.set('settings_schema', schema)
 metaconf.set('uuid', uuid)
-metaconf.set('version', meson.project_version().split('.')[0])
+# GNOME Shell metadata requires an integer extension version. Keep the public
+# package artifact on the full semver-like string, and expose its numeric major
+# component here so metadata.json remains valid for Shell and extensions tools.
+metaconf.set('version', metadata_version)
 metaconf.set_quoted('metadata_author', get_option('extension-author'))
 metaconf.set_quoted('metadata_description', get_option('extension-description'))
 metaconf.set_quoted('metadata_name', get_option('extension-name'))

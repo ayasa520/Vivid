@@ -22,3 +22,9 @@ tools/vivid.sh gnome install
 ```sh
 tools/vivid.sh gnome zip
 ```
+
+To override the package version:
+
+```sh
+VIVID_CONSUMER_PACKAGE_VERSION=1.2.3 tools/vivid.sh gnome zip
+```

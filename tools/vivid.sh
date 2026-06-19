@@ -273,10 +273,14 @@ build_gnome_consumer() {
     . "${SCRIPT_DIR}/consumer_gnome/build_env.sh"
 
     if [[ -f "${VIVID_CONSUMER_BUILD_DIR}/build.ninja" ]]; then
-        meson setup --reconfigure "${VIVID_CONSUMER_BUILD_DIR}" "${root_dir}" "$@"
+        meson setup --reconfigure "${VIVID_CONSUMER_BUILD_DIR}" "${root_dir}" \
+            -Dpackage-version="${VIVID_CONSUMER_PACKAGE_VERSION}" \
+            "$@"
     else
         meson setup "${VIVID_CONSUMER_BUILD_DIR}" "${root_dir}" \
-            --prefix="${VIVID_CONSUMER_INSTALL_PREFIX}" "$@"
+            --prefix="${VIVID_CONSUMER_INSTALL_PREFIX}" \
+            -Dpackage-version="${VIVID_CONSUMER_PACKAGE_VERSION}" \
+            "$@"
     fi
     ninja -C "${VIVID_CONSUMER_BUILD_DIR}"
 }

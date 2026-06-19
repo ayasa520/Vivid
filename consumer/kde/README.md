@@ -32,3 +32,9 @@ systemctl --user restart plasma-plasmashell.service
 ```sh
 tools/vivid.sh kde zip
 ```
+
+To override the package version:
+
+```sh
+VIVID_CONSUMER_PACKAGE_VERSION=1.2.3 tools/vivid.sh kde zip
+```

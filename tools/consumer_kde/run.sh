@@ -14,6 +14,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/../../consumer/kde" && pwd)"
 configure() {
     cmake -S "${ROOT_DIR}" -B "${VIVID_KDE_BUILD_DIR}" -G Ninja \
         -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-Release}" \
+        -DVIVID_KDE_PACKAGE_VERSION="${VIVID_KDE_PACKAGE_VERSION}" \
         -DVIVID_KDE_PACKAGE_ID="${VIVID_KDE_PACKAGE_ID}" \
         -DVIVID_KDE_PACKAGE_ABI="${VIVID_KDE_PACKAGE_ABI}" \
         -DVIVID_KDE_QML_URI="${VIVID_KDE_QML_URI}" \

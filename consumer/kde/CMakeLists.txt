@@ -29,6 +29,8 @@ endif()
 
 set(VIVID_KDE_PACKAGE_ID "dev.rikka.vivid.consumer.kde"
     CACHE STRING "KPackage id for the KDE Plasma wallpaper")
+set(VIVID_KDE_PACKAGE_VERSION "${PROJECT_VERSION}"
+    CACHE STRING "Version embedded in the KDE consumer package and QML module")
 set(VIVID_KDE_QML_URI "Vivid.DisplayEmbed"
     CACHE STRING "QML module URI used by the bundled display module")
 set(VIVID_KDE_DIST_DIR "${CMAKE_CURRENT_BINARY_DIR}"
@@ -52,6 +54,12 @@ target_compile_options(vivid_display_protocol PRIVATE
 )
 
 string(REPLACE "." "/" _wallpaper_qml_uri_path "${VIVID_KDE_QML_URI}")
+
+configure_file(
+    package/metadata.json.in
+    "${CMAKE_CURRENT_BINARY_DIR}/package-metadata.json"
+    @ONLY
+)
 
 qt_add_qml_module(vivid-display-qml
     URI ${VIVID_KDE_QML_URI}
@@ -96,7 +104,7 @@ target_include_directories(vivid-display-qml PRIVATE
     "${VIVID_PROTOCOL_DIR}"
 )
 target_compile_definitions(vivid-display-qml PRIVATE
-    VIVID_KDE_VERSION="${PROJECT_VERSION}"
+    VIVID_KDE_VERSION="${VIVID_KDE_PACKAGE_VERSION}"
     WW_HAVE_VULKAN
 )
 target_compile_options(vivid-display-qml PRIVATE
@@ -116,6 +124,18 @@ install(
     DESTINATION "${VIVID_KDE_PACKAGE_ID}"
     COMPONENT kde_consumer
     EXCLUDE_FROM_ALL
+    PATTERN "metadata.json" EXCLUDE
+    PATTERN "metadata.json.in" EXCLUDE
+)
+
+# The KPackage metadata is generated so its Id and Version stay aligned with
+# the packaging variables used for the install path, archive name, and QML API.
+install(
+    FILES "${CMAKE_CURRENT_BINARY_DIR}/package-metadata.json"
+    DESTINATION "${VIVID_KDE_PACKAGE_ID}"
+    RENAME metadata.json
+    COMPONENT kde_consumer
+    EXCLUDE_FROM_ALL
 )
 
 install(
@@ -132,7 +152,22 @@ set(CPACK_COMPONENTS_ALL kde_consumer)
 set(CPACK_PACKAGE_DIRECTORY "${VIVID_KDE_DIST_DIR}")
 set(CPACK_PACKAGE_NAME "vivid-consumer-kde")
 set(CPACK_PACKAGE_VENDOR "rikka")
-set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_VERSION "${VIVID_KDE_PACKAGE_VERSION}")
+# CPack keeps separate numeric components for generators that inspect them, so
+# derive those fields from the user-facing package version when it starts with
+# a semver-like prefix while still allowing suffixes such as "1.2.3-beta".
+string(REGEX MATCH "^([0-9]+)(\\.([0-9]+))?(\\.([0-9]+))?"
+    _vivid_kde_package_version_components
+    "${VIVID_KDE_PACKAGE_VERSION}")
+if(_vivid_kde_package_version_components)
+    set(CPACK_PACKAGE_VERSION_MAJOR "${CMAKE_MATCH_1}")
+    if(DEFINED CMAKE_MATCH_3 AND NOT CMAKE_MATCH_3 STREQUAL "")
+        set(CPACK_PACKAGE_VERSION_MINOR "${CMAKE_MATCH_3}")
+    endif()
+    if(DEFINED CMAKE_MATCH_5 AND NOT CMAKE_MATCH_5 STREQUAL "")
+        set(CPACK_PACKAGE_VERSION_PATCH "${CMAKE_MATCH_5}")
+    endif()
+endif()
 set(CPACK_ARCHIVE_KDE_CONSUMER_FILE_NAME
-    "vivid-consumer-kde-${PROJECT_VERSION}-${VIVID_KDE_PACKAGE_ABI}")
+    "vivid-consumer-kde-${VIVID_KDE_PACKAGE_VERSION}-${VIVID_KDE_PACKAGE_ABI}")
 include(CPack)

@@ -1,4 +1,11 @@
 option(
+  'package-version',
+  type: 'string',
+  value: '1.0.0',
+  description: 'Consumer package version used for generated metadata and archives'
+)
+
+option(
   'extension-uuid',
   type: 'string',
   value: 'vivid-consumer-gnome@rikka.local',

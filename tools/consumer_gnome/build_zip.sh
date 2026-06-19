@@ -20,16 +20,13 @@ EXTENSION_DESCRIPTION="${VIVID_CONSUMER_EXTENSION_DESCRIPTION}"
 EXTENSION_AUTHOR="${VIVID_CONSUMER_EXTENSION_AUTHOR}"
 EXTENSION_URL="${VIVID_CONSUMER_EXTENSION_URL}"
 EXTENSION_LOG_PREFIX="${VIVID_CONSUMER_EXTENSION_LOG_PREFIX}"
-
-consumer_project_version() {
-    meson introspect --projectinfo "${BUILD_DIR}" \
-        | python3 -c 'import json, sys; print(json.load(sys.stdin)["version"])'
-}
+PACKAGE_VERSION="${VIVID_CONSUMER_PACKAGE_VERSION}"
 
 configure_consumer_identity() {
     meson configure "${BUILD_DIR}" \
         --prefix="${PREFIX}" \
         --datadir="${DATADIR}" \
+        -Dpackage-version="${PACKAGE_VERSION}" \
         -Dextension-uuid="${UUID}" \
         -Dextension-schema="${SCHEMA_ID}" \
         -Dextension-name="${EXTENSION_NAME}" \
@@ -51,7 +48,6 @@ else
 fi
 
 meson compile -C "${BUILD_DIR}"
-PACKAGE_VERSION="${VIVID_CONSUMER_PACKAGE_VERSION:-$(consumer_project_version)}"
 
 rm -rf "${DESTDIR_ROOT}" "${DIST_DIR}"
 mkdir -p "${DESTDIR_ROOT}" "${DIST_DIR}"
