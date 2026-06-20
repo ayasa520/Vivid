@@ -2049,6 +2049,7 @@ public:
     }
 
     /* ---- CefRenderHandler ---- */
+    bool GetRootScreenRect(CefRefPtr<CefBrowser> browser, CefRect& rect) override;
     void GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect) override;
     bool GetScreenInfo(CefRefPtr<CefBrowser> browser, CefScreenInfo& screen_info) override;
     void OnPaint(CefRefPtr<CefBrowser> browser,
@@ -2616,6 +2617,22 @@ producer_handle_software_paint(_VividWebProducer* self,
 
 /* ---- VividWebClient callbacks that need the full producer definition ---- */
 
+bool
+VividWebClient::GetRootScreenRect(CefRefPtr<CefBrowser> browser, CefRect& rect)
+{
+    const WebViewport viewport = viewport_snapshot();
+    /*
+     * NotifyScreenInfoChanged asks for both the root screen rectangle and the
+     * view rectangle. The accelerated view rectangle deliberately remains
+     * physical-sized for shared-texture allocation, but the root rectangle is
+     * what Chromium uses for JavaScript window.screen and window.outer* metrics.
+     * Return the logical desktop size here so those public browser metrics do
+     * not fall back to the physical GetViewRect dimensions.
+     */
+    rect = CefRect(0, 0, viewport.dip_width, viewport.dip_height);
+    return true;
+}
+
 void
 VividWebClient::GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect)
 {
@@ -2628,10 +2645,20 @@ VividWebClient::GetScreenInfo(CefRefPtr<CefBrowser> browser, CefScreenInfo& scre
 {
     const WebViewport viewport = viewport_snapshot();
     screen_info.device_scale_factor = (float)viewport.screen_scale;
-    screen_info.depth = 32;
+    screen_info.depth = 24;
     screen_info.depth_per_component = 8;
     screen_info.is_monochrome = false;
-    screen_info.rect = CefRect(0, 0, viewport.view_width, viewport.view_height);
+    /*
+     * In accelerated OSR mode GetViewRect intentionally stays in physical
+     * pixels so CEF allocates a full-resolution shared texture. The screen
+     * object exposed to JavaScript must still describe the logical desktop,
+     * matching regular Chromium/Edge behavior on a scaled display: a
+     * 3200x2000 render target at scale 2 reports screen.width=1600 while the
+     * page keeps devicePixelRatio=2. Keeping these spaces separate prevents
+     * screen/avail metrics from leaking Vivid's internal backing-buffer size
+     * into wallpaper scripts.
+     */
+    screen_info.rect = CefRect(0, 0, viewport.dip_width, viewport.dip_height);
     screen_info.available_rect = screen_info.rect;
     return true;
 }
