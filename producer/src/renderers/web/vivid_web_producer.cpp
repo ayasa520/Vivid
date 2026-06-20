@@ -1873,6 +1873,7 @@ public:
         CefRefPtr<CefBrowser> browser = current_browser();
         if (!browser)
             return;
+        one_shot_restore_suspended_ = false;
 
         CefRefPtr<CefFrame> frame = browser->GetMainFrame();
         if (frame) {
@@ -1928,6 +1929,41 @@ public:
         host->WasHidden(suspended);
         if (!suspended)
             ApplyViewportToBrowser(browser, true);
+    }
+
+    void DoRequestFrame(bool restore_suspended, std::string reason)
+    {
+        CEF_REQUIRE_UI_THREAD();
+        CefRefPtr<CefBrowser> browser = current_browser();
+        if (!browser)
+            return;
+        CefRefPtr<CefBrowserHost> host = browser->GetHost();
+        if (!host)
+            return;
+
+        /*
+         * A suspended CEF browser is both hidden and lifecycle-frozen, so it can
+         * refuse to paint even after the producer has a new DMA-BUF export ring.
+         * For first-frame handoff we temporarily thaw only the browser host and
+         * request a repaint; page media stays paused because we deliberately do
+         * not run the resume branch from DoSetSuspended(false). The next paint
+         * callback restores the hidden/frozen state.
+         */
+        if (restore_suspended) {
+            one_shot_restore_suspended_ = true;
+            CefRefPtr<CefDictionaryValue> params = CefDictionaryValue::Create();
+            params->SetString("state", "active");
+            host->ExecuteDevToolsMethod(0, "Page.setWebLifecycleState", params);
+            host->WasHidden(false);
+        } else {
+            one_shot_restore_suspended_ = false;
+        }
+
+        ApplyViewportToBrowser(browser, true);
+        host->Invalidate(PET_VIEW);
+        g_message("VividWebProducer: request one DMA-BUF frame suspended=%s reason=%s",
+                  restore_suspended ? "true" : "false",
+                  reason.empty() ? "(none)" : reason.c_str());
     }
 
     void DoMouseMove(int x_view, int y_view, guint32 button_mask)
@@ -2082,6 +2118,26 @@ public:
     }
 
 private:
+    void RestoreOneShotSuspendedIfNeeded(CefRefPtr<CefBrowser> browser)
+    {
+        CEF_REQUIRE_UI_THREAD();
+        if (!one_shot_restore_suspended_)
+            return;
+        one_shot_restore_suspended_ = false;
+
+        if (!browser)
+            return;
+        CefRefPtr<CefBrowserHost> host = browser->GetHost();
+        if (!host)
+            return;
+
+        CefRefPtr<CefDictionaryValue> params = CefDictionaryValue::Create();
+        params->SetString("state", "frozen");
+        host->ExecuteDevToolsMethod(0, "Page.setWebLifecycleState", params);
+        host->WasHidden(true);
+        g_message("VividWebProducer: restored suspended browser after one-shot paint");
+    }
+
     void complete_gpu_kill_request(guint64 serial, bool ok)
     {
         g_mutex_lock(&state_lock_);
@@ -2187,6 +2243,7 @@ private:
     guint64 gpu_kill_request_serial_ { 0 };
     guint64 gpu_kill_completed_serial_ { 0 };
     bool gpu_kill_last_result_ { true };
+    bool one_shot_restore_suspended_ { false };
 
     IMPLEMENT_REFCOUNTING(VividWebClient);
     DISALLOW_COPY_AND_ASSIGN(VividWebClient);
@@ -2592,6 +2649,7 @@ VividWebClient::OnPaint(CefRefPtr<CefBrowser> browser,
     with_producer([&](_VividWebProducer* producer) {
         producer_handle_software_paint(producer, buffer, width, height);
     });
+    RestoreOneShotSuspendedIfNeeded(browser);
 }
 
 void
@@ -2605,6 +2663,7 @@ VividWebClient::OnAcceleratedPaint(CefRefPtr<CefBrowser> browser,
     with_producer([&](_VividWebProducer* producer) {
         producer_handle_accelerated_paint(producer, info);
     });
+    RestoreOneShotSuspendedIfNeeded(browser);
 }
 
 void
@@ -2865,6 +2924,27 @@ vivid_web_producer_set_playing(VividWebProducer* self, gboolean playing)
         post_client_task(client,
                          base::BindOnce(&VividWebClient::DoSetSuspended, client, !playing));
     }
+}
+
+void
+vivid_web_producer_request_frame(VividWebProducer* self, const gchar* reason)
+{
+    g_return_if_fail(self != NULL);
+
+    g_mutex_lock(&self->lock);
+    CefRefPtr<VividWebClient> client = self->client;
+    const bool restore_suspended = !self->playing;
+    std::string reason_copy = reason && *reason ? reason : "";
+    g_mutex_unlock(&self->lock);
+
+    if (!client)
+        return;
+
+    post_client_task(client,
+                     base::BindOnce(&VividWebClient::DoRequestFrame,
+                                    client,
+                                    restore_suspended,
+                                    std::move(reason_copy)));
 }
 
 void

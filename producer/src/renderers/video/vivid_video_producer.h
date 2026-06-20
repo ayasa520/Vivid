@@ -101,6 +101,8 @@ void vivid_video_producer_set_audio_state(VividVideoProducer* self,
 void vivid_video_producer_set_playing(VividVideoProducer* self, gboolean playing);
 void vivid_video_producer_set_release_gate(VividVideoProducer*          self,
                                             const VividRendererReleaseGate* gate);
+void vivid_video_producer_request_frame(VividVideoProducer* self,
+                                         const gchar*         reason);
 
 gboolean vivid_video_producer_prepare_buffers(VividVideoProducer*          self,
                                                guint32                       width,

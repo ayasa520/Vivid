@@ -124,6 +124,8 @@ void vivid_web_producer_set_audio_samples(VividWebProducer* self,
                                            GVariant*          audio_samples);
 void vivid_web_producer_set_release_gate(VividWebProducer*          self,
                                           const VividRendererReleaseGate* gate);
+void vivid_web_producer_request_frame(VividWebProducer* self,
+                                       const gchar*       reason);
 
 gboolean vivid_web_producer_prepare_buffers(VividWebProducer*          self,
                                              guint32                     width,

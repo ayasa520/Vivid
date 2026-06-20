@@ -34,6 +34,7 @@ node_modules/
 
 producer/packaging/flatpak/sources
 CLAUDE.md
+AGENTS.md
 .claude
 __pycache__/
 .playwright-cli

@@ -36,6 +36,7 @@ namespace
 constexpr GstMapFlags kGstMapReadCuda =
     static_cast<GstMapFlags>(GST_MAP_READ | (GST_MAP_FLAG_LAST << 1));
 constexpr guint32 VIDEO_RELEASE_GATE_TIMEOUT_MSEC = 600u;
+constexpr GstClockTime VIDEO_PAUSED_PREROLL_WAIT_NSEC = 250 * GST_MSECOND;
 
 extern "C" {
 typedef struct _GstCudaMemory GstCudaMemory;
@@ -253,6 +254,18 @@ const char*
 bool_to_string(bool value)
 {
     return value ? "true" : "false";
+}
+
+const char*
+gst_state_name(GstState state)
+{
+    return gst_element_state_get_name(state);
+}
+
+const char*
+gst_state_change_name(GstStateChangeReturn result)
+{
+    return gst_element_state_change_return_get_name(result);
 }
 
 const char*
@@ -1546,8 +1559,12 @@ struct _VividVideoProducer
     bool pipeline_failed { false };
     bool logged_waiting_for_sample { false };
     bool logged_unexpected_caps { false };
+    bool pending_paused_preroll_request { false };
     guint64 uploaded_samples { 0 };
     guint64 eos_count { 0 };
+    guint64 paused_preroll_request_count { 0 };
+    guint64 last_paused_preroll_log_time_usec { 0 };
+    guint32 paused_preroll_log_suppressed { 0 };
 
     VividVideoVulkanBackend vulkan;
     VividVideoVulkanExportRequest export_request {};
@@ -1621,6 +1638,9 @@ stop_pipeline(VividVideoProducer* self)
     self->pipeline_failed = false;
     self->logged_waiting_for_sample = false;
     self->logged_unexpected_caps = false;
+    self->pending_paused_preroll_request = false;
+    self->last_paused_preroll_log_time_usec = 0;
+    self->paused_preroll_log_suppressed = 0;
 }
 
 void
@@ -1654,14 +1674,82 @@ apply_audio_state(VividVideoProducer* self)
                  nullptr);
 }
 
+GstStateChangeReturn
+request_pipeline_playback_state(VividVideoProducer* self)
+{
+    if (!self || !self->pipeline)
+        return GST_STATE_CHANGE_FAILURE;
+
+    return gst_element_set_state(self->pipeline,
+                                 self->playing ? GST_STATE_PLAYING : GST_STATE_PAUSED);
+}
+
 void
 apply_playback_state(VividVideoProducer* self)
 {
-    if (!self || !self->pipeline)
+    (void)request_pipeline_playback_state(self);
+}
+
+void
+log_paused_preroll_status(VividVideoProducer*   self,
+                          const char*           phase,
+                          GstStateChangeReturn  change_result,
+                          GstState              current,
+                          GstState              pending,
+                          gboolean              got_sample)
+{
+    if (!self)
         return;
 
-    gst_element_set_state(self->pipeline,
-                          self->playing ? GST_STATE_PLAYING : GST_STATE_PAUSED);
+    const guint64 now = g_get_monotonic_time();
+    if (!got_sample &&
+        self->last_paused_preroll_log_time_usec != 0 &&
+        now - self->last_paused_preroll_log_time_usec < G_USEC_PER_SEC) {
+        self->paused_preroll_log_suppressed++;
+        return;
+    }
+
+    g_message("VividVideoProducer: paused preroll %s result=%s current=%s "
+              "pending=%s got-sample=%s appsink-eos=%s requests=%" G_GUINT64_FORMAT
+              " uploaded=%" G_GUINT64_FORMAT " suppressed=%u",
+              phase ? phase : "status",
+              gst_state_change_name(change_result),
+              gst_state_name(current),
+              gst_state_name(pending),
+              bool_to_string(got_sample),
+              self->appsink
+                  ? bool_to_string(gst_app_sink_is_eos(GST_APP_SINK(self->appsink)))
+                  : "missing",
+              self->paused_preroll_request_count,
+              self->uploaded_samples,
+              self->paused_preroll_log_suppressed);
+    self->last_paused_preroll_log_time_usec = now;
+    self->paused_preroll_log_suppressed = 0;
+}
+
+GstSample*
+pull_paused_preroll_sample(VividVideoProducer* self, GstClockTime timeout)
+{
+    if (!self || !self->appsink)
+        return nullptr;
+
+    /*
+     * waywallen's video renderer keeps decoding until it has submitted one
+     * frame after negotiation, then it sleeps while paused. GStreamer gives us
+     * the same liveness point through PAUSED preroll: this blocks only for the
+     * one-shot first-frame bootstrap and never transitions user-paused media to
+     * PLAYING.
+     */
+    GstState current = GST_STATE_VOID_PENDING;
+    GstState pending = GST_STATE_VOID_PENDING;
+    GstStateChangeReturn result = GST_STATE_CHANGE_FAILURE;
+    if (self->pipeline) {
+        result = gst_element_get_state(self->pipeline, &current, &pending, timeout);
+    }
+
+    GstSample* sample = gst_app_sink_try_pull_preroll(GST_APP_SINK(self->appsink), 0);
+    log_paused_preroll_status(self, "pull", result, current, pending, sample != nullptr);
+    return sample;
 }
 
 bool
@@ -2429,7 +2517,41 @@ vivid_video_producer_set_playing(VividVideoProducer* self, gboolean playing)
         return;
 
     self->playing = !!playing;
+    if (self->playing)
+        self->pending_paused_preroll_request = false;
     apply_playback_state(self);
+}
+
+void
+vivid_video_producer_request_frame(VividVideoProducer* self, const gchar* reason)
+{
+    if (!self)
+        return;
+
+    /*
+     * Video first-frame handoff is driven by next_frame(): PLAYING pipelines
+     * yield normal appsink samples, while PAUSED pipelines can expose a preroll
+     * sample. Do not transiently switch to PLAYING here; that would advance
+     * user-paused wallpapers and could briefly unmute/animate media.
+     */
+    self->paused_preroll_request_count++;
+    if (!self->playing)
+        self->pending_paused_preroll_request = true;
+
+    const GstStateChangeReturn result = request_pipeline_playback_state(self);
+    GstState current = GST_STATE_VOID_PENDING;
+    GstState pending = GST_STATE_VOID_PENDING;
+    if (self->pipeline)
+        (void)gst_element_get_state(self->pipeline, &current, &pending, 0);
+
+    g_message("VividVideoProducer: request one DMA-BUF frame playing=%s "
+              "pipeline=%s set-state=%s current=%s pending=%s reason=%s",
+              self->playing ? "true" : "false",
+              self->pipeline ? "present" : "missing",
+              gst_state_change_name(result),
+              gst_state_name(current),
+              gst_state_name(pending),
+              reason && *reason ? reason : "(none)");
 }
 
 void
@@ -2598,6 +2720,26 @@ vivid_video_producer_next_frame(VividVideoProducer*      self,
         if (latest_sample)
             gst_sample_unref(latest_sample);
         latest_sample = sample;
+    }
+
+    if (!latest_sample && !self->playing) {
+        /*
+         * A PAUSED GStreamer pipeline does not have to produce regular appsink
+         * samples, but it should preroll one decoded frame. That preroll frame
+         * is exactly what the DMA-BUF rebind path needs: a real image for the
+         * newly exported ring without resuming user playback.
+         */
+        const GstClockTime preroll_wait = self->pending_paused_preroll_request
+            ? VIDEO_PAUSED_PREROLL_WAIT_NSEC
+            : 0;
+        latest_sample = pull_paused_preroll_sample(self, preroll_wait);
+        if (latest_sample && self->uploaded_samples == 0) {
+            g_message("VividVideoProducer: using paused preroll sample for first "
+                      "DMA-BUF frame transfer-path=%s",
+                      video_transfer_path_name(self->transfer_path));
+        }
+        if (latest_sample)
+            self->pending_paused_preroll_request = false;
     }
 
     if (!latest_sample) {

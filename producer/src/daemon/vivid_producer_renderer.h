@@ -163,6 +163,8 @@ vivid_producer_renderer_prepare_dmabuf_buffers_ex(
     VividProducerRendererBufferSet* out_set);
 gboolean vivid_producer_renderer_next_dmabuf_frame(VividProducerRenderer*      renderer,
                                                     VividProducerRendererFrame* out_frame);
+gboolean vivid_producer_renderer_request_dmabuf_frame(VividProducerRenderer* renderer,
+                                                       const gchar*            reason);
 void vivid_producer_renderer_buffer_set_clear(VividProducerRendererBufferSet* set);
 void vivid_producer_renderer_set_release_gate(VividProducerRenderer*         renderer,
                                                const VividRendererReleaseGate* gate);

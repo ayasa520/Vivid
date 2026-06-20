@@ -196,7 +196,11 @@ typedef struct
     guint64 sequence;
     guint64 next_renderer_retry_time_usec;
     guint64 renderer_generation;
+    guint64 last_paused_renderer_progress_log_time_usec;
+    guint32 paused_renderer_progress_log_suppressed;
+    guint32 renderer_first_frame_miss_count;
     gboolean needs_renderer_rebind;
+    gboolean needs_renderer_first_frame;
     OutputMemoryKind memory_kind;
     OutputDmaBufPath dmabuf_path;
     OutputPresentationPath presentation_path;
@@ -3011,6 +3015,8 @@ output_new(Client*   client,
         output->renderer_generation = vivid_producer_renderer_generation(producer->renderer);
         return output;
     }
+    if (output->memory_kind == OUTPUT_MEMORY_RENDERER_DMABUF)
+        output->needs_renderer_first_frame = TRUE;
 
     g_message("VividProducer: created DMA-BUF output=%u logical=%ux%u buffer=%ux%u "
               "scale=%.3f refresh=%u stride=%u modifier=0x%016" G_GINT64_MODIFIER
@@ -3764,12 +3770,31 @@ client_prepare_rebind_candidate(Client*                     client,
          * still-transitioning GPU memory, which shows up as persistent corruption
          * after project switches. Keep the old generation on screen until a real
          * first frame can be sent immediately after BIND_BUFFERS.
+         *
+         * Paused playback makes that safety rule easy to deadlock: the render
+         * loop may have a valid exported ring but no dirty frame, while the
+         * producer refuses to publish BIND_BUFFERS until that first frame exists.
+         * Ask the active renderer for a single bootstrap frame before polling
+         * next_frame(); next_frame() still remains the only authority that a real
+         * frame was produced for this exact buffer contract.
          */
+        vivid_producer_renderer_request_dmabuf_frame(client->producer->renderer,
+                                                     "rebind-first-frame");
         if (!vivid_producer_renderer_next_dmabuf_frame(client->producer->renderer,
                                                         first_frame)) {
+            output->renderer_first_frame_miss_count++;
             set_buffer_error(error,
-                             "renderer-owned DMA-BUF first frame is not ready for output=%u",
-                             output->output_id);
+                             "renderer-owned DMA-BUF first frame is not ready for output=%u "
+                             "misses=%u user-playing=%s policy-stopped=%s policy-paused=%s "
+                             "renderer-generation=%" G_GUINT64_FORMAT
+                             " output-renderer-generation=%" G_GUINT64_FORMAT,
+                             output->output_id,
+                             output->renderer_first_frame_miss_count,
+                             client->producer->user_playing ? "true" : "false",
+                             client->producer->policy_stopped ? "true" : "false",
+                             client->producer->policy_paused ? "true" : "false",
+                             candidate->renderer_generation,
+                             output->renderer_generation);
             return FALSE;
         }
 
@@ -3784,6 +3809,7 @@ client_prepare_rebind_candidate(Client*                     client,
         }
 
         candidate->sequence = first_frame->sequence;
+        output->renderer_first_frame_miss_count = 0;
         return TRUE;
     }
 
@@ -3893,6 +3919,29 @@ client_try_upgrade_output_to_renderer_dmabuf(Client* client, Output* output)
     return client_rebind_output(client, output);
 }
 
+static gboolean
+output_needs_renderer_rebind(const Output* output, guint64 renderer_generation)
+{
+    return output &&
+        (output->needs_renderer_rebind ||
+         output->renderer_generation != renderer_generation);
+}
+
+static gboolean
+output_needs_paused_renderer_progress(const Producer* producer,
+                                      const Output*   output,
+                                      guint64       renderer_generation)
+{
+    if (!producer || !output)
+        return FALSE;
+    if (!vivid_producer_renderer_prefers_dmabuf_buffers(producer->renderer))
+        return FALSE;
+
+    return output_needs_renderer_rebind(output, renderer_generation) ||
+        (output->needs_renderer_first_frame &&
+         output->memory_kind == OUTPUT_MEMORY_RENDERER_DMABUF);
+}
+
 static void
 producer_rebind_all_outputs(Producer* producer)
 {
@@ -3943,8 +3992,7 @@ send_frame_ready(Client* client, Output* output)
 
     const guint64 renderer_generation =
         vivid_producer_renderer_generation(client->producer->renderer);
-    if (output->needs_renderer_rebind ||
-        output->renderer_generation != renderer_generation) {
+    if (output_needs_renderer_rebind(output, renderer_generation)) {
         const guint64 now = (guint64)g_get_monotonic_time();
         if (output->next_renderer_retry_time_usec == 0 ||
             output->next_renderer_retry_time_usec <= now) {
@@ -3965,12 +4013,53 @@ send_frame_ready(Client* client, Output* output)
 
     if (output->memory_kind == OUTPUT_MEMORY_RENDERER_DMABUF) {
         VividProducerRendererFrame frame = {0};
-        if (!vivid_producer_renderer_next_dmabuf_frame(client->producer->renderer, &frame))
+        if (output->needs_renderer_first_frame) {
+            /*
+             * Initial BIND_BUFFERS does not go through client_rebind_output(),
+             * so there is no atomic "bind plus first frame" handoff to wake a
+             * paused video pipeline. Keep the already-bound generation alive and
+             * explicitly ask the renderer to publish one real frame; next_frame()
+             * still validates that a frame exists before FRAME_READY is emitted.
+             */
+            vivid_producer_renderer_request_dmabuf_frame(client->producer->renderer,
+                                                         "initial-first-frame");
+        }
+        if (!vivid_producer_renderer_next_dmabuf_frame(client->producer->renderer, &frame)) {
+            if (output->needs_renderer_first_frame) {
+                output->renderer_first_frame_miss_count++;
+                if (output->renderer_first_frame_miss_count == 1 ||
+                    output->renderer_first_frame_miss_count % 60 == 0) {
+                    g_message("VividProducer: initial renderer-owned DMA-BUF "
+                              "first frame is not ready for output=%u misses=%u "
+                              "user-playing=%s policy-stopped=%s policy-paused=%s "
+                              "generation=%" G_GUINT64_FORMAT
+                              " renderer-generation=%" G_GUINT64_FORMAT,
+                              output->output_id,
+                              output->renderer_first_frame_miss_count,
+                              client->producer->user_playing ? "true" : "false",
+                              client->producer->policy_stopped ? "true" : "false",
+                              client->producer->policy_paused ? "true" : "false",
+                              output->generation,
+                              output->renderer_generation);
+                }
+            }
             return TRUE;
+        }
         buffer_index = frame.buffer_index;
         sequence = frame.sequence;
         target_time_usec = frame.target_time_usec;
         output->sequence = sequence;
+        if (output->needs_renderer_first_frame) {
+            g_message("VividProducer: initial renderer-owned DMA-BUF first frame "
+                      "ready output=%u generation=%" G_GUINT64_FORMAT
+                      " buffer=%u sequence=%" G_GUINT64_FORMAT,
+                      output->output_id,
+                      output->generation,
+                      buffer_index,
+                      sequence);
+            output->needs_renderer_first_frame = FALSE;
+            output->renderer_first_frame_miss_count = 0;
+        }
         return send_frame_ready_event(client,
                                       output,
                                       buffer_index,
@@ -4005,6 +4094,38 @@ send_frame_ready(Client* client, Output* output)
                                   -1);
 }
 
+static void
+log_paused_renderer_progress_tick(Client* client,
+                                  Output* output,
+                                  guint64 renderer_generation)
+{
+    const guint64 now = (guint64)g_get_monotonic_time();
+    if (output->last_paused_renderer_progress_log_time_usec != 0 &&
+        now - output->last_paused_renderer_progress_log_time_usec < G_USEC_PER_SEC) {
+        output->paused_renderer_progress_log_suppressed++;
+        return;
+    }
+
+    g_message("VividProducer: paused frame tick is serving renderer progress "
+              "output=%u output-generation=%" G_GUINT64_FORMAT
+              " output-renderer-generation=%" G_GUINT64_FORMAT
+              " renderer-generation=%" G_GUINT64_FORMAT
+              " needs-rebind=%s needs-first-frame=%s user-playing=%s policy-stopped=%s "
+              "policy-paused=%s suppressed=%u",
+              output->output_id,
+              output->generation,
+              output->renderer_generation,
+              renderer_generation,
+              output->needs_renderer_rebind ? "true" : "false",
+              output->needs_renderer_first_frame ? "true" : "false",
+              client->producer->user_playing ? "true" : "false",
+              client->producer->policy_stopped ? "true" : "false",
+              client->producer->policy_paused ? "true" : "false",
+              output->paused_renderer_progress_log_suppressed);
+    output->last_paused_renderer_progress_log_time_usec = now;
+    output->paused_renderer_progress_log_suppressed = 0;
+}
+
 static gboolean
 client_frame_tick(gpointer user_data)
 {
@@ -4012,8 +4133,28 @@ client_frame_tick(gpointer user_data)
 
     if (!client->producer->user_playing ||
         client->producer->policy_stopped ||
-        client->producer->policy_paused)
+        client->producer->policy_paused) {
+        const guint64 renderer_generation =
+            vivid_producer_renderer_generation(client->producer->renderer);
+        for (guint i = 0; i < client->outputs->len; i++) {
+            Output* output = g_ptr_array_index(client->outputs, i);
+            if (!output_needs_paused_renderer_progress(client->producer,
+                                                       output,
+                                                       renderer_generation))
+                continue;
+            /*
+             * Playback policy pause stops steady-state frame delivery, but it
+             * must not stop renderer-owned DMA-BUF progress. Rebinds need their
+             * bind-safe first frame before switching generations; initial binds
+             * need one FRAME_READY after BIND_BUFFERS so paused video preroll is
+             * uploaded and the consumer has something to display.
+             */
+            log_paused_renderer_progress_tick(client, output, renderer_generation);
+            if (!send_frame_ready(client, output))
+                return G_SOURCE_REMOVE;
+        }
         return G_SOURCE_CONTINUE;
+    }
 
     for (guint i = 0; i < client->outputs->len; i++) {
         Output* output = g_ptr_array_index(client->outputs, i);

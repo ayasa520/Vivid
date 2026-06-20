@@ -102,6 +102,8 @@ typedef struct
         VividVideoProducerBufferSet*           out_set);
     void (*set_release_gate_func)(VividVideoProducer*           self,
                                   const VividRendererReleaseGate* gate);
+    void (*request_frame_func)(VividVideoProducer* self,
+                               const gchar*         reason);
     gboolean (*next_frame_func)(VividVideoProducer*      self,
                                 VividVideoProducerFrame* out_frame);
     void (*buffer_set_clear_func)(VividVideoProducerBufferSet* set);
@@ -149,6 +151,8 @@ typedef struct
         VividSceneProducer* self);
     void (*set_release_gate_func)(VividSceneProducer*           self,
                                   const VividRendererReleaseGate* gate);
+    void (*request_frame_func)(VividSceneProducer* self,
+                               const gchar*         reason);
     gboolean (*next_frame_func)(VividSceneProducer*      self,
                                 VividSceneProducerFrame* out_frame);
     void (*buffer_set_clear_func)(VividSceneProducerBufferSet* set);
@@ -197,6 +201,8 @@ typedef struct
         VividWebProducerBufferSet*           out_set);
     void (*set_release_gate_func)(VividWebProducer*             self,
                                   const VividRendererReleaseGate* gate);
+    void (*request_frame_func)(VividWebProducer* self,
+                               const gchar*       reason);
     gboolean (*next_frame_func)(VividWebProducer*      self,
                                 VividWebProducerFrame* out_frame);
     void (*buffer_set_clear_func)(VividWebProducerBufferSet* set);
@@ -222,6 +228,8 @@ struct _VividProducerRenderer
     gint     scene_fps;
     gboolean playback_paused;
     guint64  generation;
+    guint64  last_request_frame_log_time_usec;
+    guint32  request_frame_log_suppressed;
 
     /*
      * Device facts are enumerated once and re-resolved whenever the configured
@@ -621,6 +629,7 @@ vivid_producer_video_load(VividProducerRenderer* renderer)
         const VividRendererReleaseGate*))load_optional_video_symbol(
             video->module,
             "vivid_video_producer_set_release_gate");
+    LOAD_VIDEO_SYMBOL(request_frame_func, "vivid_video_producer_request_frame");
     LOAD_VIDEO_SYMBOL(next_frame_func, "vivid_video_producer_next_frame");
     LOAD_VIDEO_SYMBOL(buffer_set_clear_func, "vivid_video_producer_buffer_set_clear");
 
@@ -781,6 +790,7 @@ vivid_producer_scene_load(VividProducerRenderer* renderer)
         const VividRendererReleaseGate*))load_optional_scene_symbol(
             scene->module,
             "vivid_scene_producer_set_release_gate");
+    LOAD_SCENE_SYMBOL(request_frame_func, "vivid_scene_producer_request_frame");
     LOAD_SCENE_SYMBOL(next_frame_func, "vivid_scene_producer_next_frame");
     LOAD_SCENE_SYMBOL(buffer_set_clear_func, "vivid_scene_producer_buffer_set_clear");
 
@@ -939,6 +949,7 @@ vivid_producer_web_load(VividProducerRenderer* renderer)
         const VividRendererReleaseGate*))load_optional_web_symbol(
             web->module,
             "vivid_web_producer_set_release_gate");
+    LOAD_WEB_SYMBOL(request_frame_func, "vivid_web_producer_request_frame");
     LOAD_WEB_SYMBOL(next_frame_func, "vivid_web_producer_next_frame");
     LOAD_WEB_SYMBOL(buffer_set_clear_func, "vivid_web_producer_buffer_set_clear");
     LOAD_WEB_SYMBOL(global_shutdown_func, "vivid_web_producer_global_shutdown");
@@ -2714,6 +2725,66 @@ vivid_producer_renderer_next_dmabuf_frame(VividProducerRenderer*      renderer,
     };
     renderer_route_frame_to_renderer(&route_frame, out_frame);
     return TRUE;
+}
+
+static void
+renderer_log_request_frame(VividProducerRenderer* renderer,
+                           const gchar*           reason,
+                           gboolean               dispatched)
+{
+    const guint64 now = (guint64)g_get_monotonic_time();
+    if (renderer->last_request_frame_log_time_usec != 0 &&
+        now - renderer->last_request_frame_log_time_usec < G_USEC_PER_SEC) {
+        renderer->request_frame_log_suppressed++;
+        return;
+    }
+
+    g_message("VividProducer: request renderer DMA-BUF frame mode=%s "
+              "generation=%" G_GUINT64_FORMAT " playback-paused=%s "
+              "dispatched=%s reason=%s suppressed=%u",
+              renderer_mode_label(renderer->mode),
+              renderer->generation,
+              renderer->playback_paused ? "true" : "false",
+              dispatched ? "true" : "false",
+              reason && *reason ? reason : "(none)",
+              renderer->request_frame_log_suppressed);
+    renderer->last_request_frame_log_time_usec = now;
+    renderer->request_frame_log_suppressed = 0;
+}
+
+gboolean
+vivid_producer_renderer_request_dmabuf_frame(VividProducerRenderer* renderer,
+                                             const gchar*            reason)
+{
+    g_return_val_if_fail(renderer != NULL, FALSE);
+
+    gboolean dispatched = FALSE;
+    switch (renderer->mode) {
+    case VIVID_PRODUCER_RENDERER_MODE_VIDEO:
+        if (renderer->video.instance && renderer->video.request_frame_func) {
+            renderer->video.request_frame_func(renderer->video.instance, reason);
+            dispatched = TRUE;
+        }
+        break;
+    case VIVID_PRODUCER_RENDERER_MODE_WEB:
+        if (renderer->web.instance && renderer->web.request_frame_func) {
+            renderer->web.request_frame_func(renderer->web.instance, reason);
+            dispatched = TRUE;
+        }
+        break;
+    case VIVID_PRODUCER_RENDERER_MODE_SCENE_PENDING:
+        if (renderer->scene.instance && renderer->scene.request_frame_func) {
+            renderer->scene.request_frame_func(renderer->scene.instance, reason);
+            dispatched = TRUE;
+        }
+        break;
+    case VIVID_PRODUCER_RENDERER_MODE_DIAGNOSTIC:
+    default:
+        break;
+    }
+
+    renderer_log_request_frame(renderer, reason, dispatched);
+    return dispatched;
 }
 
 void

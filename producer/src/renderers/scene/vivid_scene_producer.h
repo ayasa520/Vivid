@@ -116,6 +116,8 @@ void vivid_scene_producer_set_audio_samples(VividSceneProducer* self,
                                              GVariant*            audio_samples);
 void vivid_scene_producer_set_release_gate(VividSceneProducer*          self,
                                             const VividRendererReleaseGate* gate);
+void vivid_scene_producer_request_frame(VividSceneProducer* self,
+                                          const gchar*         reason);
 
 gboolean vivid_scene_producer_query_dmabuf_caps(
     VividSceneProducer*             self,

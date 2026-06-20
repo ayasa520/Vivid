@@ -463,6 +463,26 @@ vivid_scene_producer_set_playing(VividSceneProducer* self, gboolean playing)
 }
 
 void
+vivid_scene_producer_request_frame(VividSceneProducer* self, const gchar* reason)
+{
+    g_return_if_fail(self != nullptr);
+
+    if (!self->scene)
+        return;
+
+    /*
+     * Producer-owned DMA-BUF handoff needs one real rendered slot before
+     * BIND_BUFFERS is safe. When policy pause has stopped the scene timer,
+     * posting a single draw mirrors waywallen's paused-negotiation fix without
+     * changing the user's playback state or restarting the periodic timer.
+     */
+    g_message("VividSceneProducer: request one DMA-BUF frame playing=%s reason=%s",
+              self->playing ? "true" : "false",
+              reason && *reason ? reason : "(none)");
+    self->scene->requestFrame();
+}
+
+void
 vivid_scene_producer_set_pointer_motion(VividSceneProducer* self,
                                          gdouble              x,
                                          gdouble              y)
