@@ -145,11 +145,9 @@ compute_video_blit_regions(VideoFillMode mode,
     const double dst_aspect =
         static_cast<double>(dst_width) / static_cast<double>(dst_height);
 
-    if (mode == VideoFillMode::AspectFit || mode == VideoFillMode::ScaleDown) {
+    if (mode == VideoFillMode::Fill) {
         double scale = std::min(static_cast<double>(dst_width) / static_cast<double>(src_width),
                                 static_cast<double>(dst_height) / static_cast<double>(src_height));
-        if (mode == VideoFillMode::ScaleDown)
-            scale = std::min(scale, 1.0);
         regions.draw_width =
             clamped_round_to_u32(static_cast<double>(src_width) * scale, 1, dst_width);
         regions.draw_height =
@@ -163,7 +161,7 @@ compute_video_blit_regions(VideoFillMode mode,
             VkOffset3D { static_cast<int32_t>(dst_x + regions.draw_width),
                          static_cast<int32_t>(dst_y + regions.draw_height),
                          1 };
-    } else if (mode == VideoFillMode::AspectCrop) {
+    } else if (mode == VideoFillMode::Cover) {
         double src_x = 0.0;
         double src_y = 0.0;
         double sample_width = static_cast<double>(src_width);

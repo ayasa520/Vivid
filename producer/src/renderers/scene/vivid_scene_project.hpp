@@ -44,18 +44,12 @@ inline void apply_user_property_overrides(SceneProject& project,
 
 inline wallpaper::FillMode to_wallpaper_fill_mode(int fill_mode) {
     switch (fill_mode) {
-    case 0:
-        return wallpaper::FillMode::STRETCH;
     case 1:
+        return wallpaper::FillMode::ASPECTCROP;
+    case 2:
         return wallpaper::FillMode::ASPECTFIT;
     case 3:
-        /*
-         * The bundled scene renderer has no CSS-style "scale down" mode.
-         * Mapping it to contain keeps the full authored scene visible instead
-         * of accidentally treating value 3 as crop through enum fallthrough.
-         */
-        return wallpaper::FillMode::ASPECTFIT;
-    case 2:
+        return wallpaper::FillMode::STRETCH;
     default:
         return wallpaper::FillMode::ASPECTCROP;
     }

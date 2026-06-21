@@ -666,11 +666,10 @@ VideoFillMode
 parse_fill_mode(int value)
 {
     switch (value) {
-    case 0: return VideoFillMode::Stretch;
-    case 1: return VideoFillMode::AspectFit;
-    case 3: return VideoFillMode::ScaleDown;
-    case 2:
-    default: return VideoFillMode::AspectCrop;
+    case 2: return VideoFillMode::Fill;
+    case 3: return VideoFillMode::Stretch;
+    case 1:
+    default: return VideoFillMode::Cover;
     }
 }
 
@@ -678,10 +677,9 @@ const char*
 fill_mode_name(VideoFillMode mode)
 {
     switch (mode) {
+    case VideoFillMode::Cover: return "cover";
+    case VideoFillMode::Fill: return "fill";
     case VideoFillMode::Stretch: return "stretch";
-    case VideoFillMode::AspectFit: return "fit";
-    case VideoFillMode::AspectCrop: return "cover";
-    case VideoFillMode::ScaleDown: return "scale-down";
     }
     return "cover";
 }
@@ -794,18 +792,16 @@ compute_video_fit_parameters(VideoFillMode mode,
     const double dst_aspect =
         static_cast<double>(dst_width) / static_cast<double>(dst_height);
 
-    if (mode == VideoFillMode::AspectFit || mode == VideoFillMode::ScaleDown) {
+    if (mode == VideoFillMode::Fill) {
         double scale = std::min(static_cast<double>(dst_width) / sample_width,
                                 static_cast<double>(dst_height) / sample_height);
-        if (mode == VideoFillMode::ScaleDown)
-            scale = std::min(scale, 1.0);
         params.draw_width =
             clamped_round_to_u32(sample_width * scale, 1, dst_width);
         params.draw_height =
             clamped_round_to_u32(sample_height * scale, 1, dst_height);
         params.dst_x = (dst_width - params.draw_width) / 2u;
         params.dst_y = (dst_height - params.draw_height) / 2u;
-    } else if (mode == VideoFillMode::AspectCrop) {
+    } else if (mode == VideoFillMode::Cover) {
         if (src_aspect > dst_aspect) {
             sample_width = static_cast<double>(src_height) * dst_aspect;
             sample_width = std::clamp(sample_width, 1.0, static_cast<double>(src_width));
@@ -1548,7 +1544,7 @@ struct _VividVideoProducer
     bool playing { true };
     bool muted { false };
     double volume { 1.0 };
-    VideoFillMode fill_mode { VideoFillMode::AspectCrop };
+    VideoFillMode fill_mode { VideoFillMode::Cover };
     int fps { 30 };
 
     GstElement* pipeline { nullptr };

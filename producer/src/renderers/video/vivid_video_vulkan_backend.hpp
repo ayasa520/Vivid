@@ -67,10 +67,9 @@ enum class VideoFrameTransferPath
 
 enum class VideoFillMode
 {
-    Stretch = 0,
-    AspectFit = 1,
-    AspectCrop = 2,
-    ScaleDown = 3,
+    Cover = 1,
+    Fill = 2,
+    Stretch = 3,
 };
 
 /*

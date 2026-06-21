@@ -119,7 +119,7 @@ struct _VividSceneProducer
     bool playing { true };
     bool muted { false };
     double volume { 1.0 };
-    int fill_mode { 2 };
+    int fill_mode { 1 };
     int fps { 30 };
     guint32 width { 0 };
     guint32 height { 0 };
@@ -366,7 +366,7 @@ vivid_scene_producer_configure(VividSceneProducer* self,
         self->project_dir != (project_dir ? project_dir : "");
     const gboolean next_muted = !!muted;
     const double next_volume = std::clamp(volume, 0.0, 1.0);
-    const int next_fill_mode = std::clamp(fill_mode, 0, 3);
+    const int next_fill_mode = std::clamp(fill_mode, 1, 3);
     const int next_fps = std::clamp(fps, 5, 240);
     const std::string next_render_device =
         render_device && *render_device ? render_device : "auto";

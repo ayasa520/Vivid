@@ -70,12 +70,10 @@ json_get_int_clamped(JsonObject* object,
         return fallback;
 
     /*
-     * WebUI select controls used to send numeric schema keys as JSON strings
-     * such as {"content-fit":"2"}.  json_object_get_int_member() reports that
-     * as a type mismatch and effectively turns it into zero, which made Cover
-     * bounce back to Fill.  Keep the producer tolerant at the socket boundary:
-     * schema values are still stored as integers, but stringified integers from
-     * controllers are parsed explicitly instead of being treated as 0.
+     * WebUI select controls may send numeric schema keys as JSON strings such
+     * as {"content-fit":"1"}.  json_object_get_int_member() reports that as a
+     * type mismatch, so parse stringified integers explicitly at the socket
+     * boundary and clamp them through the same schema range as numeric values.
      */
     const GType value_type = json_node_get_value_type(node);
     if (value_type == G_TYPE_INT64)
@@ -380,7 +378,7 @@ vivid_producer_config_load(VividProducerConfig* config)
      * because the old nvidia/va names have no meaningful render-node mapping.
      */
     load_string_member(global, "render-device", &config->render_device);
-    config->content_fit = json_get_int_clamped(global, "content-fit", config->content_fit, 0, 3);
+    config->content_fit = json_get_int_clamped(global, "content-fit", config->content_fit, 1, 3);
     config->scene_fps = json_get_int_clamped(global, "scene-fps", config->scene_fps, 5, 240);
     config->startup_delay = json_get_int_clamped(global, "startup-delay", config->startup_delay, 0, 10000);
     config->show_panel_menu = json_get_boolean(global, "show-panel-menu", config->show_panel_menu);
@@ -562,9 +560,9 @@ vivid_producer_config_apply_control(VividProducerConfig* config,
 
     case VIVID_DISPLAY_CONTROL_SET_CONTENT_FIT:
         config->content_fit =
-            json_get_int_clamped(payload, "contentFit", config->content_fit, 0, 3);
+            json_get_int_clamped(payload, "contentFit", config->content_fit, 1, 3);
         config->content_fit =
-            json_get_int_clamped(payload, "content-fit", config->content_fit, 0, 3);
+            json_get_int_clamped(payload, "content-fit", config->content_fit, 1, 3);
         return TRUE;
 
     case VIVID_DISPLAY_CONTROL_SET_SCENE_FPS:
@@ -640,7 +638,7 @@ vivid_producer_config_apply_control(VividProducerConfig* config,
         apply_stop_on_applications(config, payload);
         config->debug_mode = json_get_boolean(payload, "debug-mode", config->debug_mode);
         load_string_member(payload, "render-device", &config->render_device);
-        config->content_fit = json_get_int_clamped(payload, "content-fit", config->content_fit, 0, 3);
+        config->content_fit = json_get_int_clamped(payload, "content-fit", config->content_fit, 1, 3);
         config->scene_fps = json_get_int_clamped(payload, "scene-fps", config->scene_fps, 5, 240);
         config->startup_delay = json_get_int_clamped(payload, "startup-delay", config->startup_delay, 0, 10000);
         config->show_panel_menu = json_get_boolean(payload, "show-panel-menu", config->show_panel_menu);

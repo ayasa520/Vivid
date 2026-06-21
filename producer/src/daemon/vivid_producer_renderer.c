@@ -1042,7 +1042,7 @@ vivid_producer_web_start(VividProducerRenderer* renderer,
                                       renderer->user_properties_json,
                                       renderer->muted,
                                       volume,
-                                      CLAMP(renderer->content_fit, 0, 3),
+                                      CLAMP(renderer->content_fit, 1, 3),
                                       renderer->scene_fps,
                                       renderer_backend_render_device(renderer))) {
         g_warning("VividProducer: web renderer failed to configure project=%s",
@@ -1078,7 +1078,7 @@ vivid_producer_web_refresh_config(VividProducerRenderer* renderer)
                                                      renderer->user_properties_json,
                                                      renderer->muted,
                                                      volume,
-                                                     CLAMP(renderer->content_fit, 0, 3),
+                                                     CLAMP(renderer->content_fit, 1, 3),
                                                      renderer->scene_fps,
                                                      renderer_backend_render_device(renderer));
     if (!ok) {
@@ -1161,7 +1161,7 @@ vivid_producer_scene_start(VividProducerRenderer* renderer,
                                         renderer->user_properties_json,
                                         renderer->muted,
                                         volume,
-                                        CLAMP(renderer->content_fit, 0, 3),
+                                        CLAMP(renderer->content_fit, 1, 3),
                                         renderer->scene_fps,
                                         renderer_backend_render_device(renderer))) {
         g_warning("VividProducer: scene renderer failed to configure project=%s",
@@ -1199,7 +1199,7 @@ vivid_producer_video_apply_audio_state(VividProducerRenderer* renderer)
                                        renderer->user_properties_json,
                                        renderer->muted,
                                        volume,
-                                       CLAMP(renderer->content_fit, 0, 3),
+                                       CLAMP(renderer->content_fit, 1, 3),
                                        renderer->scene_fps,
                                        renderer_backend_render_device(renderer));
     }
@@ -1212,7 +1212,7 @@ vivid_producer_video_apply_audio_state(VividProducerRenderer* renderer)
                                      renderer->user_properties_json,
                                      renderer->muted,
                                      volume,
-                                     CLAMP(renderer->content_fit, 0, 3),
+                                     CLAMP(renderer->content_fit, 1, 3),
                                      renderer->scene_fps,
                                      renderer_backend_render_device(renderer));
     }
@@ -1454,7 +1454,7 @@ vivid_producer_video_start(VividProducerRenderer* renderer,
                                         project_path,
                                         renderer->muted,
                                         volume,
-                                        CLAMP(renderer->content_fit, 0, 3),
+                                        CLAMP(renderer->content_fit, 1, 3),
                                         renderer->scene_fps,
                                         renderer_backend_render_device(renderer))) {
         g_warning("VividProducer: video renderer failed to configure project=%s",
@@ -1496,7 +1496,7 @@ vivid_producer_video_refresh_config(VividProducerRenderer* renderer)
                                                        target.video_path,
                                                        renderer->muted,
                                                        volume,
-                                                       CLAMP(renderer->content_fit, 0, 3),
+                                                       CLAMP(renderer->content_fit, 1, 3),
                                                        renderer->scene_fps,
                                                        renderer_backend_render_device(renderer));
     if (!ok) {
@@ -1539,7 +1539,7 @@ vivid_producer_scene_refresh_config(VividProducerRenderer* renderer)
                                                        renderer->user_properties_json,
                                                        renderer->muted,
                                                        volume,
-                                                       CLAMP(renderer->content_fit, 0, 3),
+                                                       CLAMP(renderer->content_fit, 1, 3),
                                                        renderer->scene_fps,
                                                        renderer_backend_render_device(renderer));
     if (!ok) {
@@ -1614,7 +1614,7 @@ vivid_producer_renderer_apply_config(VividProducerRenderer*     renderer,
 
     const gboolean next_muted = config->mute;
     const gint next_volume = CLAMP(config->volume, 0, 100);
-    const gint next_content_fit = CLAMP(config->content_fit, 0, 3);
+    const gint next_content_fit = CLAMP(config->content_fit, 1, 3);
     const gint next_scene_fps = CLAMP(config->scene_fps, 5, 240);
     const gchar* next_user_properties =
         config->user_properties ? config->user_properties : "{}";
