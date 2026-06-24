@@ -24,6 +24,8 @@
 namespace
 {
 
+constexpr uint32_t WEB_EXPORT_FOURCC = DRM_FORMAT_ABGR8888;
+
 constexpr std::array kRequiredDeviceExtensions {
     VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
     VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
@@ -580,7 +582,7 @@ VividWebVulkanRoute::ensure(const VividGpuDevice& gpu_device)
 
     bool requires_dedicated = false;
     if (!validate_linear_dmabuf_export(selected,
-                                       VK_FORMAT_B8G8R8A8_UNORM,
+                                       fourcc_to_vk_format(WEB_EXPORT_FOURCC),
                                        VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                                            VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                                        requires_dedicated)) {
@@ -713,7 +715,7 @@ VividWebVulkanRoute::query_export_caps(const VividGpuDevice& gpu_device,
         }
     }
 
-    const VkFormat vk_format = fourcc_to_vk_format(DRM_FORMAT_XRGB8888);
+    const VkFormat vk_format = fourcc_to_vk_format(WEB_EXPORT_FOURCC);
     const VkFormatFeatureFlags want_features =
         VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
         VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
@@ -753,7 +755,7 @@ VividWebVulkanRoute::query_export_caps(const VividGpuDevice& gpu_device,
             continue;
         }
         caps.push_back(VividWebVulkanFormatCap {
-            .fourcc = DRM_FORMAT_XRGB8888,
+            .fourcc = WEB_EXPORT_FOURCC,
             .modifier = modifier.drmFormatModifier,
             .plane_count = modifier.drmFormatModifierPlaneCount,
         });
@@ -762,7 +764,7 @@ VividWebVulkanRoute::query_export_caps(const VividGpuDevice& gpu_device,
     bool requires_dedicated = false;
     if (validate_linear_dmabuf_export(selected, vk_format, usage, requires_dedicated)) {
         caps.push_back(VividWebVulkanFormatCap {
-            .fourcc = DRM_FORMAT_XRGB8888,
+            .fourcc = WEB_EXPORT_FOURCC,
             .modifier = DRM_FORMAT_MOD_LINEAR,
             .plane_count = 1,
         });

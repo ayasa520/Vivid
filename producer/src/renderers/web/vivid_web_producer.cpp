@@ -3,7 +3,7 @@
  *
  * CEF-based "web" wallpaper backend.
  *
- * One Vulkan-created export ring (3 linear XRGB8888 DMA-BUF images on the
+ * One Vulkan-created export ring (3 ABGR8888 DMA-BUF images on the
  * resolved GPU) is the only DMA-BUF contract this backend publishes. Frames
  * arrive through OnAcceleratedPaint: CEF exports a dmabuf, we import it with
  * Vulkan and copy into the exported ring slot on the GPU. Shared-texture
@@ -60,7 +60,7 @@ using vivid::producer::ProducerFrameRoute;
 namespace
 {
 
-constexpr guint32 WEB_RING_FOURCC = DRM_FORMAT_XRGB8888;
+constexpr guint32 WEB_RING_FOURCC = DRM_FORMAT_ABGR8888;
 constexpr guint WEB_RING_BUFFERS = VIVID_WEB_PRODUCER_MAX_BUFFERS;
 constexpr guint32 WEB_RELEASE_GATE_TIMEOUT_MSEC = 600u;
 constexpr int DEFAULT_VIEW_WIDTH = 1280;
@@ -1490,7 +1490,7 @@ struct WebFrameRing
             WebRingSlot& slot = slots[i];
             auto image = vulkan.create_export_image(next_width,
                                                     next_height,
-                                                    VK_FORMAT_B8G8R8A8_UNORM,
+                                                    VK_FORMAT_R8G8B8A8_UNORM,
                                                     next_request);
             if (!image.has_value()) {
                 g_warning("VividWebProducer: failed to create Vulkan export ring "
