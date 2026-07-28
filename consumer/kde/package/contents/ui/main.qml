@@ -13,6 +13,16 @@ WallpaperItem {
 
     property bool _initDone: false
 
+    // Keep an ordinary Qt Quick node in the wallpaper scene while the
+    // out-of-process producer is absent. This matches waywallen's KDE
+    // integration: the native display item is allowed to return no QSG node
+    // until its first copied frame exists, while this background keeps the
+    // Plasma wallpaper scene non-empty and independently renderable.
+    Rectangle {
+        anchors.fill: parent
+        color: "black"
+    }
+
     readonly property string defaultDisplayName: {
         const manufacturer = (Screen.manufacturer || "").trim();
         const model = (Screen.model || "").trim();
@@ -22,16 +32,6 @@ WallpaperItem {
         if (Screen.name && Screen.name.length > 0)
             return Screen.name;
         return "kde-plasma";
-    }
-
-    readonly property int stableOutputId: {
-        const text = root.configuration.DisplayInstanceId || root.defaultDisplayName;
-        let hash = 2166136261;
-        for (let i = 0; i < text.length; i++) {
-            hash ^= text.charCodeAt(i);
-            hash = Math.imul(hash, 16777619);
-        }
-        return (hash & 0x7fffffff) || 1;
     }
 
     function _generateUuidV4() {
@@ -47,13 +47,10 @@ WallpaperItem {
         return rate > 0 ? Math.round(rate * 1000) : 0;
     }
 
-    Rectangle {
-        anchors.fill: parent
-        color: "black"
-    }
-
     WindowModel {
         id: windowModel
+        screenGeometry: Qt.rect(Screen.virtualX, Screen.virtualY,
+                                Screen.width, Screen.height)
     }
 
     Loader {
@@ -71,7 +68,7 @@ WallpaperItem {
                     : root.defaultDisplayName);
             item.screenNameBinding = Qt.binding(() => Screen.name || "");
             item.instanceIdBinding = Qt.binding(() => root.configuration.DisplayInstanceId);
-            item.consumerOutputIdBinding = Qt.binding(() => root.stableOutputId);
+            item.consumerOutputIdBinding = 0;
             item.monitorIndexBinding = 0;
             item.displayXBinding = Qt.binding(() => Math.round(Screen.virtualX));
             item.displayYBinding = Qt.binding(() => Math.round(Screen.virtualY));
@@ -142,7 +139,8 @@ WallpaperItem {
                     const d = diagBox.display;
                     let s = "name:   " + d.displayName;
                     s += "\noutput: " + (d.outputId === 0 ? "-" : d.outputId)
-                         + "  consumer: " + d.consumerOutputId;
+                         + "  consumer: " + d.consumerOutputId
+                         + "  monitor: " + d.monitorIndex;
                     s += "\nscreen: " + Screen.name + " "
                          + Screen.width + "x" + Screen.height;
                     s += "\nconn:   " + connText(d.connState)

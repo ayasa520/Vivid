@@ -37,6 +37,8 @@ constexpr GstMapFlags kGstMapReadCuda =
     static_cast<GstMapFlags>(GST_MAP_READ | (GST_MAP_FLAG_LAST << 1));
 constexpr guint32 VIDEO_RELEASE_GATE_TIMEOUT_MSEC = 600u;
 constexpr GstClockTime VIDEO_PAUSED_PREROLL_WAIT_NSEC = 250 * GST_MSECOND;
+constexpr guint64 VIDEO_PLAYING_SAMPLE_STARVATION_RECOVERY_USEC = 1500ull * 1000ull;
+constexpr guint64 VIDEO_PLAYING_SAMPLE_RECOVERY_COOLDOWN_USEC = 3000ull * 1000ull;
 
 extern "C" {
 typedef struct _GstCudaMemory GstCudaMemory;
@@ -254,6 +256,24 @@ const char*
 bool_to_string(bool value)
 {
     return value ? "true" : "false";
+}
+
+bool
+gpu_device_equal(const VividGpuDevice& a, const VividGpuDevice& b)
+{
+    return std::strcmp(a.render_node, b.render_node) == 0 &&
+        std::strcmp(a.name, b.name) == 0 &&
+        std::strcmp(a.pci_address, b.pci_address) == 0 &&
+        a.vendor_id == b.vendor_id &&
+        a.drm_render_major == b.drm_render_major &&
+        a.drm_render_minor == b.drm_render_minor &&
+        std::memcmp(a.uuid, b.uuid, sizeof(a.uuid)) == 0 &&
+        std::memcmp(a.driver_uuid, b.driver_uuid, sizeof(a.driver_uuid)) == 0 &&
+        a.is_discrete == b.is_discrete &&
+        a.scene_dmabuf_n_caps == b.scene_dmabuf_n_caps &&
+        std::memcmp(a.scene_dmabuf_caps,
+                    b.scene_dmabuf_caps,
+                    sizeof(a.scene_dmabuf_caps[0]) * a.scene_dmabuf_n_caps) == 0;
 }
 
 const char*
@@ -1561,6 +1581,10 @@ struct _VividVideoProducer
     guint64 paused_preroll_request_count { 0 };
     guint64 last_paused_preroll_log_time_usec { 0 };
     guint32 paused_preroll_log_suppressed { 0 };
+    guint64 playing_sample_miss_count { 0 };
+    guint64 last_playing_sample_miss_log_time_usec { 0 };
+    guint64 playing_sample_starved_since_usec { 0 };
+    guint64 last_playing_sample_recovery_time_usec { 0 };
 
     VividVideoVulkanBackend vulkan;
     VividVideoVulkanExportRequest export_request {};
@@ -1637,6 +1661,10 @@ stop_pipeline(VividVideoProducer* self)
     self->pending_paused_preroll_request = false;
     self->last_paused_preroll_log_time_usec = 0;
     self->paused_preroll_log_suppressed = 0;
+    self->playing_sample_miss_count = 0;
+    self->last_playing_sample_miss_log_time_usec = 0;
+    self->playing_sample_starved_since_usec = 0;
+    self->last_playing_sample_recovery_time_usec = 0;
 }
 
 void
@@ -1680,10 +1708,93 @@ request_pipeline_playback_state(VividVideoProducer* self)
                                  self->playing ? GST_STATE_PLAYING : GST_STATE_PAUSED);
 }
 
-void
+GstStateChangeReturn
 apply_playback_state(VividVideoProducer* self)
 {
-    (void)request_pipeline_playback_state(self);
+    return request_pipeline_playback_state(self);
+}
+
+void
+log_playback_state_request(VividVideoProducer*  self,
+                           bool                 previous_playing,
+                           GstStateChangeReturn result)
+{
+    if (!self)
+        return;
+
+    GstState current = GST_STATE_VOID_PENDING;
+    GstState pending = GST_STATE_VOID_PENDING;
+    if (self->pipeline)
+        (void)gst_element_get_state(self->pipeline, &current, &pending, 0);
+
+    g_message("VividVideoProducer: playback state request previous-playing=%s "
+              "playing=%s pipeline=%s set-state=%s current=%s pending=%s "
+              "uploaded=%" G_GUINT64_FORMAT,
+              bool_to_string(previous_playing),
+              bool_to_string(self->playing),
+              self->pipeline ? "present" : "missing",
+              gst_state_change_name(result),
+              gst_state_name(current),
+              gst_state_name(pending),
+              self->uploaded_samples);
+}
+
+bool
+recover_playing_sample_starvation(VividVideoProducer* self, guint64 now_usec)
+{
+    if (!self || !self->pipeline || !self->playing)
+        return false;
+
+    if (self->last_playing_sample_recovery_time_usec != 0 &&
+        now_usec - self->last_playing_sample_recovery_time_usec <
+            VIDEO_PLAYING_SAMPLE_RECOVERY_COOLDOWN_USEC) {
+        return false;
+    }
+
+    gint64 position = 0;
+    if (!gst_element_query_position(self->pipeline, GST_FORMAT_TIME, &position) ||
+        position < 0) {
+        position = 0;
+    }
+
+    /*
+     * NVIDIA's H.264 decoder can remain in PLAYING with no new appsink samples
+     * after a PAUSED->PLAYING route-policy transition. A flushing key-unit seek
+     * keeps the same pipeline and playback intent, but forces demux/parser/
+     * decoder queues to rebuild from a valid access unit instead of leaving the
+     * wallpaper visually frozen after the producer has already resumed it.
+     */
+    const gboolean seek_ok =
+        gst_element_seek(self->pipeline,
+                         1.0,
+                         GST_FORMAT_TIME,
+                         static_cast<GstSeekFlags>(GST_SEEK_FLAG_FLUSH |
+                                                   GST_SEEK_FLAG_KEY_UNIT),
+                         GST_SEEK_TYPE_SET,
+                         position,
+                         GST_SEEK_TYPE_NONE,
+                         GST_CLOCK_TIME_NONE);
+    const GstStateChangeReturn state_result = apply_playback_state(self);
+
+    GstState current = GST_STATE_VOID_PENDING;
+    GstState pending = GST_STATE_VOID_PENDING;
+    (void)gst_element_get_state(self->pipeline, &current, &pending, 0);
+
+    g_message("VividVideoProducer: playing sample starvation recovery "
+              "seek=%s position=%" G_GINT64_FORMAT " set-state=%s current=%s "
+              "pending=%s uploaded=%" G_GUINT64_FORMAT,
+              bool_to_string(seek_ok),
+              position,
+              gst_state_change_name(state_result),
+              gst_state_name(current),
+              gst_state_name(pending),
+              self->uploaded_samples);
+
+    self->last_playing_sample_recovery_time_usec = now_usec;
+    self->playing_sample_starved_since_usec = 0;
+    self->playing_sample_miss_count = 0;
+    self->last_playing_sample_miss_log_time_usec = now_usec;
+    return seek_ok;
 }
 
 void
@@ -2125,6 +2236,12 @@ upload_sample(VividVideoProducer* self, GstSample* sample)
                       self->uploaded_samples);
             self->logged_first_upload = true;
         }
+        if (self->uploaded_samples % 300 == 0) {
+            g_message("VividVideoProducer: GPU VA video frames uploaded samples=%"
+                      G_GUINT64_FORMAT " playing=%s",
+                      self->uploaded_samples,
+                      bool_to_string(self->playing));
+        }
         return true;
     }
 
@@ -2268,6 +2385,12 @@ upload_sample(VividVideoProducer* self, GstSample* sample)
                   self->uploaded_samples);
         self->logged_first_upload = true;
     }
+    if (self->uploaded_samples % 300 == 0) {
+        g_message("VividVideoProducer: GPU video frames uploaded samples=%"
+                  G_GUINT64_FORMAT " playing=%s",
+                  self->uploaded_samples,
+                  bool_to_string(self->playing));
+    }
     return true;
 }
 
@@ -2382,7 +2505,8 @@ vivid_video_producer_configure(VividVideoProducer* self,
                                 gdouble              volume,
                                 gint                 fill_mode,
                                 gint                 fps,
-                                const gchar*         render_device)
+                                const gchar*         render_device,
+                                const VividGpuDevice* resolved_gpu)
 {
     g_return_val_if_fail(self != nullptr, FALSE);
     g_return_val_if_fail(video_path != nullptr, FALSE);
@@ -2390,8 +2514,13 @@ vivid_video_producer_configure(VividVideoProducer* self,
     const std::string next_path = video_path;
     const std::string next_render_device =
         render_device && *render_device ? render_device : "auto";
+    const bool next_gpu_valid = resolved_gpu != nullptr;
+    const VividGpuDevice next_gpu = next_gpu_valid ? *resolved_gpu : VividGpuDevice {};
     const bool path_changed = self->video_path != next_path;
-    const bool render_device_changed = self->render_device != next_render_device;
+    const bool render_device_changed =
+        self->render_device != next_render_device ||
+        self->gpu_device_valid != next_gpu_valid ||
+        (self->gpu_device_valid && !gpu_device_equal(self->gpu_device, next_gpu));
 
     self->video_path = next_path;
     self->render_device = next_render_device;
@@ -2418,9 +2547,8 @@ vivid_video_producer_configure(VividVideoProducer* self,
         self->sink_caps = nullptr;
         self->decode_label = nullptr;
         self->expected_cuda_device_id = -1;
-        self->gpu_device = {};
-        self->gpu_device_valid =
-            vivid_gpu_device_resolve(self->render_device.c_str(), &self->gpu_device);
+        self->gpu_device = next_gpu;
+        self->gpu_device_valid = next_gpu_valid;
         if (self->gpu_device_valid) {
             VideoCodecProbe probe = probe_video_codec(self->video_path);
             if (!probe.probed) {
@@ -2453,7 +2581,7 @@ vivid_video_producer_configure(VividVideoProducer* self,
                 self->expected_cuda_device_id = selection->expected_cuda_device_id;
             }
         } else {
-            g_warning("VividVideoProducer: no usable Vulkan GPU for render-device='%s'",
+            g_warning("VividVideoProducer: no resolved Vulkan GPU for render-device='%s'",
                       self->render_device.c_str());
         }
     }
@@ -2512,10 +2640,17 @@ vivid_video_producer_set_playing(VividVideoProducer* self, gboolean playing)
     if (!self)
         return;
 
+    const bool previous_playing = self->playing;
     self->playing = !!playing;
     if (self->playing)
         self->pending_paused_preroll_request = false;
-    apply_playback_state(self);
+    if (previous_playing != self->playing) {
+        self->playing_sample_miss_count = 0;
+        self->playing_sample_starved_since_usec = 0;
+    }
+    const GstStateChangeReturn result = apply_playback_state(self);
+    if (previous_playing != self->playing || result == GST_STATE_CHANGE_FAILURE)
+        log_playback_state_request(self, previous_playing, result);
 }
 
 void
@@ -2703,6 +2838,7 @@ vivid_video_producer_next_frame(VividVideoProducer*      self,
     g_return_val_if_fail(out_frame != nullptr, FALSE);
 
     memset(out_frame, 0, sizeof(*out_frame));
+    out_frame->acquire_sync_fd = -1;
     if (!self->vulkan_ready || !self->appsink || self->pipeline_failed)
         return FALSE;
 
@@ -2744,11 +2880,41 @@ vivid_video_producer_next_frame(VividVideoProducer*      self,
                       "transfer-path=%s",
                       video_transfer_path_name(self->transfer_path));
             self->logged_waiting_for_sample = true;
+        } else if (self->playing && self->uploaded_samples > 0) {
+            const guint64 now = g_get_monotonic_time();
+            self->playing_sample_miss_count++;
+            if (self->playing_sample_starved_since_usec == 0)
+                self->playing_sample_starved_since_usec = now;
+            if (self->last_playing_sample_miss_log_time_usec == 0 ||
+                now - self->last_playing_sample_miss_log_time_usec >= G_USEC_PER_SEC) {
+                GstState current = GST_STATE_VOID_PENDING;
+                GstState pending = GST_STATE_VOID_PENDING;
+                if (self->pipeline)
+                    (void)gst_element_get_state(self->pipeline, &current, &pending, 0);
+                g_message("VividVideoProducer: playing pipeline has no appsink sample "
+                          "misses=%" G_GUINT64_FORMAT " uploaded=%" G_GUINT64_FORMAT
+                          " current=%s pending=%s appsink-eos=%s",
+                          self->playing_sample_miss_count,
+                          self->uploaded_samples,
+                          gst_state_name(current),
+                          gst_state_name(pending),
+                          self->appsink
+                              ? bool_to_string(gst_app_sink_is_eos(GST_APP_SINK(self->appsink)))
+                              : "missing");
+                self->playing_sample_miss_count = 0;
+                self->last_playing_sample_miss_log_time_usec = now;
+            }
+            if (now - self->playing_sample_starved_since_usec >=
+                VIDEO_PLAYING_SAMPLE_STARVATION_RECOVERY_USEC) {
+                recover_playing_sample_starvation(self, now);
+            }
         }
         return FALSE;
     }
 
     self->logged_waiting_for_sample = false;
+    self->playing_sample_miss_count = 0;
+    self->playing_sample_starved_since_usec = 0;
     const guint32 upload_slot = self->vulkan.in_progress_buffer_index();
     if (!video_wait_release_gate(self, upload_slot)) {
         gst_sample_unref(latest_sample);

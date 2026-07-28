@@ -13,41 +13,38 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-
-PROTOCOL_NAME = "vivid-display-v1"
-PROTOCOL_VERSION = 1
-
-REQ_HELLO = 1
-REQ_CONTROL = 11
-
-EVT_WELCOME = 1
-EVT_CONTROL = 7
-
-CONTROL_GET_STATE = 1
-CONTROL_STATE_SNAPSHOT = 2
-CONTROL_SET_PROJECT = 3
-CONTROL_SET_MUTED = 5
-CONTROL_SET_VOLUME = 6
-CONTROL_SET_CONTENT_FIT = 7
-CONTROL_SET_SCENE_FPS = 8
-CONTROL_SET_USER_PROPERTIES = 9
-CONTROL_ACK = 11
-CONTROL_ERROR = 12
-CONTROL_SET_STATE = 13
-
-CONTROL_HEADER_BYTES = 8
-FRAME_HEADER_BYTES = 4
-MAX_BODY_BYTES = 65531
+from vivid_protocol_codec import pack_control_header
+from vivid_protocol_config_keys import PER_OUTPUT_PROJECTS
+from vivid_protocol_json_fields import J
+from vivid_protocol_meta import error_name
+from vivid_protocol_constants import (
+    VIVID_DISPLAY_CONTROL_ACK as CONTROL_ACK,
+    VIVID_DISPLAY_CONTROL_ERROR as CONTROL_ERROR,
+    VIVID_DISPLAY_CONTROL_GET_STATE as CONTROL_GET_STATE,
+    VIVID_DISPLAY_CONTROL_HEADER_BYTES as CONTROL_HEADER_BYTES,
+    VIVID_DISPLAY_CONTROL_SET_CONTENT_FIT as CONTROL_SET_CONTENT_FIT,
+    VIVID_DISPLAY_CONTROL_SET_MUTED as CONTROL_SET_MUTED,
+    VIVID_DISPLAY_CONTROL_SET_SCENE_FPS as CONTROL_SET_SCENE_FPS,
+    VIVID_DISPLAY_CONTROL_SET_STATE as CONTROL_SET_STATE,
+    VIVID_DISPLAY_CONTROL_SET_VOLUME as CONTROL_SET_VOLUME,
+    VIVID_DISPLAY_CONTROL_STATE_SNAPSHOT as CONTROL_STATE_SNAPSHOT,
+    VIVID_DISPLAY_CODEC_MAX_BODY_BYTES as MAX_BODY_BYTES,
+    VIVID_DISPLAY_FRAME_HEADER_BYTES as FRAME_HEADER_BYTES,
+    VIVID_DISPLAY_EVT_CONTROL as EVT_CONTROL,
+    VIVID_DISPLAY_EVT_WELCOME as EVT_WELCOME,
+    VIVID_DISPLAY_PROTOCOL_NAME as PROTOCOL_NAME,
+    VIVID_DISPLAY_PROTOCOL_VERSION as PROTOCOL_VERSION,
+    VIVID_DISPLAY_REQ_CONTROL as REQ_CONTROL,
+    VIVID_DISPLAY_REQ_HELLO as REQ_HELLO,
+)
 
 
 CONTROL_ACTIONS = {
     "getState": CONTROL_GET_STATE,
-    "setProject": CONTROL_SET_PROJECT,
     "setMuted": CONTROL_SET_MUTED,
     "setVolume": CONTROL_SET_VOLUME,
     "setContentFit": CONTROL_SET_CONTENT_FIT,
     "setSceneFps": CONTROL_SET_SCENE_FPS,
-    "setUserProperties": CONTROL_SET_USER_PROPERTIES,
     "patchState": CONTROL_SET_STATE,
 }
 
@@ -126,7 +123,7 @@ def encode_json_frame(opcode, payload):
 
 def encode_control_frame(control_opcode, payload):
     body_json = json.dumps(payload or {}, separators=(",", ":")).encode("utf-8")
-    control_header = struct.pack("<HHI", control_opcode, 0, len(body_json))
+    control_header = pack_control_header(control_opcode, 0, len(body_json))
     return encode_frame(REQ_CONTROL, control_header + body_json)
 
 
@@ -175,22 +172,28 @@ def decode_control(body):
 
 
 def producer_control(socket_path, control_opcode, payload=None):
+    payload = dict(payload or {})
+    request_id = int(payload.get(J["CONTROL_ENVELOPE"]["requestId"], 0) or 0)
+    if request_id <= 0:
+        request_id = int(time.time() * 1000) & 0xFFFFFFFFFFFFFFFF
+    payload[J["CONTROL_ENVELOPE"]["requestId"]] = request_id
+
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(5.0)
         sock.connect(socket_path)
         sock.sendall(encode_json_frame(REQ_HELLO, {
-            "protocol": PROTOCOL_NAME,
-            "version": PROTOCOL_VERSION,
-            "clientName": "wallpaper-webui",
-            "role": "controller",
-            "features": ["socket-control-v1"],
+            J["HELLO"]["protocol"]: PROTOCOL_NAME,
+            J["HELLO"]["version"]: PROTOCOL_VERSION,
+            J["HELLO"]["clientName"]: "wallpaper-webui",
+            J["HELLO"]["role"]: "controller",
+            J["HELLO"]["features"]: ["socket-control-v1"],
         }))
 
         opcode, body = read_frame(sock)
         if opcode != EVT_WELCOME:
             raise RuntimeError(f"expected WELCOME, got opcode {opcode}")
 
-        sock.sendall(encode_control_frame(control_opcode, payload or {}))
+        sock.sendall(encode_control_frame(control_opcode, payload))
 
         for _ in range(32):
             opcode, body = read_frame(sock)
@@ -198,14 +201,212 @@ def producer_control(socket_path, control_opcode, payload=None):
                 continue
 
             control = decode_control(body)
-            if control["opcode"] in (CONTROL_STATE_SNAPSHOT, CONTROL_ACK, CONTROL_ERROR):
-                return control
+            if control["opcode"] not in (CONTROL_STATE_SNAPSHOT, CONTROL_ACK, CONTROL_ERROR):
+                continue
+            response_payload = control.get("payload") or {}
+            if int(response_payload.get(J["CONTROL_ENVELOPE"]["requestId"], 0) or 0) not in (0, request_id):
+                continue
+            return control
 
         raise TimeoutError("producer did not return a control response")
 
 
 def response_payload(response):
     return response.get("payload") if isinstance(response, dict) else {}
+
+
+def format_producer_error_payload(payload):
+    if not isinstance(payload, dict):
+        return "producer error"
+    code = int(payload.get(J["CONTROL_ENVELOPE"]["code"], 0) or 0)
+    message = payload.get(J["CONTROL_ENVELOPE"]["message"], "")
+    message = message if isinstance(message, str) else str(message)
+    return f"{error_name(code)}: {message}" if message else error_name(code)
+
+
+def producer_control_error_text(control):
+    if not isinstance(control, dict):
+        return "producer control error"
+    if control.get("opcode") != CONTROL_ERROR:
+        return "producer control error"
+    return format_producer_error_payload(response_payload(control))
+
+
+def coerce_uint(value, default=0):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def global_config_from_state(state):
+    return state.get("global", {}) if isinstance(state, dict) else {}
+
+
+def state_outputs(state):
+    outputs = state.get("outputs", []) if isinstance(state, dict) else []
+    return outputs if isinstance(outputs, list) else []
+
+
+def primary_display_key(state):
+    global_config = global_config_from_state(state)
+    configured = global_config.get("primary-display-key")
+    configured = configured.strip() if isinstance(configured, str) else ""
+    if configured:
+        return configured
+
+    outputs = state_outputs(state)
+    for output in outputs:
+        if not isinstance(output, dict):
+            continue
+        if output.get("primary"):
+            key = output.get("displayKey")
+            key = key.strip() if isinstance(key, str) else ""
+            if key:
+                return key
+
+    for output in outputs:
+        if isinstance(output, dict):
+            key = output.get("displayKey")
+            key = key.strip() if isinstance(key, str) else ""
+            if key:
+                return key
+
+    return ""
+
+
+def output_for_display_key(state, display_key):
+    for output in state_outputs(state):
+        if not isinstance(output, dict):
+            continue
+        output_key = output.get("displayKey")
+        output_key = output_key.strip() if isinstance(output_key, str) else ""
+        if output_key == display_key:
+            return output
+    return None
+
+
+def validate_display_key(state, display_key):
+    if not display_key:
+        raise ValueError("Display connector key is required")
+    if output_for_display_key(state, display_key) is None:
+        raise ValueError("Display connector key does not match a live output")
+    return display_key
+
+
+def per_output_target_key(request, state):
+    global_config = global_config_from_state(state)
+    if global_config.get("multi-display-mode") != "independent":
+        requested = request.get("displayKey") if isinstance(request, dict) else None
+        requested = requested.strip() if isinstance(requested, str) else ""
+        if requested:
+            return validate_display_key(state, requested)
+        return validate_display_key(state, primary_display_key(state))
+
+    requested = request.get("displayKey") if isinstance(request, dict) else None
+    requested = requested.strip() if isinstance(requested, str) else ""
+    if requested:
+        return validate_display_key(state, requested)
+
+    selected = global_config.get("current-config-display-key")
+    selected = selected.strip() if isinstance(selected, str) else ""
+    if selected:
+        return validate_display_key(state, selected)
+
+    return validate_display_key(state, primary_display_key(state))
+
+
+def clone_json_object(value):
+    return json.loads(json.dumps(value)) if isinstance(value, dict) else {}
+
+
+def property_payload_count(properties):
+    return len(properties) if isinstance(properties, dict) else 0
+
+
+SAVED_PROJECTS = "saved-projects"
+
+
+def saved_projects_for_display(state, display_key):
+    global_config = global_config_from_state(state)
+    projects = global_config.get(PER_OUTPUT_PROJECTS)
+    if not isinstance(projects, dict):
+        return {}
+    entry = projects.get(display_key)
+    if not isinstance(entry, dict):
+        return {}
+    saved = entry.get(SAVED_PROJECTS)
+    if saved is None:
+        saved = entry.get("savedProjects")
+    return clone_json_object(saved)
+
+
+def stored_project_entry(state, display_key, project_path):
+    if not display_key or not project_path:
+        return {}
+    saved = saved_projects_for_display(state, display_key)
+    entry = saved.get(project_path)
+    return clone_json_object(entry) if isinstance(entry, dict) else {}
+
+
+def per_output_projects_patch(state, display_key, update):
+    if not display_key:
+        raise ValueError("Display connector key is required for wallpaper selection")
+    global_config = global_config_from_state(state)
+    projects = clone_json_object(global_config.get(PER_OUTPUT_PROJECTS))
+    entry = clone_json_object(projects.get(display_key))
+    entry.update(update)
+    entry.pop("user-properties", None)
+    entry.pop("userProperties", None)
+    projects[display_key] = entry
+    return {PER_OUTPUT_PROJECTS: projects}
+
+
+def per_output_projects_remove_patch(state, display_key):
+    if not display_key:
+        raise ValueError("Display connector key is required for wallpaper removal")
+    global_config = global_config_from_state(state)
+    projects = clone_json_object(global_config.get(PER_OUTPUT_PROJECTS))
+    projects.pop(display_key, None)
+    return {PER_OUTPUT_PROJECTS: projects}
+
+
+def wallpaper_select_patch(state, display_key, project_path, project_type, properties):
+    global_config = global_config_from_state(state)
+    projects = clone_json_object(global_config.get(PER_OUTPUT_PROJECTS))
+    entry = clone_json_object(projects.get(display_key))
+    entry["project-path"] = project_path
+    if project_type:
+        entry["project-type"] = project_type
+    entry.pop("user-properties", None)
+    entry.pop("userProperties", None)
+    saved = clone_json_object(entry.get(SAVED_PROJECTS))
+    project_entry = clone_json_object(saved.get(project_path))
+    if project_type:
+        project_entry["project-type"] = project_type
+    project_entry["user-properties"] = clone_json_object(properties)
+    saved[project_path] = project_entry
+    entry[SAVED_PROJECTS] = saved
+    projects[display_key] = entry
+    return {PER_OUTPUT_PROJECTS: projects}
+
+
+def wallpaper_properties_patch(state, display_key, project_path, project_type, properties):
+    global_config = global_config_from_state(state)
+    projects = clone_json_object(global_config.get(PER_OUTPUT_PROJECTS))
+    entry = clone_json_object(projects.get(display_key))
+    saved = clone_json_object(entry.get(SAVED_PROJECTS))
+    project_entry = clone_json_object(saved.get(project_path))
+    if project_type:
+        project_entry["project-type"] = project_type
+    project_entry["user-properties"] = clone_json_object(properties)
+    saved[project_path] = project_entry
+    entry[SAVED_PROJECTS] = saved
+    entry.pop("user-properties", None)
+    entry.pop("userProperties", None)
+    projects[display_key] = entry
+    return {PER_OUTPUT_PROJECTS: projects}
 
 
 def is_dir(path):
@@ -719,36 +920,72 @@ class VividWebUIHandler(BaseHTTPRequestHandler):
                 project_path = request.get("projectPath") or request.get("path") or ""
                 if not project_path:
                     raise ValueError("projectPath is required")
+
+                _control, state = self._producer_state()
+                target_key = per_output_target_key(request, state)
+                if not target_key:
+                    raise ValueError("No display output is available for wallpaper selection")
+
+                project_type = request.get("projectType") or request.get("type") or ""
                 properties = request.get("properties")
+                properties_source = "request"
                 if properties is None:
+                    stored = stored_project_entry(state, target_key, project_path)
+                    properties = stored.get("user-properties")
+                    if properties is None:
+                        properties = stored.get("userProperties")
+                    if properties is None:
+                        properties = {}
+                    if not isinstance(properties, dict):
+                        properties = {}
+                    if not project_type:
+                        project_type = (
+                            stored.get("project-type")
+                            or stored.get("projectType")
+                            or stored.get("type")
+                            or ""
+                        )
+                    properties_source = "saved-projects"
+                elif not isinstance(properties, dict):
                     properties = {}
 
-                # Selecting a wallpaper is intentionally a two-step socket
-                # transaction: first switch the project path, then publish that
-                # wallpaper's own property payload. Without the second frame a
-                # producer that just rendered another wallpaper would keep the
-                # previous active user-properties JSON until the next property
-                # edit, which is exactly the class of cross-wallpaper state leak
-                # this split architecture is meant to avoid.
-                select_control = producer_control(
+                print(
+                    "VividWebUI: wallpaper select "
+                    f"display={target_key} project={project_path} "
+                    f"properties-source={properties_source} "
+                    f"count={property_payload_count(properties)}",
+                    flush=True,
+                )
+                control = producer_control(
                     self.server.socket_path,
                     CONTROL_SET_STATE,
-                    {"project-path": project_path},
+                    wallpaper_select_patch(
+                        state,
+                        target_key,
+                        project_path,
+                        project_type,
+                        properties,
+                    ),
                 )
-                properties_control = producer_control(
+                self._send_json(200, {"ok": True, "control": control})
+            except Exception as error:
+                self._send_json(502, {"ok": False, "error": str(error)})
+            return
+
+        if request_path == "/api/wallpaper/remove":
+            try:
+                request = self._read_json_body()
+                _control, state = self._producer_state()
+                target_key = per_output_target_key(request, state)
+                if not target_key:
+                    raise ValueError("No display output is available for wallpaper removal")
+
+                control = producer_control(
                     self.server.socket_path,
-                    CONTROL_SET_USER_PROPERTIES,
-                    {
-                        "wallpaperId": request.get("wallpaperId") or project_path,
-                        "projectType": request.get("projectType") or request.get("type") or "",
-                        "properties": properties,
-                    },
+                    CONTROL_SET_STATE,
+                    per_output_projects_remove_patch(state, target_key),
                 )
-                self._send_json(200, {
-                    "ok": True,
-                    "control": properties_control,
-                    "selectControl": select_control,
-                })
+                self._send_json(200, {"ok": True, "control": control})
             except Exception as error:
                 self._send_json(502, {"ok": False, "error": str(error)})
             return
@@ -760,14 +997,32 @@ class VividWebUIHandler(BaseHTTPRequestHandler):
                 properties = request.get("properties")
                 if properties is None:
                     properties = {}
+                elif not isinstance(properties, dict):
+                    properties = {}
+                _control, state = self._producer_state()
+                target_key = per_output_target_key(request, state)
+                if not target_key:
+                    raise ValueError("No display output is available for wallpaper properties")
+
+                project_type = request.get("projectType") or request.get("type") or ""
+                if not project_path:
+                    raise ValueError("projectPath is required")
+                print(
+                    "VividWebUI: wallpaper properties "
+                    f"display={target_key} project={project_path} "
+                    f"count={property_payload_count(properties)}",
+                    flush=True,
+                )
                 control = producer_control(
                     self.server.socket_path,
-                    CONTROL_SET_USER_PROPERTIES,
-                    {
-                        "wallpaperId": request.get("wallpaperId") or project_path,
-                        "projectType": request.get("projectType") or request.get("type") or "",
-                        "properties": properties,
-                    },
+                    CONTROL_SET_STATE,
+                    wallpaper_properties_patch(
+                        state,
+                        target_key,
+                        project_path,
+                        project_type,
+                        properties,
+                    ),
                 )
                 self._send_json(200, {"ok": True, "control": control})
             except Exception as error:

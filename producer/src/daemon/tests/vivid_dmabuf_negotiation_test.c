@@ -21,9 +21,7 @@ make_caps(guint8 uuid_byte)
         VIVID_DMABUF_MEMORY_HINT_DEVICE_LOCAL | VIVID_DMABUF_MEMORY_HINT_HOST_VISIBLE;
     caps.sync_caps = VIVID_DMABUF_REQUIRED_SYNC_CAPS;
     caps.color_caps = VIVID_DMABUF_DEFAULT_COLOR_CAPS;
-    caps.relay_modes =
-        VIVID_DMABUF_RELAY_MODE_DIRECT_IMPORT |
-        VIVID_DMABUF_RELAY_MODE_SHADOW_COPY;
+    caps.relay_modes = VIVID_DMABUF_RELAY_MODE_SHADOW_COPY;
     return caps;
 }
 
@@ -180,12 +178,12 @@ test_unknown_uuid_without_drm_identity_is_cross_device(void)
 }
 
 static void
-test_cross_device_requires_shadow_copy(void)
+test_missing_shadow_copy_rejects(void)
 {
     const guint64 tiled = 0x0100000000000001ull;
     VividDmaBufPeerCaps producer = make_caps(0xaa);
     VividDmaBufPeerCaps consumer = make_caps(0xbb);
-    consumer.relay_modes = VIVID_DMABUF_RELAY_MODE_DIRECT_IMPORT;
+    consumer.relay_modes = 0;
     vivid_dmabuf_peer_caps_add_modifier(&producer, DRM_FORMAT_ABGR8888, tiled, 1);
     vivid_dmabuf_peer_caps_add_modifier(&consumer, DRM_FORMAT_ABGR8888, DRM_FORMAT_MOD_LINEAR, 1);
 
@@ -196,7 +194,7 @@ test_cross_device_requires_shadow_copy(void)
 }
 
 static void
-test_same_device_shadow_copy_prefers_non_linear_without_direct(void)
+test_same_device_shadow_copy_prefers_non_linear(void)
 {
     const guint64 tiled = 0x0100000000000001ull;
     VividDmaBufPeerCaps producer = make_caps(0x42);
@@ -217,7 +215,7 @@ test_same_device_shadow_copy_prefers_non_linear_without_direct(void)
 }
 
 static void
-test_same_device_shadow_copy_allows_linear_without_direct(void)
+test_same_device_shadow_copy_allows_linear(void)
 {
     VividDmaBufPeerCaps producer = make_caps(0x42);
     VividDmaBufPeerCaps consumer = make_caps(0x42);
@@ -241,22 +239,20 @@ test_same_device_shadow_copy_allows_linear_without_direct(void)
 }
 
 static void
-test_kde_egl_caps_remain_host_visible(void)
+test_kde_egl_shadow_copy_caps_remain_host_visible(void)
 {
     const guint64 tiled = 0x0100000000000001ull;
     VividDmaBufPeerCaps producer = make_caps(0x42);
     VividDmaBufPeerCaps consumer = make_caps(0x42);
     consumer.memory_hints = VIVID_DMABUF_MEMORY_HINT_HOST_VISIBLE;
-    consumer.relay_modes =
-        VIVID_DMABUF_RELAY_MODE_DIRECT_IMPORT |
-        VIVID_DMABUF_RELAY_MODE_SHADOW_COPY;
+    consumer.relay_modes = VIVID_DMABUF_RELAY_MODE_SHADOW_COPY;
     vivid_dmabuf_peer_caps_add_modifier(&producer, DRM_FORMAT_ABGR8888, tiled, 1);
     vivid_dmabuf_peer_caps_add_modifier(&consumer, DRM_FORMAT_ABGR8888, tiled, 1);
 
     VividDmaBufNegotiatedScheme scheme = {0};
     assert(vivid_dmabuf_negotiate_pick(&producer, &consumer, &scheme, NULL));
     assert(scheme.memory_hint == VIVID_DMABUF_MEMORY_HINT_HOST_VISIBLE);
-    assert(scheme.relay_mode == VIVID_DMABUF_RELAY_MODE_DIRECT_IMPORT);
+    assert(scheme.relay_mode == VIVID_DMABUF_RELAY_MODE_SHADOW_COPY);
 }
 
 static void
@@ -340,10 +336,10 @@ main(void)
     test_unknown_uuid_same_drm_identity_prefers_non_linear();
     test_uuid_mismatch_overrides_same_drm_identity();
     test_unknown_uuid_without_drm_identity_is_cross_device();
-    test_cross_device_requires_shadow_copy();
-    test_same_device_shadow_copy_prefers_non_linear_without_direct();
-    test_same_device_shadow_copy_allows_linear_without_direct();
-    test_kde_egl_caps_remain_host_visible();
+    test_missing_shadow_copy_rejects();
+    test_same_device_shadow_copy_prefers_non_linear();
+    test_same_device_shadow_copy_allows_linear();
+    test_kde_egl_shadow_copy_caps_remain_host_visible();
     test_kde_vulkan_shadow_copy_uses_device_local_only_when_both_advertise();
     test_missing_sync_caps_rejects();
     test_extent_zero_is_unbounded();

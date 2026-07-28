@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include "../../graphics/vivid_gpu_devices.h"
 #include "../../renderer_api/vivid_renderer_release_gate.h"
 
 #include <glib.h>
@@ -106,7 +107,8 @@ gboolean vivid_web_producer_configure(VividWebProducer* self,
                                        gdouble            volume,
                                        gint               fill_mode,
                                        gint               fps,
-                                       const gchar*       render_device);
+                                       const gchar*       render_device,
+                                       const VividGpuDevice* resolved_gpu);
 
 void vivid_web_producer_set_playing(VividWebProducer* self, gboolean playing);
 void vivid_web_producer_set_pointer_motion(VividWebProducer* self,

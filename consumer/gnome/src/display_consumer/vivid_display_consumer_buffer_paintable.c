@@ -11,6 +11,7 @@
 #include "vivid_display_consumer_dmabuf_texture.h"
 #include "vivid_display_consumer_vulkan_backend.h"
 #include "vivid_display_consumer_vulkan_blit.h"
+#include "vivid_display_protocol_json.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -48,9 +49,6 @@ typedef struct
     guint64 size;
     guint   n_planes;
     VividDmaBufPlane planes[MAX_DMABUF_PLANES];
-    gint    release_syncobj_fd;
-    gchar*  release_context;
-    gint64  release_attached_usec;
     ww_vk_backend_t*       vk_backend;
     ww_vk_imported_image_t vk_image;
     gboolean               has_vk_image;
@@ -64,10 +62,8 @@ typedef struct
     guint32   fourcc;
     guint64   modifier;
     gchar*    render_node;
-    gchar*    presentation_path;
     gboolean  premultiplied;
     GPtrArray* buffers;
-    gboolean  uses_shadow_copy;
 } VividDmaBufGeneration;
 
 typedef struct
@@ -113,9 +109,6 @@ static void vivid_display_consumer_buffer_paintable_iface_init(
     GdkPaintableInterface* iface);
 static void clear_state(VividDisplayConsumerBufferPaintable* self,
                         gboolean                             invalidate);
-static void signal_buffer_release_syncobj(VividDmaBufGeneration* generation,
-                                          VividDmaBufBuffer*     buffer,
-                                          const gchar*           reason);
 static gboolean signal_release_syncobj_fd(const gchar* render_node,
                                           gint         release_syncobj_fd,
                                           guint64      generation,
@@ -174,9 +167,6 @@ buffer_free(gpointer data)
     if (buffer->has_vk_image && buffer->vk_backend && buffer->vk_backend->loaded)
         ww_vk_destroy_imported_image(buffer->vk_backend, &buffer->vk_image);
     buffer->has_vk_image = FALSE;
-    if (buffer->release_syncobj_fd >= 0)
-        close(buffer->release_syncobj_fd);
-    g_free(buffer->release_context);
     g_free(buffer);
 }
 
@@ -187,13 +177,8 @@ generation_free(gpointer data)
     if (!generation)
         return;
 
-    for (guint i = 0; generation->buffers && i < generation->buffers->len; i++) {
-        VividDmaBufBuffer* buffer = g_ptr_array_index(generation->buffers, i);
-        signal_buffer_release_syncobj(generation, buffer, "generation-free");
-    }
     g_clear_pointer(&generation->buffers, g_ptr_array_unref);
     g_free(generation->render_node);
-    g_free(generation->presentation_path);
     g_free(generation);
 }
 
@@ -332,43 +317,6 @@ find_buffer(VividDmaBufGeneration* generation,
     return NULL;
 }
 
-static void
-signal_buffer_release_syncobj(VividDmaBufGeneration* generation,
-                              VividDmaBufBuffer*     buffer,
-                              const gchar*           reason)
-{
-    if (!generation || !buffer || buffer->release_syncobj_fd < 0)
-        return;
-
-    const gchar* context = buffer->release_context && *buffer->release_context
-        ? buffer->release_context
-        : reason ? reason : "paintable-release";
-    const gint64 release_age_usec = buffer->release_attached_usec > 0
-        ? g_get_monotonic_time() - buffer->release_attached_usec
-        : -1;
-    const gboolean signaled =
-        signal_release_syncobj_fd(generation->render_node,
-                                  buffer->release_syncobj_fd,
-                                  generation->generation,
-                                  buffer->index,
-                                  context);
-    if (signaled && release_age_usec >= 100 * G_TIME_SPAN_MILLISECOND) {
-        g_message("VividDisplayConsumer: release syncobj signal was slow "
-                  "generation=%" G_GUINT64_FORMAT " buffer=%u context=%s "
-                  "reason=%s age=%.2fms",
-                  generation->generation,
-                  buffer->index,
-                  context,
-                  reason ? reason : "paintable-release",
-                  release_age_usec / 1000.0);
-    }
-
-    close(buffer->release_syncobj_fd);
-    buffer->release_syncobj_fd = -1;
-    buffer->release_attached_usec = 0;
-    g_clear_pointer(&buffer->release_context, g_free);
-}
-
 static gboolean
 signal_release_syncobj_fd(const gchar* render_node,
                           gint         release_syncobj_fd,
@@ -420,84 +368,6 @@ remove_generation(VividDisplayConsumerBufferPaintable* self,
             return;
         }
     }
-}
-
-static GdkTexture*
-build_texture_for_buffer(VividDisplayConsumerBufferPaintable* self,
-                         VividDmaBufGeneration*              generation,
-                         VividDmaBufBuffer*                  buffer,
-                         GError**                             error)
-{
-    if (!self->display)
-        self->display = gdk_display_get_default();
-    if (!self->display) {
-        g_set_error_literal(error,
-                            VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR,
-                            VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR_DMABUF,
-                            "GDK display is unavailable for DMA-BUF import");
-        return NULL;
-    }
-
-    VividTextureDupFds* dup_fds = g_new0(VividTextureDupFds, 1);
-    for (guint i = 0; i < MAX_DMABUF_PLANES; i++)
-        dup_fds->fds[i] = -1;
-
-    GdkDmabufTextureBuilder* builder = gdk_dmabuf_texture_builder_new();
-    gdk_dmabuf_texture_builder_set_display(builder, self->display);
-    gdk_dmabuf_texture_builder_set_width(builder, generation->width);
-    gdk_dmabuf_texture_builder_set_height(builder, generation->height);
-    gdk_dmabuf_texture_builder_set_fourcc(builder, generation->fourcc);
-    gdk_dmabuf_texture_builder_set_modifier(builder, generation->modifier);
-    gdk_dmabuf_texture_builder_set_premultiplied(builder, generation->premultiplied);
-    gdk_dmabuf_texture_builder_set_n_planes(builder, buffer->n_planes);
-
-    /*
-     * This mirrors waywallen's ShadowPaintable lifetime model and intentionally
-     * rebuilds a GdkDmabufTexture for each displayed producer frame. GSK keys its
-     * imported VkImage cache by the GdkTexture pointer and synchronizes DMA-BUF
-     * reservation objects at import time, so reusing one GdkTexture for a mutable
-     * DMA-BUF can present stale content or miss producer writes. The protocol pool
-     * keeps one long-lived fd per bound plane, while each texture receives its own
-     * dup with a destroy notify; dropping the old GdkTexture releases the matching
-     * import and keeps GSK's cache bounded without relying on GJS garbage
-     * collection timing.
-     */
-    for (guint plane = 0; plane < buffer->n_planes; plane++) {
-        const gint dup_fd = fcntl(buffer->planes[plane].fd, F_DUPFD_CLOEXEC, 0);
-        if (dup_fd < 0) {
-            g_set_error(error,
-                        VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR,
-                        VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR_DMABUF,
-                        "failed to duplicate DMA-BUF fd for buffer=%u plane=%u: %s",
-                        buffer->index,
-                        plane,
-                        g_strerror(errno));
-            close_texture_dup_fds(dup_fds);
-            g_object_unref(builder);
-            return NULL;
-        }
-
-        dup_fds->fds[plane] = dup_fd;
-        dup_fds->n_fds = plane + 1;
-        gdk_dmabuf_texture_builder_set_fd(builder, plane, dup_fd);
-        gdk_dmabuf_texture_builder_set_stride(builder, plane, buffer->planes[plane].stride);
-        gdk_dmabuf_texture_builder_set_offset(builder, plane, buffer->planes[plane].offset);
-    }
-
-    GdkTexture* texture =
-        gdk_dmabuf_texture_builder_build(builder, close_texture_dup_fds, dup_fds, error);
-    g_object_unref(builder);
-
-    if (!texture)
-        close_texture_dup_fds(dup_fds);
-    return texture;
-}
-
-static gboolean
-generation_uses_shadow_copy(const VividDmaBufGeneration* generation)
-{
-    return generation &&
-        g_strcmp0(generation->presentation_path, "shadow-copy") == 0;
 }
 
 static gboolean
@@ -755,6 +625,22 @@ append_generation_from_json(VividDisplayConsumerBufferPaintable* self,
         return FALSE;
     }
 
+    const gchar* presentation_path =
+        json_object_get_string_member_default(
+            object,
+            VIVID_JSON_BIND_BUFFERS_PRESENTATION_PATH,
+            "");
+    if (g_strcmp0(presentation_path, "shadow-copy") != 0) {
+        g_set_error(error,
+                    VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR,
+                    VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR_PROTOCOL,
+                    "GNOME consumer supports only shadow-copy presentation; received %s",
+                    presentation_path && *presentation_path
+                        ? presentation_path
+                        : "(missing)");
+        return FALSE;
+    }
+
     JsonArray* buffers = json_object_get_array_member_or_null(object, "buffers");
     if (!buffers || json_array_get_length(buffers) == 0) {
         g_set_error_literal(error,
@@ -771,17 +657,16 @@ append_generation_from_json(VividDisplayConsumerBufferPaintable* self,
     generation->fourcc = fourcc;
     generation->modifier = modifier;
     generation->render_node =
-        g_strdup(json_object_get_string_member_default(object, "render-node", ""));
-    generation->presentation_path =
-        g_strdup(json_object_get_string_member_default(object, "presentationPath", "direct"));
-    generation->uses_shadow_copy = generation_uses_shadow_copy(generation);
+        g_strdup(json_object_get_string_member_default(
+            object,
+            VIVID_JSON_BIND_BUFFERS_RENDER_NODE,
+            ""));
     generation->premultiplied =
         json_member_get_boolean_default(object, "premultiplied", FALSE);
     generation->buffers = g_ptr_array_new_with_free_func(buffer_free);
 
-    if (generation->uses_shadow_copy &&
-        (!ensure_vulkan_relay(self, error) ||
-         !ensure_shadow_export(self, generation, error))) {
+    if (!ensure_vulkan_relay(self, error) ||
+        !ensure_shadow_export(self, generation, error)) {
         generation_free(generation);
         return FALSE;
     }
@@ -812,7 +697,6 @@ append_generation_from_json(VividDisplayConsumerBufferPaintable* self,
         }
 
         VividDmaBufBuffer* buffer = g_new0(VividDmaBufBuffer, 1);
-        buffer->release_syncobj_fd = -1;
         for (guint i = 0; i < MAX_DMABUF_PLANES; i++)
             buffer->planes[i].fd = -1;
 
@@ -884,8 +768,7 @@ append_generation_from_json(VividDisplayConsumerBufferPaintable* self,
             buffer->planes[plane_i].offset = offset;
         }
 
-        if (generation->uses_shadow_copy &&
-            !import_shadow_buffer(self, generation, buffer, error)) {
+        if (!import_shadow_buffer(self, generation, buffer, error)) {
             buffer_free(buffer);
             generation_free(generation);
             return FALSE;
@@ -972,11 +855,6 @@ snapshot_vfunc(GdkPaintable* paintable,
         graphene_rect_t rect;
         graphene_rect_init(&rect, 0.0f, 0.0f, (gfloat)width, (gfloat)height);
         gtk_snapshot_append_texture(gtk_snapshot, self->texture, &rect);
-        VividDmaBufGeneration* generation =
-            find_generation(self, self->current_generation);
-        VividDmaBufBuffer* buffer =
-            find_buffer(generation, self->current_buffer_index);
-        signal_buffer_release_syncobj(generation, buffer, "snapshot-default");
         return;
     }
 
@@ -1002,11 +880,6 @@ snapshot_vfunc(GdkPaintable* paintable,
     draw_source_to_dest(self, gtk_snapshot, self->source, self->dest);
 
     gtk_snapshot_restore(gtk_snapshot);
-    VividDmaBufGeneration* generation =
-        find_generation(self, self->current_generation);
-    VividDmaBufBuffer* buffer =
-        find_buffer(generation, self->current_buffer_index);
-    signal_buffer_release_syncobj(generation, buffer, "snapshot-configured");
 }
 
 static gint
@@ -1115,59 +988,6 @@ vivid_display_consumer_buffer_paintable_bind_json(
 }
 
 gboolean
-vivid_display_consumer_buffer_paintable_show_frame(
-    VividDisplayConsumerBufferPaintable* self,
-    guint64                               generation_id,
-    guint32                               buffer_index,
-    GError**                              error)
-{
-    g_return_val_if_fail(VIVID_DISPLAY_CONSUMER_IS_BUFFER_PAINTABLE(self), FALSE);
-
-    VividDmaBufGeneration* generation = find_generation(self, generation_id);
-    VividDmaBufBuffer* buffer = find_buffer(generation, buffer_index);
-    if (!generation || !buffer) {
-        g_set_error(error,
-                    VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR,
-                    VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR_PROTOCOL,
-                    "FRAME_READY references unknown generation=%" G_GUINT64_FORMAT " buffer=%u",
-                    generation_id,
-                    buffer_index);
-        return FALSE;
-    }
-
-    if (generation->uses_shadow_copy) {
-        g_set_error(error,
-                    VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR,
-                    VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR_PROTOCOL,
-                    "shadow-copy FRAME_READY must use show_frame_with_sync generation=%"
-                    G_GUINT64_FORMAT " buffer=%u",
-                    generation_id,
-                    buffer_index);
-        return FALSE;
-    }
-
-    GdkTexture* texture = build_texture_for_buffer(self, generation, buffer, error);
-    if (!texture)
-        return FALSE;
-
-    const gboolean size_changed =
-        self->current_width != generation->width ||
-        self->current_height != generation->height;
-
-    g_clear_object(&self->texture);
-    self->texture = texture;
-    self->current_generation = generation_id;
-    self->current_buffer_index = buffer_index;
-    self->current_width = generation->width;
-    self->current_height = generation->height;
-
-    if (size_changed)
-        gdk_paintable_invalidate_size(GDK_PAINTABLE(self));
-    gdk_paintable_invalidate_contents(GDK_PAINTABLE(self));
-    return TRUE;
-}
-
-gboolean
 vivid_display_consumer_buffer_paintable_show_frame_with_sync(
     VividDisplayConsumerBufferPaintable* self,
     guint64                               generation_id,
@@ -1197,27 +1017,6 @@ vivid_display_consumer_buffer_paintable_show_frame_with_sync(
                     VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR,
                     VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR_PROTOCOL,
                     "FRAME_READY references unknown generation=%" G_GUINT64_FORMAT " buffer=%u",
-                    generation_id,
-                    buffer_index);
-        return FALSE;
-    }
-    if (!generation->uses_shadow_copy) {
-        if (acquire_sync_fd >= 0)
-            close(acquire_sync_fd);
-        if (release_syncobj_fd >= 0) {
-            signal_release_syncobj_fd(generation->render_node,
-                                      release_syncobj_fd,
-                                      generation_id,
-                                      buffer_index,
-                                      "unexpected-direct-sync-frame");
-        }
-        if (release_syncobj_fd >= 0)
-            close(release_syncobj_fd);
-        g_set_error(error,
-                    VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR,
-                    VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR_PROTOCOL,
-                    "show_frame_with_sync requires shadow-copy generation=%" G_GUINT64_FORMAT
-                    " buffer=%u",
                     generation_id,
                     buffer_index);
         return FALSE;
@@ -1362,57 +1161,6 @@ vivid_display_consumer_buffer_paintable_show_frame_with_sync(
     gdk_paintable_invalidate_contents(GDK_PAINTABLE(self));
     return TRUE;
 }
-
-gboolean
-vivid_display_consumer_buffer_paintable_attach_release_syncobj(
-    VividDisplayConsumerBufferPaintable* self,
-    guint64                               generation_id,
-    guint32                               buffer_index,
-    gint                                  release_syncobj_fd,
-    GError**                              error)
-{
-    g_return_val_if_fail(VIVID_DISPLAY_CONSUMER_IS_BUFFER_PAINTABLE(self), FALSE);
-
-    VividDmaBufGeneration* generation = find_generation(self, generation_id);
-    VividDmaBufBuffer* buffer = find_buffer(generation, buffer_index);
-    if (!generation || !buffer || release_syncobj_fd < 0) {
-        g_set_error(error,
-                    VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR,
-                    VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR_PROTOCOL,
-                    "cannot attach release syncobj generation=%" G_GUINT64_FORMAT
-                    " buffer=%u fd=%d",
-                    generation_id,
-                    buffer_index,
-                    release_syncobj_fd);
-        return FALSE;
-    }
-
-    signal_buffer_release_syncobj(generation, buffer, "superseded");
-    buffer->release_syncobj_fd = release_syncobj_fd;
-    buffer->release_attached_usec = g_get_monotonic_time();
-    buffer->release_context =
-        g_strdup_printf("generation=%" G_GUINT64_FORMAT " buffer=%u",
-                        generation_id,
-                        buffer_index);
-    return TRUE;
-}
-
-void
-vivid_display_consumer_buffer_paintable_flush_pending_release_syncobj(
-    VividDisplayConsumerBufferPaintable* self,
-    const gchar*                          reason)
-{
-    g_return_if_fail(VIVID_DISPLAY_CONSUMER_IS_BUFFER_PAINTABLE(self));
-
-    VividDmaBufGeneration* generation =
-        find_generation(self, self->current_generation);
-    VividDmaBufBuffer* buffer =
-        find_buffer(generation, self->current_buffer_index);
-    signal_buffer_release_syncobj(generation,
-                                  buffer,
-                                  reason ? reason : "frame-ready");
-}
-
 
 void
 vivid_display_consumer_buffer_paintable_set_config(

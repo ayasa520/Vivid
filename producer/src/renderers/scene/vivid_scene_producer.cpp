@@ -91,6 +91,23 @@ void scene_caps_append(VividSceneProducerDmaBufCaps* caps,
     };
 }
 
+bool gpu_device_runtime_equal(const VividGpuDevice& a, const VividGpuDevice& b)
+{
+    return std::strcmp(a.render_node, b.render_node) == 0 &&
+        std::strcmp(a.name, b.name) == 0 &&
+        std::strcmp(a.pci_address, b.pci_address) == 0 &&
+        a.vendor_id == b.vendor_id &&
+        a.drm_render_major == b.drm_render_major &&
+        a.drm_render_minor == b.drm_render_minor &&
+        std::memcmp(a.uuid, b.uuid, sizeof(a.uuid)) == 0 &&
+        std::memcmp(a.driver_uuid, b.driver_uuid, sizeof(a.driver_uuid)) == 0 &&
+        a.is_discrete == b.is_discrete &&
+        a.scene_dmabuf_n_caps == b.scene_dmabuf_n_caps &&
+        std::memcmp(a.scene_dmabuf_caps,
+                    b.scene_dmabuf_caps,
+                    sizeof(a.scene_dmabuf_caps[0]) * a.scene_dmabuf_n_caps) == 0;
+}
+
 } // namespace
 
 struct _VividSceneProducer
@@ -107,6 +124,8 @@ struct _VividSceneProducer
      * renderer thread, so the bytes it points at must outlive this call.
      */
     std::array<guint8, VIVID_GPU_DEVICE_UUID_BYTES> resolved_gpu_uuid {};
+    VividGpuDevice resolved_gpu {};
+    bool resolved_gpu_valid { false };
     std::shared_ptr<wallpaper::WPSceneScriptMediaState> media_state {
         std::make_shared<wallpaper::WPSceneScriptMediaState>()
     };
@@ -164,6 +183,28 @@ void reset_scene_runtime(VividSceneProducer* self) {
     self->logged_swapchain_type_mismatch = false;
     self->logged_empty_swapchain_handles = false;
     self->logged_linear_only_caps = false;
+}
+
+/*
+ * A project switch does not need a new Vulkan device.  SceneWallpaper already
+ * treats PROPERTY_SOURCE as a long-lived backend reload: the render thread
+ * replaces the parsed scene and its render graph while VulkanRender, the
+ * allocator, and the exported swapchain stay alive.  Keep only the producer
+ * side frame bookkeeping here; destroying self->scene would reopen the
+ * NVIDIA/Vulkan device and makes every monitor wallpaper switch accumulate
+ * driver-owned state in the daemon process.
+ */
+void reset_scene_project_frame_state(VividSceneProducer* self) {
+    if (!self)
+        return;
+
+    self->frame_route.reset();
+    self->logged_waiting_for_frame = false;
+    self->missed_frame_count = 0;
+    self->last_missed_frame_summary_usec = 0;
+    self->logged_waiting_for_swapchain = false;
+    self->logged_swapchain_type_mismatch = false;
+    self->logged_empty_swapchain_handles = false;
 }
 
 SceneDmaBufRequest normalize_scene_dmabuf_request(
@@ -346,7 +387,8 @@ vivid_scene_producer_configure(VividSceneProducer* self,
                                 gdouble              volume,
                                 gint                 fill_mode,
                                 gint                 fps,
-                                const gchar*         render_device)
+                                const gchar*         render_device,
+                                const VividGpuDevice* resolved_gpu)
 {
     g_return_val_if_fail(self != nullptr, FALSE);
 
@@ -370,6 +412,9 @@ vivid_scene_producer_configure(VividSceneProducer* self,
     const int next_fps = std::clamp(fps, 5, 240);
     const std::string next_render_device =
         render_device && *render_device ? render_device : "auto";
+    const bool next_resolved_gpu_valid = resolved_gpu != nullptr;
+    const VividGpuDevice next_resolved_gpu =
+        next_resolved_gpu_valid ? *resolved_gpu : VividGpuDevice {};
     const bool user_properties_changed =
         self->user_properties_json != (user_properties_json ? user_properties_json : "");
     const bool runtime_properties_changed =
@@ -377,7 +422,11 @@ vivid_scene_producer_configure(VividSceneProducer* self,
         std::abs(self->volume - next_volume) > 0.0001 ||
         self->fill_mode != next_fill_mode ||
         self->fps != next_fps;
-    const bool render_device_changed = self->render_device != next_render_device;
+    const bool render_device_changed =
+        self->render_device != next_render_device ||
+        self->resolved_gpu_valid != next_resolved_gpu_valid ||
+        (self->resolved_gpu_valid &&
+         !gpu_device_runtime_equal(self->resolved_gpu, next_resolved_gpu));
 
     self->project = std::move(project);
     self->project_dir = project_dir ? project_dir : "";
@@ -387,6 +436,8 @@ vivid_scene_producer_configure(VividSceneProducer* self,
     self->fill_mode = next_fill_mode;
     self->fps = next_fps;
     self->render_device = next_render_device;
+    self->resolved_gpu = next_resolved_gpu;
+    self->resolved_gpu_valid = next_resolved_gpu_valid;
 
     g_message("VividSceneProducer: configure project=%s project-changed=%s user-properties-changed=%s runtime-properties-changed=%s gpu-changed=%s muted=%s volume=%.3f fill-mode=%d fps=%d render-device=%s",
               self->project_dir.c_str(),
@@ -400,7 +451,7 @@ vivid_scene_producer_configure(VividSceneProducer* self,
               self->fps,
               self->render_device.c_str());
 
-    if (project_changed || render_device_changed) {
+    if (render_device_changed) {
         /*
          * Producer mode exports the scene renderer's swapchain directly as DMA-BUFs.
          * Project changes can leave the old swapchain tied to the outgoing assets,
@@ -409,6 +460,9 @@ vivid_scene_producer_configure(VividSceneProducer* self,
          * contract empty until prepare_buffers() creates a fresh renderer generation.
          */
         reset_scene_runtime(self);
+    } else if (project_changed) {
+        /* Keep the initialized SceneWallpaper/Vulkan device across reloads. */
+        reset_scene_project_frame_state(self);
     }
 
     if (!ensure_scene_wallpaper(self->scene,
@@ -473,8 +527,8 @@ vivid_scene_producer_request_frame(VividSceneProducer* self, const gchar* reason
     /*
      * Producer-owned DMA-BUF handoff needs one real rendered slot before
      * BIND_BUFFERS is safe. When policy pause has stopped the scene timer,
-     * posting a single draw mirrors waywallen's paused-negotiation fix without
-     * changing the user's playback state or restarting the periodic timer.
+     * posting a single draw does not change the user's playback state or
+     * restart the periodic timer.
      */
     g_message("VividSceneProducer: request one DMA-BUF frame playing=%s reason=%s",
               self->playing ? "true" : "false",
@@ -680,14 +734,14 @@ vivid_scene_producer_prepare_buffers_with_request(
     }
 
     if (!self->render_ready) {
-        VividGpuDevice gpu_device {};
-        if (!vivid_gpu_device_resolve(self->render_device.c_str(), &gpu_device)) {
-            g_warning("VividSceneProducer: no usable Vulkan GPU for render-device='%s'",
+        if (!self->resolved_gpu_valid) {
+            g_warning("VividSceneProducer: no resolved Vulkan GPU for render-device='%s'",
                       self->render_device.c_str());
             self->last_dmabuf_prepare_status =
                 VIVID_SCENE_PRODUCER_DMABUF_PREPARE_UNSUPPORTED;
             return FALSE;
         }
+        const VividGpuDevice& gpu_device = self->resolved_gpu;
         memcpy(self->resolved_gpu_uuid.data(),
                gpu_device.uuid,
                VIVID_GPU_DEVICE_UUID_BYTES);
@@ -854,6 +908,21 @@ vivid_scene_producer_prepare_buffers_with_request(
          * renderer-thread-owned while prepare_buffers still reports allocation
          * failure through the existing producer-side blacklist path.
          */
+        /*
+         * The display may still be sampling a slot from the previous export
+         * generation.  Wait through the same release gate used before a scene
+         * render reuses a slot; this makes it safe for VulkanExSwapchain to
+         * destroy the old VkImages instead of retaining one generation for
+         * every failed modifier negotiation.
+         */
+        for (guint buffer_index = 0; buffer_index < 3; buffer_index++) {
+            if (!scene_wait_release_gate(self->release_gate, buffer_index)) {
+                self->last_dmabuf_prepare_status =
+                    VIVID_SCENE_PRODUCER_DMABUF_PREPARE_NOT_READY;
+                return false;
+            }
+        }
+
         g_message("VividSceneProducer: DMA-BUF route contract changed "
                   "modifier=0x%016" G_GINT64_MODIFIER "x memory=%s -> "
                   "modifier=0x%016" G_GINT64_MODIFIER "x memory=%s; "
@@ -1046,6 +1115,7 @@ vivid_scene_producer_next_frame(VividSceneProducer*      self,
     g_return_val_if_fail(out_frame != nullptr, FALSE);
 
     memset(out_frame, 0, sizeof(*out_frame));
+    out_frame->acquire_sync_fd = -1;
 
     if (!self->render_ready || !self->scene || !self->scene->exSwapchain())
         return FALSE;

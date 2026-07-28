@@ -40,6 +40,51 @@ set(VIVID_KDE_PACKAGE_ABI "${CMAKE_SYSTEM_PROCESSOR}"
 
 set(VIVID_GNOME_CONSUMER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../gnome")
 set(VIVID_PROTOCOL_DIR "${VIVID_GNOME_CONSUMER_DIR}/src/protocol")
+set(VIVID_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
+set(VIVID_PROTOCOL_GEN "${VIVID_REPO_ROOT}/tools/protocol_gen.sh")
+set(VIVID_PROTOCOL_SPEC "${VIVID_REPO_ROOT}/producer/src/protocol/vivid_display_v1.toml")
+set(VIVID_PROTOCOL_GEN_PY "${VIVID_REPO_ROOT}/producer/src/protocol/protocol_gen.py")
+set(VIVID_PROTOCOL_CHECK_STAMP "${CMAKE_CURRENT_BINARY_DIR}/vivid_protocol_check.stamp")
+set(VIVID_PROTOCOL_GENERATED
+    "${VIVID_REPO_ROOT}/producer/src/protocol/vivid_display_protocol_ids.h"
+    "${VIVID_PROTOCOL_DIR}/vivid_display_protocol_ids.h"
+    "${VIVID_GNOME_CONSUMER_DIR}/extension/shell/helper/protocol-constants.js"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/qml_module/vivid_protocol_constants.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/qml_module/vivid_protocol_cpp.hpp"
+    "${VIVID_REPO_ROOT}/producer/src/webui/vivid_protocol_constants.py"
+    "${VIVID_REPO_ROOT}/producer/src/webui/vivid_protocol_codec.py"
+    "${VIVID_REPO_ROOT}/producer/src/webui/vivid_protocol_meta.py"
+    "${VIVID_GNOME_CONSUMER_DIR}/extension/shell/helper/protocol-codec.js"
+    "${VIVID_GNOME_CONSUMER_DIR}/extension/shell/helper/protocol-meta.js"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/qml_module/vivid_protocol_meta.hpp"
+    "${VIVID_REPO_ROOT}/producer/src/protocol/vivid_display_protocol_json.h"
+    "${VIVID_PROTOCOL_DIR}/vivid_display_protocol_json.h"
+    "${VIVID_GNOME_CONSUMER_DIR}/extension/shell/helper/protocol-json-fields.js"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/qml_module/vivid_protocol_json_fields.hpp"
+    "${VIVID_REPO_ROOT}/producer/src/webui/vivid_protocol_json_fields.py"
+    "${VIVID_REPO_ROOT}/producer/src/webui/vivid_protocol_config_keys.py"
+    "${VIVID_REPO_ROOT}/producer/src/daemon/vivid_producer_config_schema.h"
+    "${VIVID_REPO_ROOT}/producer/src/protocol/vivid_display_protocol.h"
+    "${VIVID_PROTOCOL_DIR}/vivid_display_protocol.h"
+    "${VIVID_REPO_ROOT}/producer/src/protocol/vivid_display_codec.c"
+    "${VIVID_PROTOCOL_DIR}/vivid_display_codec.c"
+    "${VIVID_REPO_ROOT}/docs/protocols-reference.md"
+)
+
+add_custom_command(
+    OUTPUT ${VIVID_PROTOCOL_CHECK_STAMP}
+    COMMAND ${VIVID_PROTOCOL_GEN} --check
+    COMMAND ${CMAKE_COMMAND} -E touch ${VIVID_PROTOCOL_CHECK_STAMP}
+    DEPENDS
+        ${VIVID_PROTOCOL_SPEC}
+        ${VIVID_PROTOCOL_GEN_PY}
+        ${VIVID_PROTOCOL_GEN}
+        ${VIVID_PROTOCOL_GENERATED}
+    COMMENT "Checking generated protocol bindings are in sync"
+    VERBATIM
+)
+
+add_custom_target(vivid_protocol_check DEPENDS ${VIVID_PROTOCOL_CHECK_STAMP})
 
 add_library(vivid_display_protocol STATIC
     "${VIVID_PROTOCOL_DIR}/vivid_display_codec.c"
@@ -68,6 +113,10 @@ qt_add_qml_module(vivid-display-qml
     SOURCES
         src/qml_module/vivid_display.hpp
         src/qml_module/vivid_display.cpp
+        src/qml_module/vivid_protocol_constants.hpp
+        src/qml_module/vivid_protocol_cpp.hpp
+        src/qml_module/vivid_protocol_meta.hpp
+        src/qml_module/vivid_protocol_json_fields.hpp
         src/qml_module/vivid_media_bridge.hpp
         src/qml_module/vivid_media_bridge.cpp
         src/qml_module/plugin_info.hpp
@@ -115,6 +164,8 @@ target_compile_options(vivid-display-qml PRIVATE
 target_link_options(vivid-display-qml PRIVATE
     -Wl,--as-needed
 )
+
+add_dependencies(vivid-display-qml vivid_protocol_check)
 
 # Install a complete KPackage-shaped tree. The generated QML module is copied
 # into contents/ui/VividDisplayEmbed so Plasma can resolve it with a relative

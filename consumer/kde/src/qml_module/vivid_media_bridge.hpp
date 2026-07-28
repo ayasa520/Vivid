@@ -98,6 +98,7 @@ private:
     QVector<MprisSnapshot> queryMprisSnapshots() const;
     MprisSnapshot queryMprisSnapshot(const QString& name) const;
     void scheduleMediaRefresh(int delayMs = 80);
+    void updateDisplayMprisPolicyFacts(const QVector<MprisSnapshot>& snapshots);
     void sendMediaPayload(const MprisSnapshot* snapshot, const ThumbnailPayload* thumbnail);
     QJsonObject defaultMediaPayload() const;
 
@@ -128,6 +129,7 @@ private:
     QTimer m_mediaRefreshTimer;
     QTimer m_mediaPollTimer;
     QTimer m_audioRestartTimer;
+    bool m_mprisMonitoring { false };
     QHash<QString, ThumbnailPayload> m_thumbnailCache;
     QString m_lastMediaJson;
     std::optional<MprisSnapshot> m_lastSnapshot;
@@ -136,7 +138,6 @@ private:
     pa_context* m_paContext { nullptr };
     pa_stream* m_paStream { nullptr };
     bool m_audioShouldRun { false };
-    quint64 m_audioFrameCount { 0 };
     quint64 m_lastAudioEmitUsec { 0 };
 
     QVector<float> m_leftSamples;

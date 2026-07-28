@@ -16,6 +16,7 @@
 #include <array>
 #include <cerrno>
 #include <cstring>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -32,6 +33,13 @@ constexpr std::array kRequiredDeviceExtensions {
     VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
     VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
 };
+
+std::mutex&
+vulkan_instance_mutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
 
 const char*
 vk_result_name(VkResult result)
@@ -355,6 +363,14 @@ find_physical_device_by_uuid(VkInstance instance,
 bool
 create_probe_instance(VkInstance& instance, const char* app_name)
 {
+    /*
+     * Web outputs can query caps and create their real export route while other
+     * independent displays are also initializing. Keep Vulkan instance creation
+     * serialized within this backend; browser rendering and frame copies are not
+     * held behind this lock.
+     */
+    std::lock_guard<std::mutex> lock(vulkan_instance_mutex());
+
     VkApplicationInfo app_info {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pNext = nullptr,
@@ -541,6 +557,7 @@ VividWebVulkanRoute::ensure(const VividGpuDevice& gpu_device)
         .enabledExtensionCount = 0,
         .ppEnabledExtensionNames = nullptr,
     };
+    std::lock_guard<std::mutex> lock(vulkan_instance_mutex());
     VkResult result = vkCreateInstance(&instance_info, nullptr, &instance);
     if (result != VK_SUCCESS) {
         g_warning("VividWebProducer: failed to create Vulkan instance result=%s",
@@ -678,7 +695,8 @@ VividWebVulkanRoute::ensure(const VividGpuDevice& gpu_device)
     }
 
     g_message("VividWebProducer: Vulkan blit/export route ready on gpu=%s node=%s "
-              "dedicated-export=%s forbid-device-local-export=%s",
+              "dedicated-required=%s dedicated-used=true "
+              "forbid-device-local-export=%s",
               device_name.c_str(),
               gpu_device.render_node[0] ? gpu_device.render_node : "(unknown)",
               bool_to_string(export_requires_dedicated),
@@ -876,9 +894,12 @@ VividWebVulkanRoute::create_export_image(uint32_t width,
     };
     VkExportMemoryAllocateInfo export_info {
         .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
-        .pNext = export_requires_dedicated
-            ? static_cast<void*>(&dedicated_info)
-            : nullptr,
+        /*
+         * Waywallen always dedicates exported DMA-BUF image memory.  The
+         * cached requirement flag was queried for LINEAR tiling and cannot be
+         * used to decide the allocation chain for a DRM modifier image.
+         */
+        .pNext = &dedicated_info,
         .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
     };
     VkMemoryAllocateInfo allocate_info {

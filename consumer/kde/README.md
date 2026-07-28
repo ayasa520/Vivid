@@ -8,6 +8,9 @@ The package embeds its Qt QML display module under
 library `.so` inside the extension package instead of depending on a
 system-wide QML module.
 
+The consumer does not force a Qt Quick graphics API. It detects the scene-graph
+API chosen by Plasma and selects the matching EGL or Vulkan DMA-BUF importer.
+
 ## Build
 
 ```sh

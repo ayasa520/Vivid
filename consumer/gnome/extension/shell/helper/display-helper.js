@@ -15,39 +15,86 @@ import Gtk from 'gi://Gtk?version=4.0';
 import cairo from 'cairo';
 import system from 'system';
 
+import {
+    VIVID_DISPLAY_AUDIO_SAMPLES_BIN_MAX_COUNT,
+    VIVID_DISPLAY_BUTTON_PRESSED,
+    VIVID_DISPLAY_BUTTON_RELEASED,
+    VIVID_DISPLAY_AXIS_WHEEL,
+    VIVID_DISPLAY_CODEC_MAX_BODY_BYTES,
+    VIVID_DISPLAY_EVT_BIND_BUFFERS,
+    VIVID_DISPLAY_EVT_ERROR,
+    VIVID_DISPLAY_EVT_FRAME_READY,
+    VIVID_DISPLAY_EVT_OUTPUT_ACCEPTED,
+    VIVID_DISPLAY_EVT_SET_CONFIG,
+    VIVID_DISPLAY_EVT_UNBIND,
+    VIVID_DISPLAY_EVT_WELCOME,
+    VIVID_DISPLAY_FRAME_READY_BODY_BYTES,
+    VIVID_DISPLAY_FRAME_READY_FD_COUNT,
+    VIVID_DISPLAY_POINTER_AXIS_BODY_BYTES,
+    VIVID_DISPLAY_POINTER_BUTTON_BODY_BYTES,
+    VIVID_DISPLAY_POINTER_MOTION_BODY_BYTES,
+    VIVID_DISPLAY_PROTOCOL_NAME,
+    VIVID_DISPLAY_PROTOCOL_VERSION,
+    VIVID_DISPLAY_REQ_AUDIO_SAMPLES_BIN,
+    VIVID_DISPLAY_REQ_BIND_FAILED,
+    VIVID_DISPLAY_REQ_CONSUMER_CAPS,
+    VIVID_DISPLAY_REQ_HELLO,
+    VIVID_DISPLAY_REQ_MEDIA_STATE,
+    VIVID_DISPLAY_REQ_POINTER_AXIS,
+    VIVID_DISPLAY_REQ_POINTER_BUTTON,
+    VIVID_DISPLAY_REQ_POINTER_MOTION,
+    VIVID_DISPLAY_REQ_REGISTER_OUTPUT,
+    VIVID_DISPLAY_REQ_UNBIND_DONE,
+    VIVID_DISPLAY_REQ_WINDOW_STATE,
+    VIVID_DISPLAY_UNBIND_BODY_BYTES,
+} from './protocol-constants.js';
+import {
+    decodeFrameReady,
+    decodeUnbind,
+    encodeAudioSamplesBin,
+    encodePointerAxis,
+    encodePointerButton,
+    encodePointerMotion,
+} from './protocol-codec.js';
+import {
+    bindFailedReasonName,
+    errorDomain,
+    errorName,
+} from './protocol-meta.js';
+import { J } from './protocol-json-fields.js';
+
 const APPLICATION_ID = 'dev.rikka.VividWallpaper.Helper';
 const TITLE_PREFIX = `@${APPLICATION_ID}!`;
-const PROTOCOL_NAME = 'vivid-display-v1';
-const PROTOCOL_VERSION = 1;
-const MAX_BODY_BYTES = 65531;
+const PROTOCOL_NAME = VIVID_DISPLAY_PROTOCOL_NAME;
+const PROTOCOL_VERSION = VIVID_DISPLAY_PROTOCOL_VERSION;
+const MAX_BODY_BYTES = VIVID_DISPLAY_CODEC_MAX_BODY_BYTES;
 const FRAME_HEADER_BYTES = 4;
-const POINTER_MOTION_BODY_BYTES = 28;
-const POINTER_BUTTON_BODY_BYTES = 36;
-const POINTER_AXIS_BODY_BYTES = 48;
-const FRAME_READY_BODY_BYTES = 36;
-const FRAME_READY_FD_COUNT = 2;
-const UNBIND_BODY_BYTES = 12;
+const POINTER_MOTION_BODY_BYTES = VIVID_DISPLAY_POINTER_MOTION_BODY_BYTES;
+const POINTER_BUTTON_BODY_BYTES = VIVID_DISPLAY_POINTER_BUTTON_BODY_BYTES;
+const POINTER_AXIS_BODY_BYTES = VIVID_DISPLAY_POINTER_AXIS_BODY_BYTES;
+const FRAME_READY_BODY_BYTES = VIVID_DISPLAY_FRAME_READY_BODY_BYTES;
+const FRAME_READY_FD_COUNT = VIVID_DISPLAY_FRAME_READY_FD_COUNT;
+const UNBIND_BODY_BYTES = VIVID_DISPLAY_UNBIND_BODY_BYTES;
 
-const REQ_HELLO = 1;
-const REQ_REGISTER_OUTPUT = 2;
-const REQ_UPDATE_OUTPUT = 3;
-const REQ_CONSUMER_CAPS = 4;
-const REQ_POINTER_MOTION = 7;
-const REQ_POINTER_BUTTON = 8;
-const REQ_POINTER_AXIS = 9;
-const REQ_WINDOW_STATE = 10;
-const REQ_MEDIA_STATE = 12;
-const REQ_AUDIO_SAMPLES = 13;
-const REQ_BIND_FAILED = 14;
-const REQ_UNBIND_DONE = 15;
+const REQ_HELLO = VIVID_DISPLAY_REQ_HELLO;
+const REQ_REGISTER_OUTPUT = VIVID_DISPLAY_REQ_REGISTER_OUTPUT;
+const REQ_CONSUMER_CAPS = VIVID_DISPLAY_REQ_CONSUMER_CAPS;
+const REQ_POINTER_MOTION = VIVID_DISPLAY_REQ_POINTER_MOTION;
+const REQ_POINTER_BUTTON = VIVID_DISPLAY_REQ_POINTER_BUTTON;
+const REQ_POINTER_AXIS = VIVID_DISPLAY_REQ_POINTER_AXIS;
+const REQ_WINDOW_STATE = VIVID_DISPLAY_REQ_WINDOW_STATE;
+const REQ_MEDIA_STATE = VIVID_DISPLAY_REQ_MEDIA_STATE;
+const REQ_AUDIO_SAMPLES_BIN = VIVID_DISPLAY_REQ_AUDIO_SAMPLES_BIN;
+const REQ_BIND_FAILED = VIVID_DISPLAY_REQ_BIND_FAILED;
+const REQ_UNBIND_DONE = VIVID_DISPLAY_REQ_UNBIND_DONE;
 
-const EVT_WELCOME = 1;
-const EVT_OUTPUT_ACCEPTED = 2;
-const EVT_BIND_BUFFERS = 3;
-const EVT_SET_CONFIG = 4;
-const EVT_FRAME_READY = 5;
-const EVT_UNBIND = 6;
-const EVT_ERROR = 9;
+const EVT_WELCOME = VIVID_DISPLAY_EVT_WELCOME;
+const EVT_OUTPUT_ACCEPTED = VIVID_DISPLAY_EVT_OUTPUT_ACCEPTED;
+const EVT_BIND_BUFFERS = VIVID_DISPLAY_EVT_BIND_BUFFERS;
+const EVT_SET_CONFIG = VIVID_DISPLAY_EVT_SET_CONFIG;
+const EVT_FRAME_READY = VIVID_DISPLAY_EVT_FRAME_READY;
+const EVT_UNBIND = VIVID_DISPLAY_EVT_UNBIND;
+const EVT_ERROR = VIVID_DISPLAY_EVT_ERROR;
 
 const DRM_FORMAT_XRGB8888 = 0x34325258; // 'XR24'
 const DRM_FORMAT_ARGB8888 = 0x34325241; // 'AR24'
@@ -55,7 +102,6 @@ const DRM_FORMAT_XBGR8888 = 0x34324258; // 'XB24'
 const DRM_FORMAT_ABGR8888 = 0x34324241; // 'AB24'
 const DRM_FORMAT_MOD_LINEAR = 0;
 const DRM_FORMAT_MOD_INVALID = 0x00ffffffffffffffn;
-const FRAME_SYNC_WAIT_TIMEOUT_MSEC = 1000;
 const VIVID_RGBA_FOURCCS = [
     DRM_FORMAT_XRGB8888,
     DRM_FORMAT_ARGB8888,
@@ -63,15 +109,15 @@ const VIVID_RGBA_FOURCCS = [
     DRM_FORMAT_ABGR8888,
 ];
 
-const POINTER_BUTTON_RELEASED = 0;
-const POINTER_BUTTON_PRESSED = 1;
-const POINTER_AXIS_WHEEL = 0;
+const POINTER_BUTTON_RELEASED = VIVID_DISPLAY_BUTTON_RELEASED;
+const POINTER_BUTTON_PRESSED = VIVID_DISPLAY_BUTTON_PRESSED;
+const POINTER_AXIS_WHEEL = VIVID_DISPLAY_AXIS_WHEEL;
 const FRAME_INTERVAL_WARN_USEC = 50_000;
 const TEXTURE_REFRESH_WARN_USEC = 8_000;
-const RELEASE_FLUSH_WARN_USEC = 8_000;
 const FRAME_DIAGNOSTIC_LOG_INTERVAL_USEC = 1_000_000;
 const SOCKET_WRITE_WARN_USEC = 16_667;
 const SOCKET_DIAGNOSTIC_LOG_INTERVAL_USEC = 1_000_000;
+const CONNECT_FAILURE_LOG_INTERVAL_USEC = 30_000_000;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -214,27 +260,6 @@ function stringFromDisplayConsumer(value) {
     return typeof value === 'string' ? value.trim() : '';
 }
 
-function gdkDmabufFormatAt(formats, index) {
-    const result = formats.get_format(index);
-    if (Array.isArray(result))
-        return [Number(result[0]), result[1]];
-
-    /*
-     * GJS normally maps the two out parameters to an array. Keep a defensive
-     * object path here because this is an introspection boundary and the caps
-     * packet should fall back cleanly instead of crashing the helper if the
-     * binding shape changes.
-     */
-    if (result && typeof result === 'object') {
-        const fourcc = result.fourcc ?? result.format ?? result[0];
-        const modifier = result.modifier ?? result[1];
-        if (fourcc !== undefined && modifier !== undefined)
-            return [Number(fourcc), modifier];
-    }
-
-    return [0, DRM_FORMAT_MOD_INVALID];
-}
-
 function queryVulkanRelayCaps() {
     const text = stringFromDisplayConsumer(
         callDisplayConsumerFunction('dmabuf_texture_query_vulkan_relay_caps_json'));
@@ -257,9 +282,9 @@ function queryVulkanRelayCaps() {
 function buildDmaBufCaps() {
     const caps = {
         version: 3,
-        backend: 'gnome-gtk4-gdk-dmabuf-texture-builder',
-        probe: 'unprobed',
-        relayModes: ['direct-import-v1', 'shadow-copy-v1'],
+        backend: 'gnome-gtk4-vulkan-dmabuf-relay-gdk-shadow',
+        probe: 'vulkan-relay-unprobed',
+        relayModes: ['shadow-copy-v1'],
         renderNode: '',
         deviceUuid: '',
         driverUuid: '',
@@ -268,39 +293,34 @@ function buildDmaBufCaps() {
         fourccs: [],
         modifiers: [],
         implicitLinearFourccs: [],
-        memoryHints: ['host-visible', 'implicit-linear'],
+        memoryHints: [],
         syncCaps: ['implicit', 'explicit-sync-fd', 'drm-syncobj-release'],
         colorCaps: ['srgb', 'limited-range', 'premultiplied-alpha'],
         extentMax: { width: 0, height: 0 },
-        textureTarget: 'GdkDmabufTexture',
-        skipsExternalOnlyModifiers: false,
+        textureTarget: 'VulkanRelayShadowGdkDmabufTexture',
+        skipsExternalOnlyModifiers: true,
         diagnostics: '',
     };
 
     /*
-     * Prefer the waywallen-style GNOME path when available: a private Vulkan
-     * relay imports producer DMA-BUFs with native modifiers/device-local
-     * memory, then exports a LINEAR shadow for GDK. The caps below describe
-     * the relay import leg, so direct-import-v1 is intentionally not advertised
-     * in this mode; otherwise the daemon could legally choose a modifier that
-     * only the Vulkan relay can import and ask GdkDmabufTextureBuilder to import
-     * it directly.
+     * Match waywallen's GNOME path: a private Vulkan relay imports producer
+     * DMA-BUFs with native modifiers/device-local memory, then exports a LINEAR
+     * shadow for GDK. These caps describe the relay import leg. There is no
+     * direct GDK import fallback because producer-owned textures must never
+     * enter GSK's presentation lifetime.
      */
     const relayCaps = queryVulkanRelayCaps();
     if (relayCaps?.available && Array.isArray(relayCaps.formats)) {
         const relayFormats = relayCaps.formats
             .filter(entry => isVividRgbaFourcc(Number(entry?.fourcc)));
         if (relayFormats.length > 0) {
-            caps.backend = 'gnome-gtk4-vulkan-dmabuf-relay-gdk-shadow';
             caps.probe = String(relayCaps.probe ?? 'vulkan-relay-format-probe');
-            caps.relayModes = ['shadow-copy-v1'];
             caps.renderNode = String(relayCaps.renderNode ?? '');
             caps.deviceUuid = String(relayCaps.deviceUuid ?? '');
             caps.driverUuid = String(relayCaps.driverUuid ?? '');
             caps.memoryHints = relayCaps.supportsDeviceLocal
                 ? ['device-local', 'host-visible']
                 : ['host-visible'];
-            caps.textureTarget = 'VulkanRelayShadowGdkDmabufTexture';
             caps.diagnostics =
                 `relayDrm=${relayCaps.drmRenderMajor ?? 0}:${relayCaps.drmRenderMinor ?? 0}`;
 
@@ -317,71 +337,13 @@ function buildDmaBufCaps() {
 
         caps.diagnostics = 'vulkan relay caps contained no supported RGBA formats';
     } else if (relayCaps) {
+        caps.probe = String(relayCaps.probe ?? 'vulkan-relay-unavailable');
         caps.diagnostics =
             `vulkan relay unavailable stage=${relayCaps.stage ?? '(unknown)'} ` +
             `rc=${relayCaps.rc ?? '(unknown)'}`;
-    }
-
-    try {
-        const display = Gdk.Display.get_default();
-        caps.renderNode = stringFromDisplayConsumer(
-            callDisplayConsumerFunction('dmabuf_texture_get_render_node', display));
-        caps.deviceUuid = stringFromDisplayConsumer(
-            callDisplayConsumerFunction('dmabuf_texture_get_device_uuid', display));
-        caps.driverUuid = stringFromDisplayConsumer(
-            callDisplayConsumerFunction('dmabuf_texture_get_driver_uuid', display));
-        caps.vendor = stringFromDisplayConsumer(
-            callDisplayConsumerFunction('dmabuf_texture_get_vendor', display));
-        caps.pciAddress = stringFromDisplayConsumer(
-            callDisplayConsumerFunction('dmabuf_texture_get_pci_address', display));
-
-        const formats = display?.get_dmabuf_formats?.();
-        const nFormats = formats?.get_n_formats?.() ?? 0;
-        for (let index = 0; index < nFormats; index++) {
-            const [fourcc, modifier] = gdkDmabufFormatAt(formats, index);
-            if (!isVividRgbaFourcc(fourcc))
-                continue;
-
-            if (uint64Equals(modifier, DRM_FORMAT_MOD_LINEAR) ||
-                uint64IsDrmModifierInvalid(modifier)) {
-                appendDmaBufModifierCap(caps, fourcc, modifier, 1);
-                continue;
-            }
-
-            /*
-             * GdkDmabufFormats exposes the importable fourcc/modifier pairs but
-             * not plane counts. The display consumer helper resolves GDK's actual
-             * Wayland/EGL render node and performs a tiny GBM BO allocation to
-             * obtain the same (fourcc, modifier, plane_count) tuple shape that
-             * waywallen negotiates. Unknown counts deliberately fall back to 1:
-             * the producer strict-matches planeCount, so this prevents choosing
-             * a multi-plane modifier unless the consumer has proved that count.
-             */
-            const probedPlaneCount =
-                Number(callDisplayConsumerFunction(
-                    'dmabuf_texture_probe_plane_count',
-                    display,
-                    fourcc,
-                    modifier) ?? 0);
-            appendDmaBufModifierCap(caps, fourcc, modifier, probedPlaneCount);
-        }
-
-        if (caps.fourccs.length > 0) {
-            caps.probe = caps.renderNode
-                ? 'gdk-display-dmabuf-formats+egl-gbm-plane-probe'
-                : 'gdk-display-dmabuf-formats';
-        }
-    } catch (error) {
-        caps.diagnostics = `GDK DMA-BUF format query failed: ${error}`;
-        log(`GDK DMA-BUF format query failed; sending v3 diagnostics without fake caps: ${error}`);
-    }
-
-    if (caps.fourccs.length === 0) {
-        caps.probe = caps.probe === 'unprobed' ? 'probe-empty' : caps.probe;
-        caps.memoryHints = [];
-        caps.skipsExternalOnlyModifiers = true;
-    } else if (caps.implicitLinearFourccs.length === 0) {
-        caps.memoryHints = ['device-local'];
+    } else {
+        caps.probe = 'vulkan-relay-unavailable';
+        caps.diagnostics = 'Vulkan relay capability query returned no result';
     }
 
     return caps;
@@ -395,11 +357,21 @@ const defaultSocketPath = () => {
 const parseArgs = argv => {
     const opts = {
         socketPath: defaultSocketPath(),
+        outputs: null,
     };
 
     for (let i = 0; i < argv.length; i++) {
         if (argv[i] === '--socket' && i + 1 < argv.length)
             opts.socketPath = argv[++i];
+        else if (argv[i] === '--outputs-json' && i + 1 < argv.length) {
+            const json = argv[++i];
+            try {
+                const outputs = JSON.parse(json);
+                opts.outputs = Array.isArray(outputs) ? outputs : null;
+            } catch (error) {
+                log(`invalid --outputs-json ignored: ${error}`);
+            }
+        }
     }
 
     return opts;
@@ -435,6 +407,11 @@ const writeUint32LE = (bytes, offset, value) => {
     bytes[offset + 1] = (value >> 8) & 0xff;
     bytes[offset + 2] = (value >> 16) & 0xff;
     bytes[offset + 3] = (value >> 24) & 0xff;
+};
+
+const writeFloat32LE = (bytes, offset, value) => {
+    const view = new DataView(bytes.buffer, bytes.byteOffset + offset, 4);
+    view.setFloat32(0, Number(value) || 0, true);
 };
 
 const writeUint64LE = (bytes, offset, value) => {
@@ -476,29 +453,8 @@ const decodeJsonTextPayload = bytes => {
     };
 };
 
-const decodeFrameReadyBody = body => {
-    if (body.length !== FRAME_READY_BODY_BYTES)
-        throw new Error(`invalid FRAME_READY body length ${body.length}`);
-
-    return {
-        outputId: readUint32LE(body, 0),
-        generation: readUint64LE(body, 4),
-        bufferIndex: readUint32LE(body, 12),
-        sequence: readUint64LE(body, 16),
-        targetTimeUsec: readUint64LE(body, 24),
-        flags: readUint32LE(body, 32),
-    };
-};
-
-const decodeUnbindBody = body => {
-    if (body.length !== UNBIND_BODY_BYTES)
-        throw new Error(`invalid UNBIND body length ${body.length}`);
-
-    return {
-        outputId: readUint32LE(body, 0),
-        generation: readUint64LE(body, 4),
-    };
-};
+const decodeFrameReadyBody = decodeFrameReady;
+const decodeUnbindBody = decodeUnbind;
 
 const formatGenerationKeys = generations =>
     [...generations.keys()].sort((a, b) => a - b).join(',') || '(none)';
@@ -569,6 +525,137 @@ const monitorRefreshRate = monitor => {
     }
 };
 
+const monitorDisplayName = monitor => {
+    const parts = [];
+    for (const getter of ['get_connector', 'get_manufacturer', 'get_model']) {
+        try {
+            const value = monitor?.[getter]?.();
+            if (value)
+                parts.push(String(value));
+        } catch (_e) {
+        }
+    }
+    return parts.join(' ').trim();
+};
+
+const monitorConnector = monitor => {
+    try {
+        const value = monitor?.get_connector?.();
+        return typeof value === 'string' ? value.trim() : '';
+    } catch (_e) {
+        return '';
+    }
+};
+
+const finiteNumber = (value, fallback) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+};
+
+const positiveInt = (value, fallback) =>
+    Math.max(1, Math.round(finiteNumber(value, fallback)));
+
+const monitorInfoFromGdkMonitor = (monitor, monitorIndex) => {
+    const geometry = monitor.get_geometry();
+    const scale = Math.max(1, finiteNumber(monitorScale(monitor), 1));
+    const logicalWidth = positiveInt(geometry.width, 1);
+    const logicalHeight = positiveInt(geometry.height, 1);
+    return {
+        monitorIndex,
+        consumerOutputId: monitorIndex + 1,
+        displayKey: monitorConnector(monitor),
+        x: Math.round(finiteNumber(geometry.x, 0)),
+        y: Math.round(finiteNumber(geometry.y, 0)),
+        logicalWidth,
+        logicalHeight,
+        scale,
+        physicalWidth: positiveInt(logicalWidth * scale, logicalWidth),
+        physicalHeight: positiveInt(logicalHeight * scale, logicalHeight),
+        refreshRate: Math.max(0, Math.round(finiteNumber(monitorRefreshRate(monitor), 60000))),
+        displayName: monitorDisplayName(monitor),
+    };
+};
+
+const isPlaceholderDisplayName = (name, monitorIndex) => {
+    const text = String(name ?? '').trim();
+    if (!text)
+        return true;
+    if (text === `Monitor ${monitorIndex + 1}`)
+        return true;
+    return /^Monitor \d+$/.test(text);
+};
+
+const sameMonitorGeometry = (left, right) =>
+    left.x === right.x &&
+    left.y === right.y &&
+    left.logicalWidth === right.logicalWidth &&
+    left.logicalHeight === right.logicalHeight;
+
+const findGdkDisplayNameForMonitorInfo = (display, target) => {
+    const monitors = display?.get_monitors?.();
+    const nItems = monitors?.get_n_items?.() ?? 0;
+    for (let i = 0; i < nItems; i++) {
+        const monitor = monitors.get_item(i);
+        if (!monitor)
+            continue;
+        const info = monitorInfoFromGdkMonitor(monitor, i);
+        if (sameMonitorGeometry(info, target) && info.displayName)
+            return info.displayName;
+    }
+
+    const monitor = target.monitorIndex >= 0 && target.monitorIndex < nItems
+        ? monitors.get_item(target.monitorIndex)
+        : null;
+    return monitor ? monitorDisplayName(monitor) : '';
+};
+
+const findGdkConnectorForMonitorInfo = (display, target) => {
+    const monitors = display?.get_monitors?.();
+    const nItems = monitors?.get_n_items?.() ?? 0;
+    for (let i = 0; i < nItems; i++) {
+        const monitor = monitors.get_item(i);
+        if (!monitor)
+            continue;
+        const info = monitorInfoFromGdkMonitor(monitor, i);
+        if (sameMonitorGeometry(info, target) && info.displayKey)
+            return info.displayKey;
+    }
+
+    const monitor = target.monitorIndex >= 0 && target.monitorIndex < nItems
+        ? monitors.get_item(target.monitorIndex)
+        : null;
+    return monitor ? monitorConnector(monitor) : '';
+};
+
+const monitorInfoFromPayload = (payload, fallbackIndex, display = null) => {
+    const monitorIndex = Math.max(0, Math.round(finiteNumber(payload?.monitorIndex, fallbackIndex)));
+    const scale = Math.max(1, finiteNumber(payload?.scale, 1));
+    const logicalWidth = positiveInt(payload?.width ?? payload?.logicalWidth, 1);
+    const logicalHeight = positiveInt(payload?.height ?? payload?.logicalHeight, 1);
+    const info = {
+        monitorIndex,
+        consumerOutputId: positiveInt(payload?.consumerOutputId, monitorIndex + 1),
+        layoutOutputCount: positiveInt(payload?.layoutOutputCount, 0),
+        x: Math.round(finiteNumber(payload?.x, 0)),
+        y: Math.round(finiteNumber(payload?.y, 0)),
+        logicalWidth,
+        logicalHeight,
+        scale,
+        physicalWidth: positiveInt(payload?.physicalWidth, logicalWidth * scale),
+        physicalHeight: positiveInt(payload?.physicalHeight, logicalHeight * scale),
+        refreshRate: Math.max(0, Math.round(finiteNumber(payload?.refreshRateMhz, 0))),
+        displayKey: String(payload?.displayKey ?? '').trim(),
+        displayName: String(payload?.displayName ?? `Monitor ${monitorIndex + 1}`).trim(),
+    };
+    if (!info.displayKey)
+        info.displayKey = findGdkConnectorForMonitorInfo(display, info);
+    if (isPlaceholderDisplayName(info.displayName, monitorIndex)) {
+        const gdkName = findGdkDisplayNameForMonitorInfo(display, info);
+        info.displayName = gdkName || `Monitor ${monitorIndex + 1}`;
+    }
+    return info;
+};
+
 const getSceneMediaCacheDir = () => {
     /*
      * Media thumbnails are handed to the producer by pathname, not by bytes.
@@ -630,7 +717,7 @@ const WEB_AUDIO_MAX_DB = 0;
 const WEB_AUDIO_SILENCE_RMS_THRESHOLD = 0.003;
 const WEB_AUDIO_SPECTRUM_OUTPUT_GAIN = 4.0;
 const WEB_AUDIO_BAND_PEAK_BLEND = 0.35;
-const AUDIO_SAMPLE_MAX_VALUES = 512;
+const AUDIO_SAMPLE_MAX_VALUES = VIVID_DISPLAY_AUDIO_SAMPLES_BIN_MAX_COUNT;
 
 const cloneArray = values => {
     if (!values || typeof values.length !== 'number')
@@ -2048,10 +2135,11 @@ class MediaRuntimeBridge {
 }
 
 class OutputWindow {
-    constructor(app, monitor, monitorIndex) {
-        this.monitor = monitor;
-        this.monitorIndex = monitorIndex;
-        this.consumerOutputId = monitorIndex;
+    constructor(app, monitorInfo) {
+        this._app = app;
+        this.monitorIndex = monitorInfo.monitorIndex;
+        this.consumerOutputId = monitorInfo.consumerOutputId;
+        this.layoutOutputCount = monitorInfo.layoutOutputCount;
         this.backendOutputId = null;
         this._bufferGenerations = new Map();
         this._currentGeneration = null;
@@ -2061,13 +2149,28 @@ class OutputWindow {
         this._onBindFailed = null;
         this.paintable = DisplayConsumer.BufferPaintable.new();
 
-        this.geometry = monitor.get_geometry();
-        this.scale = monitorScale(monitor);
-        this.logicalWidth = Math.max(1, Math.round(this.geometry.width));
-        this.logicalHeight = Math.max(1, Math.round(this.geometry.height));
-        this.physicalWidth = Math.max(1, Math.round(this.geometry.width * this.scale));
-        this.physicalHeight = Math.max(1, Math.round(this.geometry.height * this.scale));
-        this.refreshRate = monitorRefreshRate(monitor);
+        this.geometry = {
+            x: monitorInfo.x,
+            y: monitorInfo.y,
+            width: monitorInfo.logicalWidth,
+            height: monitorInfo.logicalHeight,
+        };
+        this.scale = monitorInfo.scale;
+        this.logicalWidth = monitorInfo.logicalWidth;
+        this.logicalHeight = monitorInfo.logicalHeight;
+        this.physicalWidth = monitorInfo.physicalWidth;
+        this.physicalHeight = monitorInfo.physicalHeight;
+        this.refreshRate = monitorInfo.refreshRate;
+        this.displayKey = monitorInfo.displayKey;
+        this.displayName = monitorInfo.displayName;
+        this.picture = null;
+        this.window = null;
+        this._windowRealizeId = 0;
+    }
+
+    ensureWindow() {
+        if (this.window)
+            return;
 
         this.picture = new Gtk.Picture({
             can_shrink: true,
@@ -2080,7 +2183,7 @@ class OutputWindow {
         this.picture.set_can_focus(false);
 
         this.window = new Gtk.ApplicationWindow({
-            application: app,
+            application: this._app,
             decorated: false,
             resizable: false,
             default_width: this.logicalWidth,
@@ -2108,10 +2211,23 @@ class OutputWindow {
             keepPosition: true,
             position: [this.geometry.x, this.geometry.y],
         };
-        this.window.set_title(`${TITLE_PREFIX}${JSON.stringify(state)}|${monitorIndex}`);
-        this.window.connect('realize', () => this._onRealize());
+        this.window.set_title(`${TITLE_PREFIX}${JSON.stringify(state)}|${this.monitorIndex}`);
+        this._windowRealizeId = this.window.connect('realize', () => this._onRealize());
         this.window.set_size_request(this.logicalWidth, this.logicalHeight);
         this.window.set_focus_on_map?.(false);
+
+        /*
+         * Bind the window to its target monitor before the first map
+         * (waywallen renderer.js does the same). Without this, Mutter places
+         * the brand-new toplevel on whatever monitor is "active" (pointer /
+         * focus), and the Shell-side WindowManager only pins the position
+         * after map. During that gap MetaWindow.get_monitor() reports the
+         * wrong monitor, which is exactly when LiveWallpaper picks its clone
+         * source; a helper for monitor 0 could then be cloned onto monitor 1.
+         */
+        const gdkMonitor = this._findGdkMonitor();
+        if (gdkMonitor)
+            this.window.fullscreen_on_monitor(gdkMonitor);
         this.window.present();
     }
 
@@ -2136,31 +2252,26 @@ class OutputWindow {
 
     outputPayload() {
         return {
-            consumerOutputId: this.consumerOutputId,
-            monitorIndex: this.monitorIndex,
-            x: this.geometry.x,
-            y: this.geometry.y,
-            /*
-             * width/height describe the desktop logical surface. physicalWidth
-             * and physicalHeight describe the DMA-BUF render target requested
-             * from the producer. Keeping both values in the registration makes
-             * the protocol explicit: GNOME Shell clones a logical-size helper
-             * window, while scene/web/video renderers can still allocate a
-             * scale-aware physical backing buffer and publish that size in
-             * BIND_BUFFERS.
-             */
-            width: this.logicalWidth,
-            height: this.logicalHeight,
-            scale: this.scale,
-            physicalWidth: this.physicalWidth,
-            physicalHeight: this.physicalHeight,
-            transform: 'normal',
-            refreshRateMhz: this.refreshRate,
-            desktop: 'gnome-shell-helper',
+            [J.REGISTER_OUTPUT.consumerOutputId]: this.consumerOutputId,
+            [J.REGISTER_OUTPUT.monitorIndex]: this.monitorIndex,
+            [J.REGISTER_OUTPUT.layoutOutputCount]: this.layoutOutputCount,
+            [J.REGISTER_OUTPUT.x]: this.geometry.x,
+            [J.REGISTER_OUTPUT.y]: this.geometry.y,
+            [J.REGISTER_OUTPUT.width]: this.logicalWidth,
+            [J.REGISTER_OUTPUT.height]: this.logicalHeight,
+            [J.REGISTER_OUTPUT.scale]: this.scale,
+            [J.REGISTER_OUTPUT.physicalWidth]: this.physicalWidth,
+            [J.REGISTER_OUTPUT.physicalHeight]: this.physicalHeight,
+            [J.REGISTER_OUTPUT.transform]: 'normal',
+            [J.REGISTER_OUTPUT.refreshRateMhz]: this.refreshRate,
+            [J.REGISTER_OUTPUT.desktop]: 'gnome-shell-helper',
+            [J.REGISTER_OUTPUT.displayKey]: this.displayKey,
+            [J.REGISTER_OUTPUT.displayName]: this.displayName,
         };
     }
 
     bindBuffers(payload, bindJson, fdList) {
+        this.ensureWindow();
         this.unbindGeneration(payload.generation, {logMissing: false});
 
         const generation = {
@@ -2182,10 +2293,9 @@ class OutputWindow {
         }
 
         this._bufferGenerations.set(Number(payload.generation), generation);
-        const renderNode = payload['render-node'] ?? payload.renderNode ?? '(unknown)';
-        const vendor = payload.vendor ?? 'unknown';
-        const pciAddress = payload['pci-address'] ?? '(unknown)';
-        const producerRenderNode = payload.producerRenderNode ?? renderNode;
+        const producerRenderNode = payload.producerRenderNode ?? '(missing)';
+        const producerVendor = payload.producerVendor ?? '(missing)';
+        const producerPciAddress = payload.producerPciAddress ?? '(missing)';
         const consumerRenderNode = payload.consumerRenderNode ?? '(unknown)';
         const producerDrm = `${payload.producerDrmRenderMajor ?? 0}:${payload.producerDrmRenderMinor ?? 0}`;
         const consumerDrm = `${payload.consumerDrmRenderMajor ?? 0}:${payload.consumerDrmRenderMinor ?? 0}`;
@@ -2196,15 +2306,17 @@ class OutputWindow {
             `memory=${payload.memoryType ?? '(missing)'} fourcc=${payload.fourcc ?? '(missing)'} ` +
             `path=${payload.negotiatedPath ?? '(missing)'} presentation=${payload.presentationPath ?? '(missing)'} ` +
             `memory-source=${payload.memorySource ?? '(missing)'} ` +
-            `memory-hint=${payload.memoryHint ?? '(missing)'} render-node=${renderNode} ` +
-            `producer-render-node=${producerRenderNode} producer-drm=${producerDrm} ` +
-            `consumer-render-node=${consumerRenderNode} consumer-drm=${consumerDrm} ` +
-            `vendor=${vendor} pci=${pciAddress} ` +
-            `modifier=${payload.modifier ?? '(missing)'} premultiplied=${!!payload.premultiplied} ` +
+            `memory-hint=${payload.memoryHint ?? '(missing)'} ` +
+            `producerRenderNode=${producerRenderNode} producer-drm=${producerDrm} ` +
+            `consumerRenderNode=${consumerRenderNode} consumer-drm=${consumerDrm} ` +
+            `producerVendor=${producerVendor} producerPciAddress=${producerPciAddress} ` +
+            `modifier=${payload.modifier ?? '(missing)'} planesPerBuffer=${payload.planesPerBuffer ?? '(missing)'} ` +
+            `premultiplied=${!!payload.premultiplied} ` +
             `buffers=${formatBufferSummary(payload)}`);
     }
 
     setConfig(payload) {
+        this.ensureWindow();
         const source = payload.source ?? {};
         const destination = payload.destination ?? {};
         const clear = Array.isArray(payload.clearColor) ? payload.clearColor : [0, 0, 0, 1];
@@ -2263,8 +2375,7 @@ class OutputWindow {
     }
 
     _signalReleaseSyncobj(generation, releaseFd, context) {
-        const renderNode = generation?.payload?.['render-node'] ??
-            generation?.payload?.renderNode ?? '';
+        const renderNode = generation?.payload?.producerRenderNode ?? '';
         const ok = callDisplayConsumerFunction(
             'dmabuf_texture_signal_release_syncobj',
             renderNode,
@@ -2276,36 +2387,9 @@ class OutputWindow {
         }
     }
 
-    _flushPendingReleaseSyncobj(reason) {
-        /*
-         * Mirror waywallen's EGL/QML display path: release the previously
-         * accepted frame as soon as the next FRAME_READY arrives. GTK/GDK does
-         * not expose a compositor release fence for GdkDmabufTexture, so waiting
-         * for a later snapshot pass can hold the producer's per-frame release
-         * syncobj for hundreds of milliseconds if Shell rendering stalls. The
-         * display paintable still signals again from snapshot as a harmless
-         * no-op fallback when no newer frame arrived.
-         */
-        const releaseStartUsec = GLib.get_monotonic_time();
-        try {
-            this.paintable.flush_pending_release_syncobj(reason);
-        } catch (error) {
-            log(`output ${this.backendOutputId}: release syncobj flush failed ` +
-                `context=${reason}: ${error}`);
-            return;
-        }
-
-        const releaseUsec = GLib.get_monotonic_time() - releaseStartUsec;
-        if (releaseUsec >= RELEASE_FLUSH_WARN_USEC) {
-            log(`output ${this.backendOutputId}: release syncobj flush was slow ` +
-                `context=${reason} duration=${(releaseUsec / 1000).toFixed(2)}ms`);
-        }
-    }
-
     showFrame(frame, fdList) {
         let acquireFd = takeFrameFd(fdList, 0, 'acquire sync_file');
         let releaseFd = takeFrameFd(fdList, 1, 'release syncobj');
-        this._flushPendingReleaseSyncobj('frame-ready');
         const frameStartUsec = GLib.get_monotonic_time();
         const previousFrameUsec = this._lastFrameUsec;
         const frameIntervalUsec = previousFrameUsec > 0 ? frameStartUsec - previousFrameUsec : 0;
@@ -2338,46 +2422,26 @@ class OutputWindow {
         let textureRefreshUsec = 0;
         try {
             const textureStartUsec = GLib.get_monotonic_time();
-            if (generation.payload?.presentationPath === 'shadow-copy') {
-                if (typeof this.paintable.show_frame_with_sync !== 'function')
-                    throw new Error('display paintable lacks show_frame_with_sync for shadow-copy');
-                /*
-                 * The shadow-copy path mirrors waywallen's DMABUF_RELAY:
-                 * display module Vulkan imports the acquire sync_file as a temporary
-                 * semaphore, waits in the blit submit, and signals the release
-                 * syncobj after the shadow copy fence completes. Ownership of
-                 * both fds transfers to the display module here.
-                 */
-                const displayConsumerAcquireFd = acquireFd;
-                const displayConsumerReleaseFd = releaseFd;
-                acquireFd = -1;
-                releaseFd = -1;
-                this.paintable.show_frame_with_sync(
-                    frame.generation,
-                    frame.bufferIndex,
-                    displayConsumerAcquireFd,
-                    displayConsumerReleaseFd
-                );
-            } else {
-                const acquireReady = callDisplayConsumerFunction(
-                    'dmabuf_texture_wait_sync_file',
-                    acquireFd,
-                    FRAME_SYNC_WAIT_TIMEOUT_MSEC
-                );
-                closeDisplayConsumerFd(acquireFd);
-                acquireFd = -1;
-                if (acquireReady !== true) {
-                    this._signalReleaseSyncobj(generation, releaseFd, 'acquire-wait-failed');
-                    closeDisplayConsumerFd(releaseFd);
-                    releaseFd = -1;
-                    log(`output ${this.backendOutputId}: FRAME_READY acquire wait failed ` +
-                        `generation=${frame.generation} buffer=${frame.bufferIndex}`);
-                    return;
-                }
-                this.paintable.show_frame(frame.generation, frame.bufferIndex);
-                this.paintable.attach_release_syncobj(frame.generation, frame.bufferIndex, releaseFd);
-                releaseFd = -1;
-            }
+            if (generation.payload?.presentationPath !== 'shadow-copy')
+                throw new Error(`unsupported presentation path: ${generation.payload?.presentationPath ?? '(missing)'}`);
+            if (typeof this.paintable.show_frame_with_sync !== 'function')
+                throw new Error('display paintable lacks show_frame_with_sync for shadow-copy');
+            /*
+             * Match waywallen's DMABUF_RELAY: the display module imports the
+             * acquire sync_file as a temporary Vulkan semaphore, waits in the
+             * blit submit, and signals the release syncobj after the shadow copy
+             * fence completes. Ownership of both fds transfers here.
+             */
+            const displayConsumerAcquireFd = acquireFd;
+            const displayConsumerReleaseFd = releaseFd;
+            acquireFd = -1;
+            releaseFd = -1;
+            this.paintable.show_frame_with_sync(
+                frame.generation,
+                frame.bufferIndex,
+                displayConsumerAcquireFd,
+                displayConsumerReleaseFd
+            );
             textureRefreshUsec = GLib.get_monotonic_time() - textureStartUsec;
             this._currentGeneration = Number(frame.generation);
         } catch (error) {
@@ -2474,6 +2538,74 @@ class OutputWindow {
         this._lastFrameUsec = 0;
         this._lastDiagnosticLogUsec = 0;
         this._suppressedFrameDiagnostics = 0;
+        /*
+         * Socket teardown is a visibility boundary, not just a buffer boundary.
+         * If the producer disappears and the helper window stays mapped, GNOME
+         * Shell can keep cloning an empty GTK surface over the native desktop
+         * background. Destroy the implementation window here so the Shell-side
+         * clone source is removed and the original wallpaper becomes visible
+         * while the helper waits for a future producer reconnect.
+         */
+        this._destroyWindow('connection-clear');
+    }
+
+    _deactivatePresentation(reason) {
+        this.paintable.clear();
+        this._currentGeneration = null;
+        this._lastFrameUsec = 0;
+        this._lastDiagnosticLogUsec = 0;
+        this._suppressedFrameDiagnostics = 0;
+        this._destroyWindow(reason);
+    }
+
+    deactivate() {
+        for (const generationId of [...this._bufferGenerations.keys()])
+            this.unbindGeneration(generationId, {logMissing: false});
+        this._deactivatePresentation('producer-deactivate');
+        log(`output ${this.backendOutputId ?? this.consumerOutputId}: deactivated`);
+    }
+
+    _destroyWindow(reason) {
+        if (!this.window) {
+            this.picture = null;
+            this._windowRealizeId = 0;
+            return;
+        }
+
+        const window = this.window;
+        const picture = this.picture;
+        this.window = null;
+        this.picture = null;
+
+        /*
+         * The helper window is a compositor resource as much as a GTK widget:
+         * GNOME Shell clones its MetaWindowActor directly. On socket teardown we
+         * must sever every GTK-side reference before destroy(), otherwise a late
+         * signal callback or stale child can keep the source actor alive long
+         * enough for Shell to keep repainting an implementation surface after
+         * the producer has gone away.
+         */
+        if (this._windowRealizeId) {
+            try {
+                window.disconnect(this._windowRealizeId);
+            } catch (_e) {
+            }
+            this._windowRealizeId = 0;
+        }
+
+        try {
+            if (picture && window.get_child?.() === picture)
+                window.set_child(null);
+        } catch (_e) {
+        }
+
+        try {
+            window.destroy();
+            log(`output ${this.backendOutputId ?? this.consumerOutputId}: helper window destroyed reason=${reason}`);
+        } catch (error) {
+            log(`output ${this.backendOutputId ?? this.consumerOutputId}: helper window destroy failed ` +
+                `reason=${reason}: ${error}`);
+        }
     }
 
     _onRealize() {
@@ -2485,6 +2617,28 @@ class OutputWindow {
         } catch (error) {
             log(`output ${this.monitorIndex}: failed to make helper window input-transparent: ${error}`);
         }
+    }
+
+    /*
+     * The Gdk monitor list order is not guaranteed to match the Shell monitor
+     * index this output was registered with, so match by monitor origin first
+     * and only fall back to positional indexing.
+     */
+    _findGdkMonitor() {
+        const display = this.window?.get_display?.() ?? Gdk.Display.get_default();
+        const monitors = display?.get_monitors?.();
+        const nItems = monitors?.get_n_items?.() ?? 0;
+        for (let i = 0; i < nItems; i++) {
+            const monitor = monitors.get_item(i);
+            if (!monitor)
+                continue;
+            const geometry = monitor.get_geometry();
+            if (geometry.x === this.geometry.x && geometry.y === this.geometry.y)
+                return monitor;
+        }
+        if (this.monitorIndex >= 0 && this.monitorIndex < nItems)
+            return monitors.get_item(this.monitorIndex);
+        return null;
     }
 }
 
@@ -2504,13 +2658,17 @@ class DisplayConnection {
         this._writePending = false;
         this._lastSocketDiagnosticLogUsec = 0;
         this._suppressedSocketDiagnostics = 0;
+        this._lastConnectFailureLogUsec = 0;
+        this._suppressedConnectFailures = 0;
         this._coalescedPointerMotionCount = 0;
         this._cancellable = new Gio.Cancellable();
         this._reconnectSourceId = 0;
+        this._applicationHoldAcquired = false;
         this._lastWindowState = null;
         this._lastMediaState = defaultMediaStatePayload();
         this._lastAudioSamples = buildSilentWebAudioFrame();
         this._audioSamplesSentCount = 0;
+        this._negotiatedVersion = PROTOCOL_VERSION;
         this._mediaRuntime = new MediaRuntimeBridge({
             onMediaState: payload => this.sendMediaState(payload),
             onAudioSamples: samples => this.sendAudioSamples(samples),
@@ -2520,6 +2678,7 @@ class DisplayConnection {
     }
 
     start() {
+        this._acquireApplicationHold();
         this._mediaRuntime.start();
         this._connect();
     }
@@ -2532,6 +2691,30 @@ class DisplayConnection {
         } catch (_e) {
         }
         this._closeConnection(false);
+        this._releaseApplicationHold();
+    }
+
+    _acquireApplicationHold() {
+        if (this._applicationHoldAcquired)
+            return;
+
+        /*
+         * Unconfigured outputs deliberately do not create GTK helper windows, so
+         * the helper may need to keep only the display socket and stdin bridge
+         * alive. GtkApplication exits automatically when the last window closes;
+         * hold the application while DisplayConnection owns those background
+         * transports, and release it during shutdown.
+         */
+        this._app.hold();
+        this._applicationHoldAcquired = true;
+    }
+
+    _releaseApplicationHold() {
+        if (!this._applicationHoldAcquired)
+            return;
+
+        this._applicationHoldAcquired = false;
+        this._app.release();
     }
 
     handleControlMessage(message) {
@@ -2564,13 +2747,39 @@ class DisplayConnection {
                     if (this._lastWindowState)
                         this._queueFrame(encodeJsonFrame(REQ_WINDOW_STATE, this._lastWindowState));
                     this._mediaRuntime.setTransportConnected(true);
-                    log(`connected to ${this._opts.socketPath}`);
+                    this._logConnected();
                 } catch (error) {
-                    log(`connect failed at ${this._opts.socketPath}: ${error}`);
+                    if (error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                        return;
+
+                    this._logConnectFailure(error);
                     this._scheduleReconnect();
                 }
             }
         );
+    }
+
+    _logConnected() {
+        const suppressed = this._suppressedConnectFailures;
+        this._lastConnectFailureLogUsec = 0;
+        this._suppressedConnectFailures = 0;
+        log(`connected to ${this._opts.socketPath}` +
+            (suppressed > 0 ? ` suppressed-connect-failures=${suppressed}` : ''));
+    }
+
+    _logConnectFailure(error) {
+        const nowUsec = GLib.get_monotonic_time();
+        if (this._lastConnectFailureLogUsec > 0 &&
+            nowUsec - this._lastConnectFailureLogUsec < CONNECT_FAILURE_LOG_INTERVAL_USEC) {
+            this._suppressedConnectFailures++;
+            return;
+        }
+
+        const suppressed = this._suppressedConnectFailures;
+        this._suppressedConnectFailures = 0;
+        this._lastConnectFailureLogUsec = nowUsec;
+        log(`connect failed at ${this._opts.socketPath}: ${error}` +
+            (suppressed > 0 ? ` suppressed=${suppressed}` : ''));
     }
 
     _startReceiver() {
@@ -2646,12 +2855,12 @@ class DisplayConnection {
 
     sendAudioSamples(samples) {
         this._lastAudioSamples = normalizeAudioSamplesPayload(samples);
+        const count = this._lastAudioSamples.length;
+        const timeUsec = GLib.get_monotonic_time();
         let frame = null;
         try {
-            frame = encodeJsonFrame(REQ_AUDIO_SAMPLES, {
-                samples: this._lastAudioSamples,
-                timeUsec: GLib.get_monotonic_time(),
-            });
+            const body = encodeAudioSamplesBin(count, timeUsec, this._lastAudioSamples);
+            frame = encodeFrame(REQ_AUDIO_SAMPLES_BIN, body);
         } catch (error) {
             log(`audio samples encode failed: ${error}`);
             return false;
@@ -2666,7 +2875,7 @@ class DisplayConnection {
                     0
                 );
                 log(`audio samples queued frame=${this._audioSamplesSentCount} ` +
-                    `count=${this._lastAudioSamples.length} max=${maxSample.toFixed(4)}`);
+                    `count=${count} max=${maxSample.toFixed(4)}`);
             }
         }
         return queued;
@@ -2674,25 +2883,26 @@ class DisplayConnection {
 
     _sendBindFailed(payload) {
         const framePayload = {
-            outputId: Number(payload.outputId ?? 0),
-            generation: Number(payload.generation ?? 0),
-            fourcc: Number(payload.fourcc ?? 0),
-            modifier: String(payload.modifier ?? '0'),
+            [J.BIND_FAILED.outputId]: Number(payload.outputId ?? 0),
+            [J.BIND_FAILED.generation]: Number(payload.generation ?? 0),
+            [J.BIND_FAILED.fourcc]: Number(payload.fourcc ?? 0),
+            [J.BIND_FAILED.modifier]: String(payload.modifier ?? '0'),
             bufferIndex: payload.bufferIndex === null || payload.bufferIndex === undefined
                 ? null
                 : Number(payload.bufferIndex),
-            reason: Number(payload.reason ?? 1),
-            message: String(payload.message ?? 'DMA-BUF import failed'),
+            [J.BIND_FAILED.reason]: Number(payload.reason ?? 1),
+            [J.BIND_FAILED.message]: String(payload.message ?? 'DMA-BUF import failed'),
         };
-        if (!framePayload.fourcc) {
+        if (!framePayload[J.BIND_FAILED.fourcc]) {
             log(`skip BIND_FAILED without fourcc: ${JSON.stringify(framePayload)}`);
             return false;
         }
 
-        log(`BIND_FAILED output=${framePayload.outputId} generation=${framePayload.generation} ` +
-            `fourcc=0x${framePayload.fourcc.toString(16).padStart(8, '0')} ` +
-            `modifier=${framePayload.modifier} reason=${framePayload.reason} ` +
-            `message=${framePayload.message}`);
+        log(`BIND_FAILED output=${framePayload[J.BIND_FAILED.outputId]} generation=${framePayload[J.BIND_FAILED.generation]} ` +
+            `fourcc=0x${framePayload[J.BIND_FAILED.fourcc].toString(16).padStart(8, '0')} ` +
+            `modifier=${framePayload[J.BIND_FAILED.modifier]} reason=${framePayload[J.BIND_FAILED.reason]} ` +
+            `[${bindFailedReasonName(framePayload[J.BIND_FAILED.reason])}] ` +
+            `message=${framePayload[J.BIND_FAILED.message]}`);
         return this._queueFrame(encodeJsonFrame(REQ_BIND_FAILED, framePayload));
     }
 
@@ -2717,16 +2927,17 @@ class DisplayConnection {
 
     _sendHello() {
         this._queueFrame(encodeJsonFrame(REQ_HELLO, {
-            protocol: PROTOCOL_NAME,
-            version: PROTOCOL_VERSION,
-            clientName: 'gnome-display-helper',
-            role: 'consumer',
-            features: [
+            [J.HELLO.protocol]: PROTOCOL_NAME,
+            [J.HELLO.version]: PROTOCOL_VERSION,
+            [J.HELLO.clientName]: 'gnome-display-helper',
+            [J.HELLO.role]: 'consumer',
+            [J.HELLO.features]: [
                 'dmabuf-gdk-texture-v1',
                 'dmabuf-caps-v3',
                 'explicit-sync-fd-v1',
                 'dmabuf-bind-failed-v1',
                 'dmabuf-unbind-done-v1',
+                'unbind-v2',
                 'dmabuf-shadow-copy-v1',
                 'pointer-events-v1',
                 'media-state-v1',
@@ -2736,31 +2947,16 @@ class DisplayConnection {
     }
 
     _sendConsumerCaps() {
-        const dmabufCaps = buildDmaBufCaps();
         this._queueFrame(encodeJsonFrame(REQ_CONSUMER_CAPS, {
-            bufferImports: [{
-                memoryType: 'dmabuf',
-                renderer: dmabufCaps.backend ?? 'gtk4-gdk-dmabuf-texture-builder',
-                fourcc: ['XRGB8888', 'ARGB8888', 'XBGR8888', 'ABGR8888'],
-                modifiers: true,
-                relayModes: dmabufCaps.relayModes ?? ['direct-import-v1', 'shadow-copy-v1'],
-            }],
-            dmabufCaps,
-            explicitSync: true,
-            pointerEvents: true,
-            mediaState: true,
-            audioSamples: {
-                format: 'spectrum-f32-json',
-                bands: WEB_AUDIO_FRAME_LENGTH,
-                sampleRate: WEB_AUDIO_SAMPLE_RATE,
-            },
+            [J.CONSUMER_CAPS.dmabufCaps]: buildDmaBufCaps(),
         }));
     }
 
     _sendRegisterOutput(output) {
-        log(`register monitor=${output.monitorIndex} logical=${output.logicalWidth}x${output.logicalHeight} ` +
+        log(`register monitor=${output.monitorIndex} consumerOutputId=${output.consumerOutputId} ` +
+            `logical=${output.logicalWidth}x${output.logicalHeight} ` +
             `physical=${output.physicalWidth}x${output.physicalHeight} scale=${output.scale} ` +
-            `refresh=${output.refreshRate}`);
+            `refresh=${output.refreshRate} name=${output.displayName || '(unnamed)'}`);
         this._queueFrame(encodeJsonFrame(REQ_REGISTER_OUTPUT, output.outputPayload()));
     }
 
@@ -2789,36 +2985,25 @@ class DisplayConnection {
         let frame = null;
 
         if (type === 'mousemove') {
-            const body = new Uint8Array(POINTER_MOTION_BODY_BYTES);
-            const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
-            writeUint32LE(body, 0, outputId);
-            view.setFloat64(4, x, true);
-            view.setFloat64(12, y, true);
-            writeUint64LE(body, 20, timeUsec);
-            frame = encodeFrame(REQ_POINTER_MOTION, body);
+            frame = encodeFrame(REQ_POINTER_MOTION,
+                encodePointerMotion(outputId, x, y, timeUsec));
         } else if (type === 'mousedown' || type === 'mouseup') {
-            const body = new Uint8Array(POINTER_BUTTON_BODY_BYTES);
-            const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
-            writeUint32LE(body, 0, outputId);
-            view.setFloat64(4, x, true);
-            view.setFloat64(12, y, true);
-            writeUint32LE(body, 20, Number(event.button ?? 0));
-            writeUint32LE(body, 24, type === 'mousedown'
-                ? POINTER_BUTTON_PRESSED
-                : POINTER_BUTTON_RELEASED);
-            writeUint64LE(body, 28, timeUsec);
-            frame = encodeFrame(REQ_POINTER_BUTTON, body);
+            frame = encodeFrame(REQ_POINTER_BUTTON,
+                encodePointerButton(outputId,
+                    x,
+                    y,
+                    Number(event.button ?? 0),
+                    type === 'mousedown' ? POINTER_BUTTON_PRESSED : POINTER_BUTTON_RELEASED,
+                    timeUsec));
         } else if (type === 'wheel') {
-            const body = new Uint8Array(POINTER_AXIS_BODY_BYTES);
-            const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
-            writeUint32LE(body, 0, outputId);
-            view.setFloat64(4, x, true);
-            view.setFloat64(12, y, true);
-            view.setFloat64(20, Number(event.deltaX ?? 0), true);
-            view.setFloat64(28, Number(event.deltaY ?? 0), true);
-            writeUint32LE(body, 36, POINTER_AXIS_WHEEL);
-            writeUint64LE(body, 40, timeUsec);
-            frame = encodeFrame(REQ_POINTER_AXIS, body);
+            frame = encodeFrame(REQ_POINTER_AXIS,
+                encodePointerAxis(outputId,
+                    x,
+                    y,
+                    Number(event.deltaX ?? 0),
+                    Number(event.deltaY ?? 0),
+                    POINTER_AXIS_WHEEL,
+                    timeUsec));
         }
 
         if (!frame)
@@ -2941,9 +3126,15 @@ class DisplayConnection {
     _handleFrame(opcode, body, fdList) {
         try {
             switch (opcode) {
-            case EVT_WELCOME:
-                log(`welcome ${JSON.stringify(decodeJsonPayload(body))}`);
+            case EVT_WELCOME: {
+                const welcome = decodeJsonPayload(body);
+                this._negotiatedVersion = Number(
+                    welcome.negotiatedVersion ?? PROTOCOL_VERSION
+                );
+                log(`welcome negotiatedVersion=${this._negotiatedVersion} ` +
+                    `${JSON.stringify(welcome)}`);
                 break;
+            }
             case EVT_OUTPUT_ACCEPTED:
                 this._handleOutputAccepted(decodeJsonPayload(body));
                 break;
@@ -2959,9 +3150,17 @@ class DisplayConnection {
             case EVT_UNBIND:
                 this._handleUnbind(decodeUnbindBody(body));
                 break;
-            case EVT_ERROR:
-                log(`producer error ${JSON.stringify(decodeJsonPayload(body))}`);
+            case EVT_ERROR: {
+                const errorPayload = decodeJsonPayload(body);
+                const code = Number(errorPayload[J.EVT_ERROR.code] ?? 0);
+                const fatal = errorPayload[J.EVT_ERROR.fatal] === true;
+                const message = String(errorPayload[J.EVT_ERROR.message] ?? '');
+                log(`producer error code=${code} name=${errorName(code)} ` +
+                    `domain=${errorDomain(code)} fatal=${fatal} message=${message}`);
+                if (fatal)
+                    this._closeConnection(true);
                 break;
+            }
             default:
                 break;
             }
@@ -2971,8 +3170,8 @@ class DisplayConnection {
     }
 
     _handleOutputAccepted(payload) {
-        const consumerOutputId = Number(payload.consumerOutputId);
-        const outputId = Number(payload.outputId);
+        const consumerOutputId = Number(payload[J.OUTPUT_ACCEPTED.consumerOutputId]);
+        const outputId = Number(payload[J.OUTPUT_ACCEPTED.outputId]);
         const output = this._outputsByConsumerId.get(consumerOutputId);
         if (!output || !Number.isFinite(outputId)) {
             log(`invalid OUTPUT_ACCEPTED ${JSON.stringify(payload)}`);
@@ -2986,7 +3185,7 @@ class DisplayConnection {
 
     _handleBindBuffers(decoded, fdList) {
         const payload = decoded.payload;
-        const outputId = Number(payload.outputId);
+        const outputId = Number(payload[J.BIND_BUFFERS.outputId]);
         const output = this._outputsByBackendId.get(outputId);
         if (!output) {
             log(`BIND_BUFFERS for unknown output=${outputId}`);
@@ -2997,10 +3196,10 @@ class DisplayConnection {
     }
 
     _handleSetConfig(payload) {
-        const outputId = Number(payload.outputId);
+        const outputId = Number(payload[J.SET_CONFIG.outputId]);
         const output = this._outputsByBackendId.get(outputId);
         if (!output) {
-            log(`SET_CONFIG for unknown output=${payload.outputId}`);
+            log(`SET_CONFIG for unknown output=${payload[J.SET_CONFIG.outputId]}`);
             return;
         }
 
@@ -3026,15 +3225,23 @@ class DisplayConnection {
     }
 
     _handleUnbind(payload) {
-        const output = this._outputsByBackendId.get(Number(payload.outputId));
+        const outputId = Number(payload.outputId ?? 0);
+        const generation = Number(payload.generation ?? 0);
+        const output = this._outputsByBackendId.get(outputId);
         if (!output) {
-            log(`UNBIND for unknown output=${payload.outputId} generation=${payload.generation}`);
+            log(`UNBIND for unknown output=${outputId} generation=${generation}`);
+            this._queueFrame(encodeJsonFrame(REQ_UNBIND_DONE, {
+                [J.UNBIND_DONE.outputId]: outputId,
+                [J.UNBIND_DONE.generation]: generation,
+            }));
             return;
         }
-        output.unbindGeneration(payload.generation);
+        output.unbindGeneration(generation);
+        if (output._bufferGenerations.size === 0)
+            output._deactivatePresentation('unbind-last-generation');
         this._queueFrame(encodeJsonFrame(REQ_UNBIND_DONE, {
-            outputId: Number(payload.outputId ?? 0),
-            generation: Number(payload.generation ?? 0),
+            [J.UNBIND_DONE.outputId]: outputId,
+            [J.UNBIND_DONE.generation]: generation,
         }));
     }
 }
@@ -3105,16 +3312,36 @@ app.connect('activate', application => {
         return;
     }
 
-    const monitors = display.get_monitors();
     const outputs = [];
-    for (let i = 0; i < monitors.get_n_items(); i++) {
-        const monitor = monitors.get_item(i);
-        if (monitor)
-            outputs.push(new OutputWindow(application, monitor, i));
+
+    if (Array.isArray(opts.outputs) && opts.outputs.length > 0) {
+        log(`Shell monitor layout count=${opts.outputs.length}`);
+        for (let i = 0; i < opts.outputs.length; i++) {
+            const info = monitorInfoFromPayload(opts.outputs[i], i, display);
+            log(`Shell monitor[${info.monitorIndex}] consumerOutputId=${info.consumerOutputId} ` +
+                `${info.logicalWidth}x${info.logicalHeight}+${info.x}+${info.y} ` +
+                `scale=${info.scale} physical=${info.physicalWidth}x${info.physicalHeight} ` +
+                `refresh=${info.refreshRate} name=${info.displayName || '(unnamed)'}`);
+            outputs.push(new OutputWindow(application, info));
+        }
+    } else {
+        const monitors = display.get_monitors();
+        log(`GDK monitor count=${monitors.get_n_items()}`);
+        for (let i = 0; i < monitors.get_n_items(); i++) {
+            const monitor = monitors.get_item(i);
+            if (monitor) {
+                const info = monitorInfoFromGdkMonitor(monitor, i);
+                log(`GDK monitor[${info.monitorIndex}] consumerOutputId=${info.consumerOutputId} ` +
+                    `${info.logicalWidth}x${info.logicalHeight}+${info.x}+${info.y} ` +
+                    `scale=${info.scale} physical=${info.physicalWidth}x${info.physicalHeight} ` +
+                    `refresh=${info.refreshRate} name=${info.displayName || '(unnamed)'}`);
+                outputs.push(new OutputWindow(application, info));
+            }
+        }
     }
 
     if (outputs.length === 0) {
-        log('no GDK monitors available');
+        log('no monitor layout available');
         application.quit();
         return;
     }

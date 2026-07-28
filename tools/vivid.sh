@@ -24,7 +24,9 @@ Usage:
   tools/vivid.sh flatpak {build|clean}
   tools/vivid.sh flatpak run-appdir
 
-Aliases:
+  tools/vivid.sh protocol {regen|check}
+
+  Aliases:
   tools/vivid.sh consumer gnome ...
   tools/vivid.sh consumer kde ...
   tools/vivid.sh producer build-direct-run
@@ -48,13 +50,14 @@ _vivid_sh_completion() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     COMPREPLY=()
 
-    local top_commands="build clean direct-run gnome consumer-gnome kde consumer-kde consumer flatpak producer completion help -h --help"
+    local top_commands="build clean direct-run gnome consumer-gnome kde consumer-kde consumer flatpak producer protocol completion help -h --help"
     local build_targets="direct-run producer gnome consumer-gnome kde consumer-kde flatpak all"
     local clean_targets="direct-run gnome consumer-gnome kde consumer-kde flatpak producer consumer all"
     local direct_run_actions="build clean run run-producer run-webui"
     local gnome_actions="build clean install zip enable disable reset uninstall log"
     local kde_actions="build clean install zip uninstall log"
     local flatpak_actions="prefetch build clean run-appdir"
+    local protocol_actions="regen check"
     local producer_actions="build-direct-run run-direct-run run-direct-run-producer run-direct-run-webui prefetch build-flatpak run-flatpak-appdir clean-direct-run clean-flatpak clean"
 
     _vivid_complete_words() {
@@ -113,6 +116,11 @@ _vivid_sh_completion() {
         flatpak)
             if [[ "${COMP_CWORD}" -eq 2 ]]; then
                 _vivid_complete_words "${flatpak_actions}"
+            fi
+            ;;
+        protocol)
+            if [[ "${COMP_CWORD}" -eq 2 ]]; then
+                _vivid_complete_words "${protocol_actions}"
             fi
             ;;
         producer)
@@ -421,6 +429,32 @@ run_flatpak() {
     esac
 }
 
+run_protocol() {
+    local action="${1:-}"
+    if [[ -z "${action}" ]]; then
+        die_usage "missing protocol action"
+    fi
+    shift
+
+    case "${action}" in
+        regen)
+            if [[ $# -ne 0 ]]; then
+                die_usage "unexpected protocol regen arguments: $*"
+            fi
+            "${SCRIPT_DIR}/protocol_gen.sh"
+            ;;
+        check)
+            if [[ $# -ne 0 ]]; then
+                die_usage "unexpected protocol check arguments: $*"
+            fi
+            "${SCRIPT_DIR}/protocol_gen.sh" --check
+            ;;
+        *)
+            die_usage "unknown protocol action: ${action}"
+            ;;
+    esac
+}
+
 run_producer_alias() {
     local action="${1:-}"
     if [[ -z "${action}" ]]; then
@@ -515,6 +549,10 @@ case "${1:-help}" in
     producer)
         shift
         run_producer_alias "$@"
+        ;;
+    protocol)
+        shift
+        run_protocol "$@"
         ;;
     completion)
         shift

@@ -41,6 +41,7 @@
 #include <include/cef_app.h>
 #include <include/cef_browser.h>
 #include <include/cef_client.h>
+#include <include/cef_request_context.h>
 #include <include/cef_task_manager.h>
 #include <include/wrapper/cef_closure_task.h>
 #include <include/wrapper/cef_helpers.h>
@@ -192,6 +193,62 @@ const char*
 bool_to_string(bool value)
 {
     return value ? "true" : "false";
+}
+
+const char*
+viewport_mode_name(WebViewportMode mode)
+{
+    switch (mode) {
+    case WebViewportMode::LogicalDip:
+        return "logical-dip";
+    case WebViewportMode::AcceleratedPhysical:
+        return "accelerated-physical";
+    }
+    return "unknown";
+}
+
+void
+log_viewport_contract(const char* reason,
+                      const WebViewport& viewport,
+                      bool notify_resize,
+                      int browser_id)
+{
+    g_debug("VividWebProducer: viewport contract reason=%s browser=%d "
+            "physical=%dx%d dip=%dx%d view=%dx%d scale=%.3f "
+            "screen-scale=%.3f zoom-level=%.6f mode=%s configured=%s "
+            "notify-resize=%s",
+            reason && *reason ? reason : "unknown",
+            browser_id,
+            viewport.physical_width,
+            viewport.physical_height,
+            viewport.dip_width,
+            viewport.dip_height,
+            viewport.view_width,
+            viewport.view_height,
+            viewport.scale,
+            viewport.screen_scale,
+            viewport.zoom_level,
+            viewport_mode_name(viewport.mode),
+            bool_to_string(viewport.configured),
+            bool_to_string(notify_resize));
+}
+
+bool
+gpu_device_equal(const VividGpuDevice& a, const VividGpuDevice& b)
+{
+    return std::strcmp(a.render_node, b.render_node) == 0 &&
+        std::strcmp(a.name, b.name) == 0 &&
+        std::strcmp(a.pci_address, b.pci_address) == 0 &&
+        a.vendor_id == b.vendor_id &&
+        a.drm_render_major == b.drm_render_major &&
+        a.drm_render_minor == b.drm_render_minor &&
+        std::memcmp(a.uuid, b.uuid, sizeof(a.uuid)) == 0 &&
+        std::memcmp(a.driver_uuid, b.driver_uuid, sizeof(a.driver_uuid)) == 0 &&
+        a.is_discrete == b.is_discrete &&
+        a.scene_dmabuf_n_caps == b.scene_dmabuf_n_caps &&
+        std::memcmp(a.scene_dmabuf_caps,
+                    b.scene_dmabuf_caps,
+                    sizeof(a.scene_dmabuf_caps[0]) * a.scene_dmabuf_n_caps) == 0;
 }
 
 bool
@@ -1783,12 +1840,31 @@ public:
          * the page zoom, which makes high-DPI wallpapers initialize at the wrong
          * scale for one or more frames.
          */
-        CefRefPtr<CefBrowser> browser = CefBrowserHost::CreateBrowserSync(window_info,
-                                                                          this,
-                                                                          "about:blank",
-                                                                          browser_settings,
-                                                                          nullptr,
-                                                                          nullptr);
+        if (!request_context_) {
+            CefRequestContextSettings request_context_settings;
+            /*
+             * Chromium stores page zoom in the BrowserContext/HostZoomMap, not
+             * on an individual CefBrowser. Independent monitor routes can load
+             * the same file:// wallpaper at different scale factors, so sharing
+             * the global request context lets the 200% monitor's SetZoomLevel()
+             * leak into the 100% monitor and makes window.devicePixelRatio jump
+             * after the first frame. Give each web route its own in-memory
+             * request context; the wallpaper URL stays unchanged, while zoom,
+             * transient storage and screen metrics stay route-local.
+             */
+            request_context_ =
+                CefRequestContext::CreateContext(request_context_settings, nullptr);
+            g_debug("VividWebProducer: created route-local CEF request context "
+                    "for isolated page zoom state");
+        }
+
+        CefRefPtr<CefBrowser> browser =
+            CefBrowserHost::CreateBrowserSync(window_info,
+                                              this,
+                                              "about:blank",
+                                              browser_settings,
+                                              nullptr,
+                                              request_context_);
         g_mutex_lock(&state_lock_);
         browser_ = browser;
         browser_created_ = browser != nullptr;
@@ -1802,7 +1878,7 @@ public:
              * direct OS output so nothing is heard twice.
              */
             browser->GetHost()->SetAudioMuted(true);
-            ApplyViewportToBrowser(browser, true);
+            ApplyViewportToBrowser(browser, true, "create-browser");
             if (browser->GetMainFrame())
                 browser->GetMainFrame()->LoadURL(url);
             g_message("VividWebProducer: CEF browser created url=%s fps=%d "
@@ -1829,7 +1905,7 @@ public:
         CEF_REQUIRE_UI_THREAD();
         CefRefPtr<CefBrowser> browser = current_browser();
         if (browser && browser->GetMainFrame()) {
-            ApplyViewportToBrowser(browser, false);
+            ApplyViewportToBrowser(browser, false, "load-url");
             browser->GetMainFrame()->LoadURL(url);
         }
     }
@@ -1848,7 +1924,7 @@ public:
         CefRefPtr<CefBrowser> browser = current_browser();
         if (!browser)
             return;
-        ApplyViewportToBrowser(browser, true);
+        ApplyViewportToBrowser(browser, true, "viewport-changed");
     }
 
     void DoExecuteJs(std::string script)
@@ -1928,7 +2004,7 @@ public:
         host->ExecuteDevToolsMethod(0, "Page.setWebLifecycleState", params);
         host->WasHidden(suspended);
         if (!suspended)
-            ApplyViewportToBrowser(browser, true);
+            ApplyViewportToBrowser(browser, true, "resume");
     }
 
     void DoRequestFrame(bool restore_suspended, std::string reason)
@@ -1959,7 +2035,7 @@ public:
             one_shot_restore_suspended_ = false;
         }
 
-        ApplyViewportToBrowser(browser, true);
+        ApplyViewportToBrowser(browser, true, "request-frame");
         host->Invalidate(PET_VIEW);
         g_message("VividWebProducer: request one DMA-BUF frame suspended=%s reason=%s",
                   restore_suspended ? "true" : "false",
@@ -2197,7 +2273,9 @@ private:
         return viewport;
     }
 
-    void ApplyViewportToBrowser(CefRefPtr<CefBrowser> browser, bool notify_resize)
+    void ApplyViewportToBrowser(CefRefPtr<CefBrowser> browser,
+                                bool notify_resize,
+                                const char* reason)
     {
         if (!browser)
             return;
@@ -2207,6 +2285,10 @@ private:
 
         const WebViewport viewport = viewport_snapshot();
         host->SetZoomLevel(viewport.zoom_level);
+        log_viewport_contract(reason,
+                              viewport,
+                              notify_resize,
+                              browser->GetIdentifier());
         if (notify_resize) {
             host->NotifyScreenInfoChanged();
             host->WasResized();
@@ -2234,6 +2316,7 @@ private:
     GMutex state_lock_;
     GCond state_cond_;
     CefRefPtr<CefBrowser> browser_;
+    CefRefPtr<CefRequestContext> request_context_;
     bool browser_created_ { false };
     bool browser_failed_ { false };
     bool browser_closed_ { false };
@@ -2499,6 +2582,8 @@ producer_handle_accelerated_paint(_VividWebProducer* self,
     const guint32 coded_height = info.extra.coded_size.height > 0
         ? (guint32)info.extra.coded_size.height
         : self->ring.height;
+    const guint32 ring_width = self->ring.width;
+    const guint32 ring_height = self->ring.height;
 
     gint32 src_x = 0;
     gint32 src_y = 0;
@@ -2509,6 +2594,34 @@ producer_handle_accelerated_paint(_VividWebProducer* self,
         src_y = info.extra.visible_rect.y;
         src_width = (guint32)info.extra.visible_rect.width;
         src_height = (guint32)info.extra.visible_rect.height;
+    }
+
+    if (src_x != 0 ||
+        src_y != 0 ||
+        src_width != ring_width ||
+        src_height != ring_height) {
+        /*
+         * CEF can deliver an accelerated paint that was queued before Vivid
+         * rebuilt the export ring for a new clone-primary viewport. Importing
+         * that stale dmabuf would publish the old page size as the first frame
+         * of the new DMA-BUF generation, so require the visible source rect to
+         * match the current ring contract exactly.
+         */
+        if (!self->logged_size_mismatch) {
+            g_message("VividWebProducer: dropping stale CEF accelerated frame "
+                      "coded=%ux%u visible=%d,%d %ux%u ring=%ux%u",
+                      coded_width,
+                      coded_height,
+                      src_x,
+                      src_y,
+                      src_width,
+                      src_height,
+                      ring_width,
+                      ring_height);
+            self->logged_size_mismatch = true;
+        }
+        g_mutex_unlock(&self->lock);
+        return;
     }
 
     const guint32 upload_slot_index = self->ring.in_progress_index;
@@ -2538,7 +2651,9 @@ producer_handle_accelerated_paint(_VividWebProducer* self,
          * happened during the wait cannot make us import into a stale slot.
          */
         if (!self->ring.valid() || !self->ring.vulkan_ready ||
-            self->ring.in_progress_index != upload_slot_index) {
+            self->ring.in_progress_index != upload_slot_index ||
+            self->ring.width != ring_width ||
+            self->ring.height != ring_height) {
             g_mutex_unlock(&self->lock);
             return;
         }
@@ -2732,7 +2847,7 @@ VividWebClient::OnLoadStart(CefRefPtr<CefBrowser> browser,
     const std::string url = frame->GetURL().ToString();
     if (url.empty() || url == "about:blank")
         return;
-    ApplyViewportToBrowser(browser, false);
+    ApplyViewportToBrowser(browser, false, "load-start");
 }
 
 void
@@ -2787,7 +2902,8 @@ vivid_web_producer_configure(VividWebProducer* self,
                               gdouble            volume,
                               gint               fill_mode,
                               gint               fps,
-                              const gchar*       render_device)
+                              const gchar*       render_device,
+                              const VividGpuDevice* resolved_gpu)
 {
     g_return_val_if_fail(self != NULL, FALSE);
     (void)fill_mode; /* web pages always fill their own viewport */
@@ -2802,9 +2918,8 @@ vivid_web_producer_configure(VividWebProducer* self,
 
     const std::string next_render_device =
         render_device && *render_device ? render_device : "auto";
-
-    VividGpuDevice gpu {};
-    const bool gpu_valid = vivid_gpu_device_resolve(next_render_device.c_str(), &gpu);
+    const bool gpu_valid = resolved_gpu != nullptr;
+    const VividGpuDevice gpu = gpu_valid ? *resolved_gpu : VividGpuDevice {};
     if (gpu_valid)
         apply_gpu_process_environment(gpu);
 
@@ -2816,7 +2931,10 @@ vivid_web_producer_configure(VividWebProducer* self,
     const bool user_properties_changed =
         self->user_properties_json != (user_properties_json ? user_properties_json : "{}");
     const bool fps_changed = self->fps != CLAMP(fps, 5, 240);
-    const bool render_device_changed = self->render_device != next_render_device;
+    const bool render_device_changed =
+        self->render_device != next_render_device ||
+        self->resolved_gpu_valid != gpu_valid ||
+        (self->resolved_gpu_valid && !gpu_device_equal(self->resolved_gpu, gpu));
 
     self->project_path = project_dir ? project_dir : "";
     self->entry_url = url;
@@ -3167,6 +3285,36 @@ vivid_web_producer_prepare_buffers_internal(
         return FALSE;
     }
 
+    CefRefPtr<VividWebClient> client_to_close;
+    const bool viewport_contract_changed =
+        self->ring.valid() &&
+        (self->ring.width != width ||
+         self->ring.height != height ||
+         std::abs(self->render_scale - render_scale) > 0.0001);
+    if (viewport_contract_changed && self->client->has_browser_created()) {
+        /*
+         * Some Wallpaper Engine pages compute canvas centers and audio
+         * visualizer geometry only during load. A CEF resize updates the
+         * Chromium viewport, but it cannot force those page scripts to discard
+         * cached state. Replacing the browser only when Vivid's physical
+         * viewport or scale contract changes gives the new DMA-BUF generation a
+         * fresh page load while leaving modifier/export-only rebuilds alone.
+         */
+        g_message("VividWebProducer: viewport contract changed to %ux%u "
+                  "scale=%.3f; recreating CEF browser state",
+                  width,
+                  height,
+                  render_scale);
+        const bool shared_textures = self->shared_textures;
+        client_to_close = self->client;
+        self->client = new VividWebClient(self);
+        self->shared_textures = shared_textures;
+        g_mutex_unlock(&self->lock);
+        close_client_browser(client_to_close, "viewport contract change");
+        self->audio.stop();
+        g_mutex_lock(&self->lock);
+    }
+
     const bool contract_changed = !self->ring.valid() ||
         self->ring.width != width ||
         self->ring.height != height ||
@@ -3175,15 +3323,10 @@ vivid_web_producer_prepare_buffers_internal(
 
     if (contract_changed) {
         if (!self->resolved_gpu_valid) {
-            VividGpuDevice gpu {};
-            if (!vivid_gpu_device_resolve(self->render_device.c_str(), &gpu)) {
-                g_mutex_unlock(&self->lock);
-                g_warning("VividWebProducer: no usable Vulkan GPU for render-device='%s'",
-                          self->render_device.c_str());
-                return FALSE;
-            }
-            self->resolved_gpu = gpu;
-            self->resolved_gpu_valid = true;
+            g_mutex_unlock(&self->lock);
+            g_warning("VividWebProducer: no resolved Vulkan GPU for render-device='%s'",
+                      self->render_device.c_str());
+            return FALSE;
         }
 
         if (!self->ring.create(self->resolved_gpu, width, height, export_request)) {
@@ -3323,11 +3466,11 @@ vivid_web_producer_prepare_buffers_internal(
                                         std::move(general_script)));
     }
 
-    g_message("VividWebProducer: prepared DMA-BUF buffer set %ux%u scale=%.3f buffers=%u",
-              out_set->width,
-              out_set->height,
-              render_scale,
-              out_set->n_buffers);
+    g_debug("VividWebProducer: prepared DMA-BUF buffer set %ux%u scale=%.3f buffers=%u",
+            out_set->width,
+            out_set->height,
+            render_scale,
+            out_set->n_buffers);
     return out_set->n_buffers > 0;
 }
 
@@ -3355,22 +3498,15 @@ vivid_web_producer_query_dmabuf_caps(VividWebProducer*           self,
     g_return_val_if_fail(out_caps != nullptr, FALSE);
 
     memset(out_caps, 0, sizeof(*out_caps));
-    VividGpuDevice gpu {};
     if (!self->resolved_gpu_valid) {
-        if (!vivid_gpu_device_resolve(self->render_device.c_str(), &gpu)) {
-            g_warning("VividWebProducer: cannot query DMA-BUF caps for unresolved "
-                      "render-device='%s'",
-                      self->render_device.c_str());
-            return FALSE;
-        }
-        self->resolved_gpu = gpu;
-        self->resolved_gpu_valid = true;
-    } else {
-        gpu = self->resolved_gpu;
+        g_warning("VividWebProducer: cannot query DMA-BUF caps for unresolved "
+                  "render-device='%s'",
+                  self->render_device.c_str());
+        return FALSE;
     }
 
     const auto caps = VividWebVulkanRoute::query_export_caps(
-        gpu,
+        self->resolved_gpu,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     for (const auto& cap : caps) {
         if (out_caps->n_caps >= VIVID_WEB_PRODUCER_DMABUF_MAX_CAPS)
@@ -3424,6 +3560,7 @@ vivid_web_producer_next_frame(VividWebProducer* self, VividWebProducerFrame* out
     g_return_val_if_fail(out_frame != NULL, FALSE);
 
     memset(out_frame, 0, sizeof(*out_frame));
+    out_frame->acquire_sync_fd = -1;
 
     g_mutex_lock(&self->lock);
     guint32 index = 0;

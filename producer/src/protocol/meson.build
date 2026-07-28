@@ -16,6 +16,7 @@ vivid_display_protocol_lib = library(
 
 install_headers(
   'vivid_display_protocol.h',
+  'vivid_display_protocol_ids.h',
   subdir: 'vivid-display-1',
 )
 

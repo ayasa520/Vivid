@@ -1,8 +1,12 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import * as BuildConfig from '../../buildConfig.js';
 import * as Logger from '../logger.js';
+import {shellMonitorConnector as resolveShellMonitorConnector} from './monitorIdentity.js';
+
+export {shellMonitorConnector} from './monitorIdentity.js';
 
 const logger = new Logger.Logger('displayHelper');
 const encoder = new TextEncoder();
@@ -53,10 +57,55 @@ const bytesToProcArgs = bytes => {
 };
 
 const isImportantHelperLine = line =>
-    /\b(register|bound|connected|accepted|first frame|slow|failed|error|media|thumbnail|MPRIS|DMA-BUF|FRAME_READY|UNBIND|closed)\b/i
+    /\b(register|bound|connected|accepted|first frame|slow|failed|error|media|thumbnail|MPRIS|DMA-BUF|FRAME_READY|UNBIND|closed|monitor layout|monitor count|monitor\[)\b/i
         .test(line);
 
 const formatUsec = usec => `${(Number(usec) / 1000).toFixed(2)}ms`;
+
+const monitorObjectString = (object, keys) => {
+    for (const key of keys) {
+        const value = object?.[key];
+        if (typeof value === 'string' && value.trim())
+            return value.trim();
+    }
+    return '';
+};
+
+const shellMonitorConnector = (index, layout) =>
+    resolveShellMonitorConnector(index, layout);
+
+const shellMonitorDisplayName = (index, layout) => {
+    const parts = [];
+    const append = value => {
+        const text = typeof value === 'string' ? value.trim() : '';
+        if (text && !parts.includes(text))
+            parts.push(text);
+    };
+
+    /*
+     * Mutter has exposed monitor identity through different API shapes across
+     * GNOME releases. The helper process cannot safely call Shell-only APIs, so
+     * collect the best display name here and pass it over the helper command
+     * line together with the authoritative Shell monitor geometry.
+     */
+    for (const getter of [
+        'get_monitor_connector',
+        'get_monitor_vendor',
+        'get_monitor_product',
+        'get_monitor_product_serial',
+    ]) {
+        try {
+            if (typeof global.display?.[getter] === 'function')
+                append(global.display[getter](index));
+        } catch (_e) {
+        }
+    }
+
+    append(monitorObjectString(layout, ['connector', 'output', 'name']));
+    append(monitorObjectString(layout, ['manufacturer', 'vendor']));
+    append(monitorObjectString(layout, ['model', 'product']));
+    return parts.join(' ').trim();
+};
 
 export class DisplayHelperService {
     constructor({socketPath = null} = {}) {
@@ -72,6 +121,8 @@ export class DisplayHelperService {
         this._restartSourceId = 0;
         this._runSerial = 0;
         this._helperPid = null;
+        this._monitorsChangedId = 0;
+        this._outputLayoutJson = '[]';
     }
 
     start() {
@@ -82,6 +133,7 @@ export class DisplayHelperService {
         this._runSerial++;
         if (this._cancellable.is_cancelled())
             this._cancellable = new Gio.Cancellable();
+        this._connectMonitorSignals();
         this._reapStaleHelpers('startup');
         this._spawn();
     }
@@ -89,6 +141,7 @@ export class DisplayHelperService {
     stop() {
         this._started = false;
         this._runSerial++;
+        this._disconnectMonitorSignals();
         this._clearRestartSource();
         try {
             this._cancellable.cancel();
@@ -128,6 +181,8 @@ export class DisplayHelperService {
 
     _spawn() {
         const gjs = GLib.find_program_in_path('gjs') ?? 'gjs';
+        const outputsJson = this._buildOutputLayoutJson();
+        this._outputLayoutJson = outputsJson;
         const launcher = new Gio.SubprocessLauncher({
             flags: Gio.SubprocessFlags.STDIN_PIPE |
                 Gio.SubprocessFlags.STDOUT_PIPE |
@@ -148,6 +203,8 @@ export class DisplayHelperService {
             helperPath,
             '--socket',
             this.socketPath,
+            '--outputs-json',
+            outputsJson,
         ];
 
         const runSerial = this._runSerial;
@@ -186,10 +243,97 @@ export class DisplayHelperService {
                     this._scheduleSpawnRetry('helper-exited', runSerial);
                 }
             });
-            logger.warn(`display helper started pid=${this._helperPid ?? 'unknown'} socket=${this.socketPath}`);
+            logger.warn(`display helper started pid=${this._helperPid ?? 'unknown'} ` +
+                `socket=${this.socketPath} outputs=${this._outputLayoutCount(outputsJson)}`);
         } catch (error) {
             logger.warn(`failed to start display helper: ${error}`);
             this._scheduleSpawnRetry('spawn-failed', runSerial);
+        }
+    }
+
+    _connectMonitorSignals() {
+        if (this._monitorsChangedId)
+            return;
+
+        this._monitorsChangedId = Main.layoutManager.connect('monitors-changed', () => {
+            const outputsJson = this._buildOutputLayoutJson();
+            if (outputsJson === this._outputLayoutJson)
+                return;
+
+            logger.warn(`display helper monitor layout changed ` +
+                `old=${this._outputLayoutCount(this._outputLayoutJson)} ` +
+                `new=${this._outputLayoutCount(outputsJson)}`);
+            this._outputLayoutJson = outputsJson;
+            this._restartHelper('monitors-changed');
+        });
+    }
+
+    _disconnectMonitorSignals() {
+        if (!this._monitorsChangedId)
+            return;
+
+        try {
+            Main.layoutManager.disconnect(this._monitorsChangedId);
+        } catch (_e) {
+        }
+        this._monitorsChangedId = 0;
+    }
+
+    _buildOutputLayoutJson() {
+        const outputs = [];
+        const shellMonitorCount = Number(global.display?.get_n_monitors?.() ?? 0);
+        const layoutMonitors = Main.layoutManager?.monitors ?? [];
+        const count = Math.max(shellMonitorCount, layoutMonitors.length);
+        for (let index = 0; index < count; index++) {
+            const layout = layoutMonitors[index];
+            let geometry = layout;
+            if (!geometry) {
+                try {
+                    geometry = global.display.get_monitor_geometry(index);
+                } catch (_e) {
+                    geometry = null;
+                }
+            }
+            if (!geometry)
+                continue;
+
+            let scale = 1;
+            try {
+                scale = Number(global.display.get_monitor_scale(index));
+            } catch (_e) {
+                scale = Number(layout?.scale ?? 1);
+            }
+            if (!Number.isFinite(scale) || scale <= 0)
+                scale = 1;
+
+            const width = Math.max(1, Math.round(Number(geometry.width) || 1));
+            const height = Math.max(1, Math.round(Number(geometry.height) || 1));
+            outputs.push({
+                consumerOutputId: index + 1,
+                monitorIndex: index,
+                layoutOutputCount: count,
+                displayKey: shellMonitorConnector(index, layout),
+                x: Math.round(Number(geometry.x) || 0),
+                y: Math.round(Number(geometry.y) || 0),
+                width,
+                height,
+                scale,
+                physicalWidth: Math.max(1, Math.round(width * scale)),
+                physicalHeight: Math.max(1, Math.round(height * scale)),
+                refreshRateMhz: 0,
+                desktop: 'gnome-shell-helper',
+                displayName: shellMonitorDisplayName(index, layout),
+            });
+        }
+        return JSON.stringify(outputs);
+    }
+
+    _outputLayoutCount(json) {
+        try {
+            const outputs = JSON.parse(json || '[]');
+            return Array.isArray(outputs) ? outputs.length : 0;
+        } catch (_e) {
+            return 0;
         }
     }
 

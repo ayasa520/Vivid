@@ -38,3 +38,4 @@ AGENTS.md
 .claude
 __pycache__/
 .playwright-cli
+.vscode/

@@ -456,9 +456,7 @@ vivid_display_control_header_encode(uint8_t out[VIVID_DISPLAY_CONTROL_HEADER_BYT
     if (!out)
         return -EINVAL;
 
-    write_u16_le(&out[0], opcode);
-    write_u16_le(&out[2], flags);
-    write_u32_le(&out[4], json_length);
+    vivid_display_control_header_body_write(out, opcode, flags, json_length);
     return 0;
 }
 
@@ -469,11 +467,12 @@ vivid_display_control_header_decode(const uint8_t* data,
 {
     if (!data || !out)
         return -EINVAL;
-    if (len < VIVID_DISPLAY_CONTROL_HEADER_BYTES)
+    if (vivid_display_control_header_body_read(data,
+                                                len,
+                                                &out->opcode,
+                                                &out->flags,
+                                                &out->json_length) < 0)
         return -EMSGSIZE;
 
-    out->opcode = read_u16_le(&data[0]);
-    out->flags = read_u16_le(&data[2]);
-    out->json_length = read_u32_le(&data[4]);
     return 0;
 }

@@ -56,11 +56,16 @@ shell_integration_sources = [
 ]
 
 shell_service_sources = [
+  'shell/services/monitorIdentity.js',
   'shell/services/displayHelper.js',
 ]
 
 shell_helper_sources = [
   'shell/helper/display-helper.js',
+  'shell/helper/protocol-constants.js',
+  'shell/helper/protocol-codec.js',
+  'shell/helper/protocol-meta.js',
+  'shell/helper/protocol-json-fields.js',
 ]
 
 shell_ui_sources = [

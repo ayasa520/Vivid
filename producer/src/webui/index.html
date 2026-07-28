@@ -64,6 +64,13 @@
         <button id="settingsButton" class="icon-button secondary-button" type="button" data-i18n-title="tab.settings" title="Settings">
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06A2 2 0 1 1 7.04 4.3l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.22.62.8 1 1.51 1H21a2 2 0 1 1 0 4h-.09c-.7 0-1.29.38-1.51 1Z"/></svg>
         </button>
+        <button id="displayButton" class="icon-button secondary-button" type="button" data-i18n-title="action.chooseDisplay" title="Choose display">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <rect width="20" height="14" x="2" y="3" rx="2"></rect>
+            <path d="M8 21h8"></path>
+            <path d="M12 17v4"></path>
+          </svg>
+        </button>
         <button id="refreshButton" class="icon-button secondary-button" type="button" data-i18n-title="action.refresh" title="Refresh">
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M21 12a9 9 0 0 1-15.5 6.2"></path>
@@ -128,8 +135,8 @@
           <div class="setting-list" data-section="scene"></div>
         </section>
         <section class="settings-section">
-          <h2 data-i18n="section.autopause">Auto Pause</h2>
-          <div class="setting-list" data-section="autopause"></div>
+          <h2 data-i18n="section.playback">Playback</h2>
+          <div class="setting-list" data-section="playback"></div>
         </section>
         <section class="settings-section">
           <h2 data-i18n="section.experimental">Experimental</h2>
@@ -149,6 +156,39 @@
           <button id="resetDefaultsButton" class="danger-button" type="button" data-i18n="action.restoreDefaults">Restore Defaults</button>
         </section>
       </form>
+    </section>
+
+    <section id="displayModal" class="modal-backdrop" aria-hidden="true">
+      <div class="display-dialog" role="dialog" aria-modal="true" aria-labelledby="displayDialogTitle">
+        <header class="display-dialog-header">
+          <div>
+            <h2 id="displayDialogTitle" data-i18n="display.title">Choose Display</h2>
+            <p id="displayDialogSubtitle" data-i18n="display.subtitle">Wallpaper changes apply to the highlighted display.</p>
+          </div>
+          <button id="displayModalCloseButton" class="icon-button secondary-button" type="button" data-i18n-title="action.close" title="Close">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M18 6 6 18"></path>
+              <path d="m6 6 12 12"></path>
+            </svg>
+          </button>
+        </header>
+
+        <label class="display-mode-field">
+          <span class="visually-hidden" data-i18n="display.mode">Display mode</span>
+          <select id="displayModeSelect" autocomplete="off" aria-label="Display mode" data-i18n-aria-label="display.mode">
+            <option value="clone" data-i18n="settingOption.multi-display-mode.clone">Clone single monitor</option>
+            <option value="independent" data-i18n="settingOption.multi-display-mode.independent">Wallpaper per monitor</option>
+          </select>
+        </label>
+
+        <div id="displayCanvas" class="display-canvas" aria-label="Displays" data-i18n-aria-label="display.canvas"></div>
+        <p id="displayEmpty" class="empty-state" data-i18n="display.empty">No connected displays reported by the producer.</p>
+
+        <footer class="display-dialog-actions">
+          <button id="displayChangeWallpaperButton" class="primary-button" type="button" data-i18n="action.changeWallpaper">Change Wallpaper</button>
+          <button id="displayRemoveWallpaperButton" class="danger-button" type="button" data-i18n="action.removeWallpaper">Remove Wallpaper</button>
+        </footer>
+      </div>
     </section>
   </main>
 

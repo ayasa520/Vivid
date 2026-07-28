@@ -25,6 +25,10 @@
 #define DRM_FORMAT_MOD_INVALID ((1ULL << 56) - 1)
 #endif
 
+#ifndef RTLD_NODELETE
+#define RTLD_NODELETE 0
+#endif
+
 typedef enum
 {
     VIVID_PRODUCER_RENDERER_MODE_DIAGNOSTIC,
@@ -81,7 +85,8 @@ typedef struct
                                gdouble              volume,
                                gint                 fill_mode,
                                gint                 fps,
-                               const gchar*         render_device);
+                               const gchar*         render_device,
+                               const VividGpuDevice* resolved_gpu);
     void (*set_audio_state_func)(VividVideoProducer* self,
                                  gboolean             muted,
                                  gdouble              volume);
@@ -123,7 +128,8 @@ typedef struct
                                gdouble              volume,
                                gint                 fill_mode,
                                gint                 fps,
-                               const gchar*         render_device);
+                               const gchar*         render_device,
+                               const VividGpuDevice* resolved_gpu);
     void (*set_playing_func)(VividSceneProducer* self, gboolean playing);
     void (*set_pointer_motion_func)(VividSceneProducer* self, gdouble x, gdouble y);
     void (*set_pointer_button_func)(VividSceneProducer* self,
@@ -172,7 +178,8 @@ typedef struct
                                gdouble            volume,
                                gint               fill_mode,
                                gint               fps,
-                               const gchar*       render_device);
+                               const gchar*       render_device,
+                               const VividGpuDevice* resolved_gpu);
     void (*set_playing_func)(VividWebProducer* self, gboolean playing);
     void (*set_pointer_motion_func)(VividWebProducer* self, gdouble x, gdouble y);
     void (*set_pointer_button_func)(VividWebProducer* self,
@@ -227,6 +234,7 @@ struct _VividProducerRenderer
     gint     content_fit;
     gint     scene_fps;
     gboolean playback_paused;
+    gboolean playback_stopped;
     guint64  generation;
     guint64  last_request_frame_log_time_usec;
     guint32  request_frame_log_suppressed;
@@ -247,6 +255,8 @@ struct _VividProducerRenderer
 static gboolean read_project_json(const gchar* project_dir,
                                   JsonParser** out_parser,
                                   JsonObject** out_object);
+static gboolean vivid_producer_renderer_restart_current_project(
+    VividProducerRenderer* renderer);
 
 static const gchar*
 default_scene_media_state_json(void)
@@ -433,6 +443,15 @@ renderer_backend_render_device(VividProducerRenderer* renderer)
     if (renderer->resolved_gpu_valid && renderer->resolved_gpu.render_node[0])
         return renderer->resolved_gpu.render_node;
     return "(unresolved)";
+}
+
+static const VividGpuDevice*
+renderer_resolved_gpu_or_null(VividProducerRenderer* renderer)
+{
+    if (!renderer || !renderer->resolved_gpu_valid ||
+        !renderer->resolved_gpu.render_node[0])
+        return NULL;
+    return &renderer->resolved_gpu;
 }
 
 static gboolean
@@ -883,9 +902,19 @@ vivid_producer_web_load(VividProducerRenderer* renderer)
     if (web->module)
         return vivid_producer_web_ensure_instance(renderer);
 
+    /*
+     * libVividWeb embeds CEF. Browser shutdown is asynchronous and CEF keeps
+     * process-global worker threads after individual VividWebProducer instances
+     * are destroyed. Independent display mode can free one route while another
+     * web route, or a CEF teardown task from the just-freed route, is still
+     * running. Opening the module with RTLD_NODELETE keeps callback code and
+     * C++ static storage mapped even after the adapter drops its dlopen handle.
+     */
+    const int web_dlopen_flags = RTLD_NOW | RTLD_LOCAL | RTLD_NODELETE;
+
     const gchar* env_path = g_getenv("VIVID_WEB_LIBRARY");
     if (env_path && *env_path) {
-        web->module = dlopen(env_path, RTLD_NOW | RTLD_LOCAL);
+        web->module = dlopen(env_path, web_dlopen_flags);
         if (web->module)
             g_message("VividProducer: loaded web producer adapter from %s", env_path);
         else
@@ -899,7 +928,7 @@ vivid_producer_web_load(VividProducerRenderer* renderer)
     };
 
     for (guint i = 0; !web->module && candidates[i]; i++) {
-        web->module = dlopen(candidates[i], RTLD_NOW | RTLD_LOCAL);
+        web->module = dlopen(candidates[i], web_dlopen_flags);
         if (web->module) {
             g_message("VividProducer: loaded web producer adapter from %s",
                       candidates[i]);
@@ -978,12 +1007,13 @@ vivid_producer_web_unload(VividProducerRenderer* renderer)
     vivid_producer_web_stop(renderer);
     if (web->module) {
         /*
-         * CEF can be initialized exactly once per process and never again
-         * after CefShutdown; the web module therefore stays loaded across
-         * wallpaper switches and this unload only runs on renderer teardown.
+         * Route renderers are not process shutdown. CEF is initialized once per
+         * process and keeps background threads while browsers close
+         * asynchronously, so per-route teardown must not call CefShutdown or
+         * unload executable code out from under those threads. RTLD_NODELETE
+         * keeps the mapping resident; dlclose only releases this adapter's
+         * handle bookkeeping.
          */
-        if (web->global_shutdown_func)
-            web->global_shutdown_func();
         dlclose(web->module);
         memset(web, 0, sizeof(*web));
     }
@@ -1044,7 +1074,8 @@ vivid_producer_web_start(VividProducerRenderer* renderer,
                                       volume,
                                       CLAMP(renderer->content_fit, 1, 3),
                                       renderer->scene_fps,
-                                      renderer_backend_render_device(renderer))) {
+                                      renderer_backend_render_device(renderer),
+                                      renderer_resolved_gpu_or_null(renderer))) {
         g_warning("VividProducer: web renderer failed to configure project=%s",
                   project_path ? project_path : "(null)");
         vivid_producer_web_stop(renderer);
@@ -1080,7 +1111,8 @@ vivid_producer_web_refresh_config(VividProducerRenderer* renderer)
                                                      volume,
                                                      CLAMP(renderer->content_fit, 1, 3),
                                                      renderer->scene_fps,
-                                                     renderer_backend_render_device(renderer));
+                                                     renderer_backend_render_device(renderer),
+                                                     renderer_resolved_gpu_or_null(renderer));
     if (!ok) {
         g_warning("VividProducer: web renderer failed runtime reconfigure "
                   "project=%s render-device=%s",
@@ -1163,7 +1195,8 @@ vivid_producer_scene_start(VividProducerRenderer* renderer,
                                         volume,
                                         CLAMP(renderer->content_fit, 1, 3),
                                         renderer->scene_fps,
-                                        renderer_backend_render_device(renderer))) {
+                                        renderer_backend_render_device(renderer),
+                                        renderer_resolved_gpu_or_null(renderer))) {
         g_warning("VividProducer: scene renderer failed to configure project=%s",
                   project_path ? project_path : "(null)");
         return FALSE;
@@ -1201,7 +1234,8 @@ vivid_producer_video_apply_audio_state(VividProducerRenderer* renderer)
                                        volume,
                                        CLAMP(renderer->content_fit, 1, 3),
                                        renderer->scene_fps,
-                                       renderer_backend_render_device(renderer));
+                                       renderer_backend_render_device(renderer),
+                                       renderer_resolved_gpu_or_null(renderer));
     }
 
     if (renderer->mode == VIVID_PRODUCER_RENDERER_MODE_WEB &&
@@ -1214,15 +1248,15 @@ vivid_producer_video_apply_audio_state(VividProducerRenderer* renderer)
                                      volume,
                                      CLAMP(renderer->content_fit, 1, 3),
                                      renderer->scene_fps,
-                                     renderer_backend_render_device(renderer));
+                                     renderer_backend_render_device(renderer),
+                                     renderer_resolved_gpu_or_null(renderer));
     }
 }
 
 static void
 vivid_producer_video_apply_playback_state(VividProducerRenderer* renderer)
 {
-    if (renderer->mode == VIVID_PRODUCER_RENDERER_MODE_SCENE_PENDING &&
-        renderer->scene.instance &&
+    if (renderer->scene.instance &&
         renderer->scene.set_playing_func) {
         renderer->scene.set_playing_func(renderer->scene.instance,
                                          !renderer->playback_paused);
@@ -1456,7 +1490,8 @@ vivid_producer_video_start(VividProducerRenderer* renderer,
                                         volume,
                                         CLAMP(renderer->content_fit, 1, 3),
                                         renderer->scene_fps,
-                                        renderer_backend_render_device(renderer))) {
+                                        renderer_backend_render_device(renderer),
+                                        renderer_resolved_gpu_or_null(renderer))) {
         g_warning("VividProducer: video renderer failed to configure project=%s",
                   project_path ? project_path : "(null)");
         return FALSE;
@@ -1498,7 +1533,8 @@ vivid_producer_video_refresh_config(VividProducerRenderer* renderer)
                                                        volume,
                                                        CLAMP(renderer->content_fit, 1, 3),
                                                        renderer->scene_fps,
-                                                       renderer_backend_render_device(renderer));
+                                                       renderer_backend_render_device(renderer),
+                                                       renderer_resolved_gpu_or_null(renderer));
     if (!ok) {
         g_warning("VividProducer: video renderer failed runtime "
                   "reconfigure project=%s render-device=%s",
@@ -1541,7 +1577,8 @@ vivid_producer_scene_refresh_config(VividProducerRenderer* renderer)
                                                        volume,
                                                        CLAMP(renderer->content_fit, 1, 3),
                                                        renderer->scene_fps,
-                                                       renderer_backend_render_device(renderer));
+                                                       renderer_backend_render_device(renderer),
+                                                       renderer_resolved_gpu_or_null(renderer));
     if (!ok) {
         g_warning("VividProducer: scene renderer failed runtime reconfigure "
                   "project=%s render-device=%s",
@@ -1553,6 +1590,7 @@ vivid_producer_scene_refresh_config(VividProducerRenderer* renderer)
     }
 
     vivid_producer_scene_apply_runtime_media(renderer);
+    renderer->mode = VIVID_PRODUCER_RENDERER_MODE_SCENE_PENDING;
     renderer->scene.set_playing_func(renderer->scene.instance,
                                      !renderer->playback_paused);
     g_message("VividProducer: scene renderer reconfigured project=%s "
@@ -1564,8 +1602,8 @@ vivid_producer_scene_refresh_config(VividProducerRenderer* renderer)
     return TRUE;
 }
 
-VividProducerRenderer*
-vivid_producer_renderer_new(void)
+static VividProducerRenderer*
+vivid_producer_renderer_new_internal(const VividGpuDeviceList* gpu_devices)
 {
     gst_init(NULL, NULL);
     log_gstreamer_environment_once();
@@ -1580,10 +1618,25 @@ vivid_producer_renderer_new(void)
     renderer->audio_samples = new_empty_audio_samples_variant();
     renderer->render_device = g_strdup("auto");
     renderer->generation = 1;
-    if (!vivid_gpu_devices_enumerate(&renderer->gpu_devices))
+    if (gpu_devices) {
+        renderer->gpu_devices = *gpu_devices;
+    } else if (!vivid_gpu_devices_enumerate(&renderer->gpu_devices)) {
         g_warning("VividProducer: GPU device enumeration failed; device selection is unavailable");
+    }
     renderer_resolve_gpu_device(renderer);
     return renderer;
+}
+
+VividProducerRenderer*
+vivid_producer_renderer_new(void)
+{
+    return vivid_producer_renderer_new_internal(NULL);
+}
+
+VividProducerRenderer*
+vivid_producer_renderer_new_from_gpu_devices(const VividGpuDeviceList* gpu_devices)
+{
+    return vivid_producer_renderer_new_internal(gpu_devices);
 }
 
 void
@@ -1607,7 +1660,9 @@ vivid_producer_renderer_free(VividProducerRenderer* renderer)
 
 void
 vivid_producer_renderer_apply_config(VividProducerRenderer*     renderer,
-                                      const VividProducerConfig* config)
+                                      const VividProducerConfig* config,
+                                      const gchar*               project_path,
+                                      const gchar*               user_properties_json)
 {
     g_return_if_fail(renderer != NULL);
     g_return_if_fail(config != NULL);
@@ -1616,12 +1671,13 @@ vivid_producer_renderer_apply_config(VividProducerRenderer*     renderer,
     const gint next_volume = CLAMP(config->volume, 0, 100);
     const gint next_content_fit = CLAMP(config->content_fit, 1, 3);
     const gint next_scene_fps = CLAMP(config->scene_fps, 5, 240);
+    const gchar* next_project_path = project_path ? project_path : "";
     const gchar* next_user_properties =
-        config->user_properties ? config->user_properties : "{}";
+        user_properties_json ? user_properties_json : "{}";
     const gchar* next_render_device =
         config->render_device && *config->render_device ? config->render_device : "auto";
     const gboolean project_changed =
-        g_strcmp0(renderer->project_path, config->project_path) != 0;
+        g_strcmp0(renderer->project_path, next_project_path) != 0;
     const gboolean render_device_changed =
         g_strcmp0(renderer->render_device, next_render_device) != 0;
     const gboolean video_config_changed =
@@ -1653,7 +1709,7 @@ vivid_producer_renderer_apply_config(VividProducerRenderer*     renderer,
 
         renderer->generation++;
         g_free(renderer->project_path);
-        renderer->project_path = g_strdup(config->project_path ? config->project_path : "");
+        renderer->project_path = g_strdup(next_project_path);
 
         VividProducerProjectTarget target = {0};
         resolve_project_target(renderer->project_path, &target);
@@ -1666,32 +1722,54 @@ vivid_producer_renderer_apply_config(VividProducerRenderer*     renderer,
                   old_project_path,
                   renderer->project_path);
 
-        vivid_producer_video_stop(renderer);
-        vivid_producer_scene_stop(renderer);
-        vivid_producer_web_stop(renderer);
+        /*
+         * SceneWallpaper is deliberately a reusable backend. Reconfigure a
+         * scene in place so a wallpaper replacement does not destroy and
+         * recreate a Vulkan device inside the long-lived producer process.
+         * NVIDIA's userspace driver retains process-scoped allocations and
+         * descriptors across repeated in-process device lifetimes, even when
+         * vkDestroyDevice/vkDestroyInstance both return successfully.
+         */
+        gboolean configured = FALSE;
         switch (target.kind) {
-        case VIVID_PRODUCER_PROJECT_VIDEO:
-            vivid_producer_video_start(renderer, target.video_path);
-            break;
         case VIVID_PRODUCER_PROJECT_SCENE:
-            vivid_producer_scene_stop(renderer);
-            if (!vivid_producer_scene_start(renderer, renderer->project_path))
+            vivid_producer_video_stop(renderer);
+            vivid_producer_web_stop(renderer);
+            if (!renderer->playback_stopped) {
+                configured = renderer->scene.instance
+                    ? vivid_producer_scene_refresh_config(renderer)
+                    : vivid_producer_scene_start(renderer, renderer->project_path);
+            } else if (renderer->scene.instance) {
+                renderer->scene.set_playing_func(renderer->scene.instance, FALSE);
                 renderer->mode = VIVID_PRODUCER_RENDERER_MODE_DIAGNOSTIC;
+                configured = TRUE;
+            }
+            break;
+        case VIVID_PRODUCER_PROJECT_VIDEO:
+            vivid_producer_scene_stop(renderer);
+            vivid_producer_web_stop(renderer);
+            if (!renderer->playback_stopped)
+                configured = vivid_producer_video_start(renderer, target.video_path);
             break;
         case VIVID_PRODUCER_PROJECT_WEB:
-            if (!vivid_producer_web_start(renderer, renderer->project_path))
-                renderer->mode = VIVID_PRODUCER_RENDERER_MODE_DIAGNOSTIC;
+            vivid_producer_video_stop(renderer);
+            vivid_producer_scene_stop(renderer);
+            if (!renderer->playback_stopped)
+                configured = vivid_producer_web_start(renderer, renderer->project_path);
             break;
         case VIVID_PRODUCER_PROJECT_NONE:
         default:
-            if (renderer->project_path && *renderer->project_path) {
-                g_message("VividProducer: project-path is not a supported producer target yet: %s; using diagnostic output",
-                          renderer->project_path);
-            } else {
-                g_message("VividProducer: no project-path configured; using diagnostic producer output");
-            }
+            vivid_producer_video_stop(renderer);
+            vivid_producer_web_stop(renderer);
+            if (renderer->scene.instance)
+                renderer->scene.set_playing_func(renderer->scene.instance, FALSE);
+            renderer->mode = VIVID_PRODUCER_RENDERER_MODE_DIAGNOSTIC;
+            configured = TRUE;
             break;
         }
+
+        if (!configured && !renderer->playback_stopped)
+            renderer->mode = VIVID_PRODUCER_RENDERER_MODE_DIAGNOSTIC;
         project_target_clear(&target);
     } else {
         if (render_device_changed &&
@@ -1735,11 +1813,72 @@ vivid_producer_renderer_apply_config(VividProducerRenderer*     renderer,
     }
 }
 
+static gboolean
+vivid_producer_renderer_restart_current_project(VividProducerRenderer* renderer)
+{
+    g_return_val_if_fail(renderer != NULL, FALSE);
+
+    VividProducerProjectTarget target = {0};
+    resolve_project_target(renderer->project_path, &target);
+    gboolean ok = FALSE;
+
+    switch (target.kind) {
+    case VIVID_PRODUCER_PROJECT_VIDEO:
+        vivid_producer_scene_stop(renderer);
+        vivid_producer_web_stop(renderer);
+        ok = vivid_producer_video_start(renderer, target.video_path);
+        break;
+    case VIVID_PRODUCER_PROJECT_SCENE:
+        vivid_producer_video_stop(renderer);
+        vivid_producer_web_stop(renderer);
+        ok = vivid_producer_scene_start(renderer, renderer->project_path);
+        break;
+    case VIVID_PRODUCER_PROJECT_WEB:
+        vivid_producer_video_stop(renderer);
+        vivid_producer_scene_stop(renderer);
+        ok = vivid_producer_web_start(renderer, renderer->project_path);
+        break;
+    case VIVID_PRODUCER_PROJECT_NONE:
+    default:
+        vivid_producer_video_stop(renderer);
+        vivid_producer_web_stop(renderer);
+        if (renderer->scene.instance)
+            renderer->scene.set_playing_func(renderer->scene.instance, FALSE);
+        renderer->mode = VIVID_PRODUCER_RENDERER_MODE_DIAGNOSTIC;
+        if (renderer->project_path && *renderer->project_path) {
+            g_message("VividProducer: project-path is not a supported producer target yet: %s; using diagnostic output",
+                      renderer->project_path);
+        } else {
+            g_message("VividProducer: no project-path configured; using diagnostic producer output");
+        }
+        break;
+    }
+
+    if (!ok)
+        renderer->mode = VIVID_PRODUCER_RENDERER_MODE_DIAGNOSTIC;
+    project_target_clear(&target);
+    return ok;
+}
+
 guint64
 vivid_producer_renderer_generation(VividProducerRenderer* renderer)
 {
     g_return_val_if_fail(renderer != NULL, 0);
     return renderer->generation;
+}
+
+const gchar*
+vivid_producer_renderer_project_path(VividProducerRenderer* renderer)
+{
+    g_return_val_if_fail(renderer != NULL, "");
+    return renderer->project_path ? renderer->project_path : "";
+}
+
+const gchar*
+vivid_producer_renderer_user_properties_json(VividProducerRenderer* renderer)
+{
+    g_return_val_if_fail(renderer != NULL, "{}");
+    return renderer->user_properties_json ? renderer->user_properties_json : "{}";
 }
 
 const VividGpuDeviceList*
@@ -1775,6 +1914,39 @@ vivid_producer_renderer_set_playback_paused(VividProducerRenderer* renderer,
 
     renderer->playback_paused = paused;
     vivid_producer_video_apply_playback_state(renderer);
+}
+
+void
+vivid_producer_renderer_set_playback_stopped(VividProducerRenderer* renderer,
+                                             gboolean                stopped)
+{
+    g_return_if_fail(renderer != NULL);
+
+    stopped = !!stopped;
+    if (renderer->playback_stopped == stopped)
+        return;
+
+    renderer->playback_stopped = stopped;
+    /*
+     * Stopping is stronger than pausing: backend instances, media pipelines,
+     * browser state, and renderer-owned DMA-BUF rings are released. Bump the
+     * renderer generation on both edges so display outputs cannot keep using a
+     * buffer contract that belonged to the stopped backend.
+     */
+    renderer->generation++;
+    if (stopped) {
+        vivid_producer_video_stop(renderer);
+        vivid_producer_scene_stop(renderer);
+        vivid_producer_web_stop(renderer);
+        renderer->mode = VIVID_PRODUCER_RENDERER_MODE_DIAGNOSTIC;
+        g_message("VividProducer: playback stopped renderer generation=%" G_GUINT64_FORMAT,
+                  renderer->generation);
+        return;
+    }
+
+    vivid_producer_renderer_restart_current_project(renderer);
+    g_message("VividProducer: playback restored renderer generation=%" G_GUINT64_FORMAT,
+              renderer->generation);
 }
 
 void
@@ -2668,11 +2840,16 @@ vivid_producer_renderer_next_dmabuf_frame(VividProducerRenderer*      renderer,
     g_return_val_if_fail(out_frame != NULL, FALSE);
 
     memset(out_frame, 0, sizeof(*out_frame));
+    /* -1 means that the renderer already waited for GPU completion.  Never
+     * leave an fd-bearing frame zero-initialized: fd 0 may belong to an
+     * unrelated subsystem such as PulseAudio and must not be closed as a
+     * fence. */
+    out_frame->acquire_sync_fd = -1;
     if (renderer->mode == VIVID_PRODUCER_RENDERER_MODE_VIDEO) {
         if (!renderer->video.next_frame_func)
             return FALSE;
 
-        VividVideoProducerFrame video_frame = {0};
+        VividVideoProducerFrame video_frame = { .acquire_sync_fd = -1 };
         if (!renderer->video.next_frame_func(renderer->video.instance, &video_frame))
             return FALSE;
 
@@ -2691,7 +2868,7 @@ vivid_producer_renderer_next_dmabuf_frame(VividProducerRenderer*      renderer,
         if (!renderer->web.next_frame_func)
             return FALSE;
 
-        VividWebProducerFrame web_frame = {0};
+        VividWebProducerFrame web_frame = { .acquire_sync_fd = -1 };
         if (!renderer->web.next_frame_func(renderer->web.instance, &web_frame))
             return FALSE;
 
@@ -2712,7 +2889,7 @@ vivid_producer_renderer_next_dmabuf_frame(VividProducerRenderer*      renderer,
     if (!renderer->scene.next_frame_func)
         return FALSE;
 
-    VividSceneProducerFrame scene_frame = {0};
+    VividSceneProducerFrame scene_frame = { .acquire_sync_fd = -1 };
     if (!renderer->scene.next_frame_func(renderer->scene.instance, &scene_frame))
         return FALSE;
 
@@ -2824,6 +3001,27 @@ vivid_producer_renderer_set_release_gate(VividProducerRenderer*         renderer
     vivid_producer_video_apply_release_gate(renderer);
     vivid_producer_scene_apply_release_gate(renderer);
     vivid_producer_web_apply_release_gate(renderer);
+}
+
+gboolean
+vivid_producer_renderer_get_clear_rgba(VividProducerRenderer* renderer, gfloat rgba[4])
+{
+    if (!renderer || !rgba)
+        return FALSE;
+
+    if (renderer->mode == VIVID_PRODUCER_RENDERER_MODE_WEB) {
+        rgba[0] = 1.0f;
+        rgba[1] = 1.0f;
+        rgba[2] = 1.0f;
+        rgba[3] = 1.0f;
+        return TRUE;
+    }
+
+    rgba[0] = 0.0f;
+    rgba[1] = 0.0f;
+    rgba[2] = 0.0f;
+    rgba[3] = 1.0f;
+    return TRUE;
 }
 
 void

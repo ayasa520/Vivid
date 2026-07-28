@@ -21,7 +21,11 @@ pkg_check_modules(GSTREAMER_CUDA REQUIRED gstreamer-cuda-1.0)
 
 set(VIVID_PRODUCER_DAEMON_SOURCES
   vivid_producer.c
+  vivid_auto_policy.c
+  vivid_window_facts.c
+  vivid_route_table.c
   vivid_producer_config.c
+  vivid_render_layout.c
   vivid_dmabuf_negotiation.c
   vivid_unbind_ack_tracker.c
   vivid_producer_renderer.c
@@ -97,6 +101,53 @@ target_include_directories(vivid-producer PRIVATE
 target_compile_options(vivid-producer PRIVATE ${VIVID_PRODUCER_DAEMON_CFLAGS})
 target_link_libraries(vivid-producer PRIVATE ${VIVID_PRODUCER_DAEMON_LIBS})
 
+set(VIVID_REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
+set(VIVID_PROTOCOL_GEN ${VIVID_REPO_ROOT}/tools/protocol_gen.sh)
+set(VIVID_PROTOCOL_SPEC ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/vivid_display_v1.toml)
+set(VIVID_PROTOCOL_GEN_PY ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/protocol_gen.py)
+set(VIVID_PROTOCOL_CHECK_STAMP ${CMAKE_CURRENT_BINARY_DIR}/vivid_protocol_check.stamp)
+set(VIVID_PROTOCOL_GENERATED
+  ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/vivid_display_protocol_ids.h
+  ${VIVID_REPO_ROOT}/consumer/gnome/src/protocol/vivid_display_protocol_ids.h
+  ${VIVID_REPO_ROOT}/consumer/gnome/extension/shell/helper/protocol-constants.js
+  ${VIVID_REPO_ROOT}/consumer/kde/src/qml_module/vivid_protocol_constants.hpp
+  ${VIVID_REPO_ROOT}/consumer/kde/src/qml_module/vivid_protocol_cpp.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../webui/vivid_protocol_constants.py
+  ${CMAKE_CURRENT_SOURCE_DIR}/../webui/vivid_protocol_codec.py
+  ${CMAKE_CURRENT_SOURCE_DIR}/../webui/vivid_protocol_meta.py
+  ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/vivid_display_protocol_json.h
+  ${VIVID_REPO_ROOT}/consumer/gnome/src/protocol/vivid_display_protocol_json.h
+  ${VIVID_REPO_ROOT}/consumer/gnome/extension/shell/helper/protocol-json-fields.js
+  ${VIVID_REPO_ROOT}/consumer/kde/src/qml_module/vivid_protocol_json_fields.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../webui/vivid_protocol_json_fields.py
+  ${CMAKE_CURRENT_SOURCE_DIR}/../webui/vivid_protocol_config_keys.py
+  ${CMAKE_CURRENT_SOURCE_DIR}/vivid_producer_config_schema.h
+  ${VIVID_REPO_ROOT}/consumer/gnome/extension/shell/helper/protocol-codec.js
+  ${VIVID_REPO_ROOT}/consumer/gnome/extension/shell/helper/protocol-meta.js
+  ${VIVID_REPO_ROOT}/consumer/kde/src/qml_module/vivid_protocol_meta.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/vivid_display_protocol.h
+  ${VIVID_REPO_ROOT}/consumer/gnome/src/protocol/vivid_display_protocol.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/vivid_display_codec.c
+  ${VIVID_REPO_ROOT}/consumer/gnome/src/protocol/vivid_display_codec.c
+  ${VIVID_REPO_ROOT}/docs/protocols-reference.md
+)
+
+add_custom_command(
+  OUTPUT ${VIVID_PROTOCOL_CHECK_STAMP}
+  COMMAND ${VIVID_PROTOCOL_GEN} --check
+  COMMAND ${CMAKE_COMMAND} -E touch ${VIVID_PROTOCOL_CHECK_STAMP}
+  DEPENDS
+    ${VIVID_PROTOCOL_SPEC}
+    ${VIVID_PROTOCOL_GEN_PY}
+    ${VIVID_PROTOCOL_GEN}
+    ${VIVID_PROTOCOL_GENERATED}
+  COMMENT "Checking generated protocol bindings are in sync"
+  VERBATIM
+)
+
+add_custom_target(vivid_protocol_check DEPENDS ${VIVID_PROTOCOL_CHECK_STAMP})
+add_dependencies(vivid-producer vivid_protocol_check)
+
 install(
   TARGETS vivid-producer
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
@@ -134,4 +185,5 @@ if(BUILD_TESTING)
   target_compile_options(vivid_unbind_ack_tracker_test PRIVATE ${GLIB_CFLAGS_OTHER})
   target_link_libraries(vivid_unbind_ack_tracker_test PRIVATE ${GLIB_LIBRARIES})
   add_test(NAME vivid_unbind_ack_tracker COMMAND vivid_unbind_ack_tracker_test)
+
 endif()

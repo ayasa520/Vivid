@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "../../graphics/vivid_gpu_devices.h"
 #include "../../renderer_api/vivid_renderer_release_gate.h"
 
 #include <glib.h>
@@ -101,7 +102,8 @@ gboolean vivid_scene_producer_configure(VividSceneProducer* self,
                                          gdouble              volume,
                                          gint                 fill_mode,
                                          gint                 fps,
-                                         const gchar*         render_device);
+                                         const gchar*         render_device,
+                                         const VividGpuDevice* resolved_gpu);
 
 void vivid_scene_producer_set_playing(VividSceneProducer* self, gboolean playing);
 void vivid_scene_producer_set_pointer_motion(VividSceneProducer* self,

@@ -89,8 +89,7 @@ typedef enum
 
 typedef enum
 {
-    VIVID_DMABUF_RELAY_MODE_DIRECT_IMPORT = 1u << 0,
-    VIVID_DMABUF_RELAY_MODE_SHADOW_COPY = 1u << 1,
+    VIVID_DMABUF_RELAY_MODE_SHADOW_COPY = 1u << 0,
 } VividDmaBufRelayMode;
 
 typedef struct

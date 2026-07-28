@@ -25,8 +25,29 @@ const logger = new Logger.Logger();
 // Ref: https://gitlab.gnome.org/GNOME/gnome-shell/-/blob/main/js/ui/layout.js
 const BACKGROUND_FADE_ANIMATION_TIME = 1000;
 const ATTACH_POLL_INTERVAL_MS = 1000;
+const ATTACH_POLL_FAST_ATTEMPTS = 5;
+const ATTACH_POLL_SLOW_INTERVAL_MS = 10_000;
 export const APPLICATION_ID = 'dev.rikka.VividWallpaper.Helper';
 export const TITLE_PREFIX = `@${APPLICATION_ID}!`;
+
+/*
+ * The helper encodes its target monitor as a `|monitorIndex` title suffix
+ * (see display-helper.js OutputWindow.ensureWindow). This is the authoritative
+ * clone-source identity: MetaWindow.get_monitor() reflects wherever Mutter
+ * happens to have placed the window at that instant, which is wrong between
+ * map and the WindowManager position pin, and matching on it alone stretched
+ * the primary monitor's wallpaper onto the secondary monitor.
+ */
+function titleMonitorIndex(window) {
+    const title = window?.title ?? '';
+    if (!title.startsWith(TITLE_PREFIX))
+        return -1;
+    const pipeIndex = title.lastIndexOf('|');
+    if (pipeIndex < 0)
+        return -1;
+    const index = Number(title.slice(pipeIndex + 1));
+    return Number.isInteger(index) && index >= 0 ? index : -1;
+}
 // const CUSTOM_BACKGROUND_BOUNDS_PADDING = 2;
 
 /**
@@ -67,6 +88,7 @@ export const LiveWallpaper = GObject.registerClass(
             this._sourceDestroyId = 0;
             this._attachPollId = 0;
             this._attachAttempts = 0;
+            this._windowMapId = 0;
 
             /**
              * _monitorScale is fractional scale factor
@@ -86,6 +108,7 @@ export const LiveWallpaper = GObject.registerClass(
             backgroundActor.layout_manager = new Clutter.BinLayout();
             backgroundActor.add_child(this);
 
+            this._watchHelperWindowMaps();
             this._tryAttachHelperWindow();
 
             /*
@@ -254,11 +277,55 @@ export const LiveWallpaper = GObject.registerClass(
             if (this._attachPollId !== 0)
                 return;
 
-            this._attachPollId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, ATTACH_POLL_INTERVAL_MS, () => {
-                this._attachPollId = 0;
-                if (!this._cloneActor)
-                    this._tryAttachHelperWindow();
-                return GLib.SOURCE_REMOVE;
+            const interval = this._attachAttempts <= ATTACH_POLL_FAST_ATTEMPTS
+                ? ATTACH_POLL_INTERVAL_MS
+                : ATTACH_POLL_SLOW_INTERVAL_MS;
+            this._attachPollId = GLib.timeout_add(
+                GLib.PRIORITY_DEFAULT,
+                interval,
+                () => {
+                    this._attachPollId = 0;
+                    if (!this._cloneActor)
+                        this._tryAttachHelperWindow();
+                    return GLib.SOURCE_REMOVE;
+                }
+            );
+        }
+
+        _watchHelperWindowMaps() {
+            if (this._windowMapId)
+                return;
+
+            /*
+             * Missing helper windows are a normal inactive state when the
+             * producer socket is down. Use the compositor map signal as the
+             * primary wake-up path so GNOME Shell does not keep doing 1 Hz
+             * clone scans forever after the helper has torn its windows down.
+             * The timeout above remains only as a slow safety net for startup
+             * ordering differences between Shell and Mutter versions.
+             */
+            this._windowMapId = global.window_manager.connect_after('map', (_wm, actor) => {
+                if (this._cloneActor)
+                    return;
+
+                const window = actor?.get_meta_window?.();
+                if (!window?.title?.startsWith(TITLE_PREFIX))
+                    return;
+
+                /*
+                 * Wake on the title-declared monitor, not get_monitor():
+                 * right after map the window may not have been pinned to its
+                 * monitor yet. _tryAttachHelperWindow() still re-validates
+                 * placement before actually cloning.
+                 */
+                if (titleMonitorIndex(window) !== this._monitorIndex)
+                    return;
+
+                if (this._attachPollId) {
+                    GLib.source_remove(this._attachPollId);
+                    this._attachPollId = 0;
+                }
+                this._tryAttachHelperWindow();
             });
         }
 
@@ -278,29 +345,53 @@ export const LiveWallpaper = GObject.registerClass(
             const helperActors = actors.filter(actor =>
                 actor.meta_window?.title?.startsWith(TITLE_PREFIX)
             );
+            if (helperActors.length === 0)
+                return null;
 
-            const nMonitors = global.display.get_n_monitors();
-            if (helperActors.length < nMonitors) {
-                logger.debug(`helper windows (${helperActors.length}) < monitors (${nMonitors}), rejecting`);
+            /*
+             * Sanity-gate on every existing helper before trusting any of
+             * them: title indices must be valid and unique, and the meta
+             * monitors must be unique too. Duplicated meta monitors happen
+             * transiently right after a helper maps (before WindowManager
+             * pins it) and persistently in mirror mode; attaching during
+             * either state is how cross-monitor clones are born, so wait for
+             * the layout to settle instead.
+             */
+            const titleIndices = helperActors.map(actor =>
+                titleMonitorIndex(actor.meta_window)
+            );
+            if (titleIndices.some(index => index < 0) ||
+                new Set(titleIndices).size !== titleIndices.length) {
+                logger.debug(`helper title indices are not valid/unique (${titleIndices.join(',')}), rejecting`);
                 return null;
             }
 
-            const monitorIndices = helperActors.map(actor =>
+            const metaIndices = helperActors.map(actor =>
                 Number(actor.meta_window?.get_monitor?.() ?? -1)
             );
-            if (new Set(monitorIndices).size !== monitorIndices.length) {
-                logger.debug(`helper monitor indices are not unique (${monitorIndices.join(',')}), rejecting`);
+            if (metaIndices.some(index => index < 0) ||
+                new Set(metaIndices).size !== metaIndices.length) {
+                logger.debug(`helper meta monitors are not valid/unique (${metaIndices.join(',')}), rejecting`);
                 return null;
             }
 
-            return helperActors.find(actor =>
-                Number(actor.meta_window?.get_monitor?.() ?? -1) === this._monitorIndex
-            ) ?? null;
+            const position = titleIndices.indexOf(this._monitorIndex);
+            if (position < 0)
+                return null;
+
+            const candidate = helperActors[position];
+            if (metaIndices[position] !== this._monitorIndex) {
+                logger.debug(`helper title index ${this._monitorIndex} sits on meta monitor ` +
+                    `${metaIndices[position]}, waiting for it to be pinned`);
+                return null;
+            }
+            return candidate;
         }
 
         _onSourceDestroyed() {
             this._sourceDestroyId = 0;
             this._sourceActor = null;
+            this._fade(false);
 
             if (this._cloneActor) {
                 const clone = this._cloneActor;
@@ -318,10 +409,19 @@ export const LiveWallpaper = GObject.registerClass(
                 }
             }
 
+            logger.debug(`helper clone source destroyed monitor=${this._monitorIndex}`);
             this._scheduleAttachPoll();
         }
 
         _onDestroy() {
+            if (this._windowMapId) {
+                try {
+                    global.window_manager.disconnect(this._windowMapId);
+                } catch (_e) {
+                }
+                this._windowMapId = 0;
+            }
+
             if (this._attachPollId) {
                 GLib.source_remove(this._attachPollId);
                 this._attachPollId = 0;

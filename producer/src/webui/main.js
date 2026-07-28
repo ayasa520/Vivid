@@ -4,6 +4,14 @@ const dom = {
   themeButton: document.querySelector('#themeButton'),
   languageSelect: document.querySelector('#languageSelect'),
   resetDefaultsButton: document.querySelector('#resetDefaultsButton'),
+  displayButton: document.querySelector('#displayButton'),
+  displayModal: document.querySelector('#displayModal'),
+  displayModalCloseButton: document.querySelector('#displayModalCloseButton'),
+  displayModeSelect: document.querySelector('#displayModeSelect'),
+  displayCanvas: document.querySelector('#displayCanvas'),
+  displayEmpty: document.querySelector('#displayEmpty'),
+  displayChangeWallpaperButton: document.querySelector('#displayChangeWallpaperButton'),
+  displayRemoveWallpaperButton: document.querySelector('#displayRemoveWallpaperButton'),
   views: [...document.querySelectorAll('.view')],
   settingsButton: document.querySelector('#settingsButton'),
   settingsBackButton: document.querySelector('#settingsBackButton'),
@@ -49,6 +57,7 @@ const app = {
   stateOutputRenderHandle: null,
   populatingSettings: false,
   inspectorOpen: false,
+  displayModalOpen: false,
   locale: 'en',
   themeMode: 'system',
   statusLocalization: null,
@@ -71,9 +80,15 @@ const slowWorkLogThresholdMs = 50;
 const TRANSLATIONS = {
   en: {
     'action.backToBrowse': 'Back to browse',
+    'action.changeWallpaper': 'Change Wallpaper',
+    'action.removeWallpaper': 'Remove Wallpaper',
+    'action.chooseDisplay': 'Choose display',
+    'action.close': 'Close',
     'action.hideProperties': 'Hide properties',
     'action.openWallpaperSettings': 'Configure wallpaper',
     'action.refresh': 'Refresh',
+    'action.addRule': 'Add rule',
+    'action.removeRule': 'Remove rule',
     'action.restoreDefaults': 'Restore Defaults',
     'action.showProperties': 'Show properties',
     'aria.browseWallpapers': 'Browse wallpapers',
@@ -85,6 +100,16 @@ const TRANSLATIONS = {
     'aria.wallpaperProperties': 'Wallpaper properties',
     'count.wallpapers': '{count} wallpaper{plural}',
     'confirm.restoreDefaults': 'Restore all global settings and wallpaper-specific settings to defaults?',
+    'display.canvas': 'Displays',
+    'display.empty': 'No connected displays reported by the producer.',
+    'display.menu': 'Display actions',
+    'display.mode': 'Display mode',
+    'display.muted': 'Muted',
+    'display.primary': 'Primary',
+    'display.setPrimary': 'Set as primary display',
+    'display.subtitle': 'Wallpaper changes apply to the highlighted display.',
+    'display.title': 'Choose Display',
+    'display.toggleMute': 'Mute wallpaper',
     'empty.noConfigurableProperties': 'This wallpaper has no configurable properties.',
     'empty.noMatches': 'No wallpapers match the current filters.',
     'empty.setLibrary': 'Set Steam Library in Settings to browse wallpapers.',
@@ -107,7 +132,7 @@ const TRANSLATIONS = {
     'rating.Mature': 'Mature',
     'rating.Questionable': 'Questionable',
     'reset.defaultsDescription': 'Restore all global settings and wallpaper-specific settings to their defaults.',
-    'section.autopause': 'Auto Pause',
+    'section.playback': 'Playback',
     'section.developer': 'Developer',
     'section.experimental': 'Experimental',
     'section.general': 'General Settings',
@@ -123,21 +148,26 @@ const TRANSLATIONS = {
     'setting.change-wallpaper.name': 'Change Wallpaper Automatically',
     'setting.content-fit.name': 'Fit Mode',
     'setting.content-fit.note': 'Wallpaper scaling on the monitor',
+    'setting.current-config-display-key.name': 'Configuring Display',
+    'setting.current-config-display-key.note': 'Wallpaper selections apply to this display in per-monitor mode',
     'setting.debug-mode.name': 'Debug Mode',
-    'setting.low-battery-threshold.name': 'Low Battery Threshold',
+    'setting.multi-display-mode.name': 'Display Mode',
+    'setting.multi-display-mode.note': 'Clone renders once; per-monitor renders each display separately',
     'setting.mute.name': 'Mute Audio',
-    'setting.pause-on-battery.name': 'Pause on Battery',
-    'setting.pause-on-focus.name': 'Pause when Desktop Loses Focus',
-    'setting.pause-on-maximize-or-fullscreen.name': 'Pause on Maximize or Fullscreen',
-    'setting.pause-on-mpris-playing.name': 'Pause on Media Player Playing',
+    'setting.application-rules.name': 'Application rules:',
+    'setting.application-rules.note': 'Match desktop IDs, WM_CLASS values, executable names, or media player names',
+    'setting.primary-display-key.name': 'Primary Display',
+    'setting.primary-display-key.note': 'Clone mode renders this display first, then crops that image for the others',
     'setting.render-device.name': 'Rendering GPU',
     'setting.scene-fps.name': 'Frame Rate',
     'setting.scene-fps.note': 'Applies to scene, web, and video wallpapers',
     'setting.show-panel-menu.name': 'Show Panel Menu',
     'setting.startup-delay.name': 'Startup Delay',
     'setting.startup-delay.note': 'Milliseconds',
-    'setting.stop-on-applications.name': 'Stop on Applications',
-    'setting.stop-on-applications.note': 'Desktop IDs, WM_CLASS values, or executable names',
+    'setting.playback-on-audio.name': 'Other application playing audio:',
+    'setting.playback-on-battery.name': 'Laptop on battery:',
+    'setting.playback-on-focus.name': 'Other application focused:',
+    'setting.playback-on-maximize-or-fullscreen.name': 'Other application maximized or fullscreen:',
     'setting.volume.name': 'Volume Level',
     'settingOption.change-wallpaper-mode.0': 'Sequential',
     'settingOption.change-wallpaper-mode.1': 'Inverse Sequential',
@@ -145,12 +175,26 @@ const TRANSLATIONS = {
     'settingOption.content-fit.1': 'Cover',
     'settingOption.content-fit.2': 'Fill',
     'settingOption.content-fit.3': 'Stretch',
-    'settingOption.pause-on-battery.0': 'Never',
-    'settingOption.pause-on-battery.1': 'Low Battery',
-    'settingOption.pause-on-battery.2': 'Always',
-    'settingOption.pause-on-maximize-or-fullscreen.0': 'Never',
-    'settingOption.pause-on-maximize-or-fullscreen.1': 'Any Monitor',
-    'settingOption.pause-on-maximize-or-fullscreen.2': 'All Monitors',
+    'settingOption.multi-display-mode.clone': 'Clone single monitor',
+    'settingOption.multi-display-mode.independent': 'Wallpaper per monitor',
+    'settingOption.applicationRule.condition.0': 'Running',
+    'settingOption.applicationRule.condition.1': 'Focused',
+    'settingOption.applicationRule.condition.2': 'Maximized',
+    'settingOption.applicationRule.condition.3': 'Fullscreen',
+    'settingOption.applicationRule.condition.4': 'Playing audio',
+    'settingOption.playback.0': 'Keep running',
+    'settingOption.playback.1': 'Mute',
+    'settingOption.playback.2': 'Pause per monitor',
+    'settingOption.playback.3': 'Pause all',
+    'settingOption.playback.4': 'Stop (free memory)',
+    'settingOption.playback.pause': 'Pause',
+    'settingOption.playback.stopMemory': 'Stop (free memory)',
+    'settingOption.playback-on-audio.0': 'Keep running',
+    'settingOption.playback-on-audio.1': 'Mute',
+    'settingOption.playback-on-audio.3': 'Pause',
+    'settingOption.playback-on-battery.0': 'Keep running',
+    'settingOption.playback-on-battery.3': 'Pause',
+    'settingOption.playback-on-battery.4': 'Stop (free memory)',
     'sort.name': 'Name',
     'sort.type': 'Type',
     'sort.updated': 'Updated',
@@ -167,6 +211,8 @@ const TRANSLATIONS = {
     'status.saving': 'Saving...',
     'status.selectingWallpaper': 'Selecting wallpaper...',
     'status.wallpaperSelected': 'Wallpaper selected',
+    'status.wallpaperRemoved': 'Wallpaper removed',
+    'status.removingWallpaper': 'Removing wallpaper...',
     'tab.browse': 'Browse',
     'tab.settings': 'Settings',
     'tag.unspecified': 'Unspecified',
@@ -183,9 +229,15 @@ const TRANSLATIONS = {
   },
   'zh-CN': {
     'action.backToBrowse': '返回浏览',
+    'action.changeWallpaper': '更换壁纸',
+    'action.removeWallpaper': '移除壁纸',
+    'action.chooseDisplay': '选择显示器',
+    'action.close': '关闭',
     'action.hideProperties': '隐藏属性',
     'action.openWallpaperSettings': '配置壁纸',
     'action.refresh': '刷新',
+    'action.addRule': '添加规则',
+    'action.removeRule': '删除规则',
     'action.restoreDefaults': '恢复默认设置',
     'action.showProperties': '显示属性',
     'aria.browseWallpapers': '浏览壁纸',
@@ -197,6 +249,16 @@ const TRANSLATIONS = {
     'aria.wallpaperProperties': '壁纸属性',
     'count.wallpapers': '{count} 个壁纸',
     'confirm.restoreDefaults': '确定要恢复所有全局设置和壁纸特有设置为默认值吗？',
+    'display.canvas': '显示器列表',
+    'display.empty': 'producer 没有上报已连接显示器。',
+    'display.menu': '显示器操作',
+    'display.mode': '显示器模式',
+    'display.muted': '已静音',
+    'display.primary': '主显示器',
+    'display.setPrimary': '设为主显示器',
+    'display.subtitle': '更换壁纸会应用到高亮的显示器。',
+    'display.title': '选择显示器',
+    'display.toggleMute': '静音壁纸',
     'empty.noConfigurableProperties': '这个壁纸没有可配置属性。',
     'empty.noMatches': '没有壁纸匹配当前筛选条件。',
     'empty.setLibrary': '请在设置中填写 Steam 库路径以浏览壁纸。',
@@ -219,7 +281,7 @@ const TRANSLATIONS = {
     'rating.Mature': '成人',
     'rating.Questionable': '敏感',
     'reset.defaultsDescription': '恢复所有全局设置和壁纸特有设置为默认值。',
-    'section.autopause': '自动暂停',
+    'section.playback': '回放',
     'section.developer': '开发者',
     'section.experimental': '实验性',
     'section.general': '通用设置',
@@ -235,21 +297,26 @@ const TRANSLATIONS = {
     'setting.change-wallpaper.name': '自动更换壁纸',
     'setting.content-fit.name': '适配模式',
     'setting.content-fit.note': '壁纸在显示器上的缩放方式',
+    'setting.current-config-display-key.name': '当前配置的显示器',
+    'setting.current-config-display-key.note': '每屏独立模式下，选择壁纸和属性会应用到这块显示器',
     'setting.debug-mode.name': '调试模式',
-    'setting.low-battery-threshold.name': '低电量阈值',
+    'setting.multi-display-mode.name': '显示器模式',
+    'setting.multi-display-mode.note': '复制模式只渲染一次；每屏模式为每块显示器单独渲染',
     'setting.mute.name': '静音',
-    'setting.pause-on-battery.name': '电池供电时暂停',
-    'setting.pause-on-focus.name': '桌面失焦时暂停',
-    'setting.pause-on-maximize-or-fullscreen.name': '最大化或全屏时暂停',
-    'setting.pause-on-mpris-playing.name': '媒体播放器播放时暂停',
+    'setting.application-rules.name': '应用程序规则：',
+    'setting.application-rules.note': '匹配桌面 ID、WM_CLASS、可执行文件名或媒体播放器名称',
+    'setting.primary-display-key.name': '主显示器',
+    'setting.primary-display-key.note': '复制模式先渲染这块屏，再把这个画面裁剪给其他屏',
     'setting.render-device.name': '渲染 GPU',
     'setting.scene-fps.name': '帧率',
     'setting.scene-fps.note': '作用于场景、网页和视频壁纸',
     'setting.show-panel-menu.name': '显示面板菜单',
     'setting.startup-delay.name': '启动延迟',
     'setting.startup-delay.note': '毫秒',
-    'setting.stop-on-applications.name': '遇到应用时停止',
-    'setting.stop-on-applications.note': '桌面 ID、WM_CLASS 或可执行文件名',
+    'setting.playback-on-audio.name': '其他应用程序播放音频时：',
+    'setting.playback-on-battery.name': '笔记本电脑使用电池时：',
+    'setting.playback-on-focus.name': '其他应用程序成为焦点时：',
+    'setting.playback-on-maximize-or-fullscreen.name': '其他应用程序最大化或全屏时：',
     'setting.volume.name': '音量',
     'settingOption.change-wallpaper-mode.0': '顺序',
     'settingOption.change-wallpaper-mode.1': '反向顺序',
@@ -257,12 +324,26 @@ const TRANSLATIONS = {
     'settingOption.content-fit.1': '覆盖',
     'settingOption.content-fit.2': '填充',
     'settingOption.content-fit.3': '拉伸',
-    'settingOption.pause-on-battery.0': '从不',
-    'settingOption.pause-on-battery.1': '低电量时',
-    'settingOption.pause-on-battery.2': '总是',
-    'settingOption.pause-on-maximize-or-fullscreen.0': '从不',
-    'settingOption.pause-on-maximize-or-fullscreen.1': '任意显示器',
-    'settingOption.pause-on-maximize-or-fullscreen.2': '全部显示器',
+    'settingOption.multi-display-mode.clone': '复制单个显示器',
+    'settingOption.multi-display-mode.independent': '每屏独立壁纸',
+    'settingOption.applicationRule.condition.0': '运行中',
+    'settingOption.applicationRule.condition.1': '成为焦点',
+    'settingOption.applicationRule.condition.2': '最大化',
+    'settingOption.applicationRule.condition.3': '全屏',
+    'settingOption.applicationRule.condition.4': '播放音频',
+    'settingOption.playback.0': '保持运行',
+    'settingOption.playback.1': '静音',
+    'settingOption.playback.2': '按显示器暂停',
+    'settingOption.playback.3': '暂停所有',
+    'settingOption.playback.4': '停止（释放内存）',
+    'settingOption.playback.pause': '暂停',
+    'settingOption.playback.stopMemory': '停止（释放内存）',
+    'settingOption.playback-on-audio.0': '保持运行',
+    'settingOption.playback-on-audio.1': '静音',
+    'settingOption.playback-on-audio.3': '暂停',
+    'settingOption.playback-on-battery.0': '保持运行',
+    'settingOption.playback-on-battery.3': '暂停',
+    'settingOption.playback-on-battery.4': '停止（释放内存）',
     'sort.name': '名称',
     'sort.type': '类型',
     'sort.updated': '更新时间',
@@ -279,6 +360,8 @@ const TRANSLATIONS = {
     'status.saving': '正在保存...',
     'status.selectingWallpaper': '正在选择壁纸...',
     'status.wallpaperSelected': '壁纸已选择',
+    'status.wallpaperRemoved': '壁纸已移除',
+    'status.removingWallpaper': '正在移除壁纸...',
     'tab.browse': '浏览',
     'tab.settings': '设置',
     'tag.unspecified': '未指定',
@@ -491,6 +574,36 @@ const SETTINGS = [
       ['3', 'Stretch'],
     ],
   },
+  {
+    section: 'general',
+    key: 'multi-display-mode',
+    name: 'Display Mode',
+    note: 'Clone renders once; per-monitor renders each display separately',
+    type: 'select',
+    options: [
+      ['clone', 'Clone single monitor'],
+      ['independent', 'Wallpaper per monitor'],
+    ],
+    afterSave: () => refreshState(),
+  },
+  {
+    section: 'general',
+    key: 'current-config-display-key',
+    name: 'Configuring Display',
+    note: 'Wallpaper selections apply to this display in per-monitor mode',
+    type: 'select',
+    dynamicOptions: configuringDisplayOptions,
+    afterSave: syncSelectedProjectFromState,
+  },
+  {
+    section: 'general',
+    key: 'primary-display-key',
+    name: 'Primary Display',
+    note: 'Clone mode renders this display first, then crops that image for the others',
+    type: 'select',
+    dynamicOptions: primaryDisplayOptions,
+    afterSave: () => refreshState(),
+  },
   {section: 'general', key: 'mute', name: 'Mute Audio', type: 'boolean'},
   {section: 'general', key: 'volume', name: 'Volume Level', type: 'range', min: 0, max: 100, step: 1},
   {section: 'general', key: 'show-panel-menu', name: 'Show Panel Menu', type: 'boolean'},
@@ -535,48 +648,65 @@ const SETTINGS = [
     debounce: 250,
   },
   {
-    section: 'autopause',
-    key: 'pause-on-maximize-or-fullscreen',
-    name: 'Pause on Maximize or Fullscreen',
+    section: 'playback',
+    key: 'playback-on-focus',
+    name: 'Other application focused:',
     type: 'select',
     valueType: 'integer',
+    optionKey: 'playback',
     options: [
-      ['0', 'Never'],
-      ['1', 'Any Monitor'],
-      ['2', 'All Monitors'],
-    ],
-  },
-  {section: 'autopause', key: 'pause-on-focus', name: 'Pause when Desktop Loses Focus', type: 'boolean'},
-  {
-    section: 'autopause',
-    key: 'pause-on-battery',
-    name: 'Pause on Battery',
-    type: 'select',
-    valueType: 'integer',
-    options: [
-      ['0', 'Never'],
-      ['1', 'Low Battery'],
-      ['2', 'Always'],
+      ['0', 'Keep running'],
+      ['1', 'Mute'],
+      ['2', 'Pause per monitor'],
+      ['3', 'Pause all'],
     ],
   },
   {
-    section: 'autopause',
-    key: 'low-battery-threshold',
-    name: 'Low Battery Threshold',
-    type: 'number',
-    min: 0,
-    max: 100,
-    step: 1,
-    debounce: 350,
+    section: 'playback',
+    key: 'playback-on-maximize-or-fullscreen',
+    name: 'Other application maximized or fullscreen:',
+    type: 'select',
+    valueType: 'integer',
+    optionKey: 'playback',
+    options: [
+      ['0', 'Keep running'],
+      ['1', 'Mute'],
+      ['2', 'Pause per monitor'],
+      ['3', 'Pause all'],
+      ['4', 'Stop (free memory)'],
+    ],
   },
-  {section: 'autopause', key: 'pause-on-mpris-playing', name: 'Pause on Media Player Playing', type: 'boolean'},
   {
-    section: 'autopause',
-    key: 'stop-on-applications',
-    name: 'Stop on Applications',
-    note: 'Desktop IDs, WM_CLASS values, or executable names',
-    type: 'list',
-    debounce: 650,
+    section: 'playback',
+    key: 'playback-on-audio',
+    name: 'Other application playing audio:',
+    type: 'select',
+    valueType: 'integer',
+    options: [
+      ['0', 'Keep running'],
+      ['1', 'Mute'],
+      ['3', 'Pause'],
+    ],
+  },
+  {
+    section: 'playback',
+    key: 'playback-on-battery',
+    name: 'Laptop on battery:',
+    type: 'select',
+    valueType: 'integer',
+    options: [
+      ['0', 'Keep running'],
+      ['3', 'Pause'],
+      ['4', 'Stop (free memory)'],
+    ],
+  },
+  {
+    section: 'playback',
+    key: 'application-rules',
+    name: 'Application rules:',
+    note: 'Match desktop IDs, WM_CLASS values, executable names, or media player names',
+    type: 'rules',
+    debounce: 500,
   },
   {
     section: 'general',
@@ -599,6 +729,12 @@ const SETTINGS = [
     debounce: 350,
   },
 ];
+
+const displaySettingsHiddenFromSettingsPage = new Set([
+  'multi-display-mode',
+  'current-config-display-key',
+  'primary-display-key',
+]);
 
 const browserSortKeys = new Set(['name', 'updated-time', 'type']);
 const contentRatings = ['Everyone', 'Questionable', 'Mature'];
@@ -704,6 +840,49 @@ function gpuDeviceOptions() {
   return options;
 }
 
+function outputConsumerId(output) {
+  const value = Number(output?.consumerOutputId ?? output?.consumer_output_id ?? 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function outputDisplayKey(output) {
+  const value = `${output?.displayKey ?? output?.display_key ?? ''}`.trim();
+  return value;
+}
+
+function outputDisplayLabel(output) {
+  const id = outputConsumerId(output);
+  const name = `${output?.displayName ?? ''}`.trim();
+  const desktop = `${output?.desktop ?? ''}`.trim();
+  const monitorIndex = Number(output?.monitorIndex ?? 0);
+  const width = Number(output?.physicalWidth ?? output?.routeWidth ?? output?.logicalWidth ?? 0);
+  const height = Number(output?.physicalHeight ?? output?.routeHeight ?? output?.logicalHeight ?? 0);
+  const title = name || desktop || `Monitor ${monitorIndex}`;
+  const size = width > 0 && height > 0 ? ` ${width}x${height}` : '';
+  return `${title}${size} (#${id})`;
+}
+
+function liveOutputOptions() {
+  const seen = new Set();
+  const options = [];
+  for (const output of sortedLiveOutputs()) {
+    const key = outputDisplayKey(output);
+    if (!key || seen.has(key))
+      continue;
+    seen.add(key);
+    options.push([key, outputDisplayLabel(output)]);
+  }
+  return options;
+}
+
+function configuringDisplayOptions() {
+  return liveOutputOptions();
+}
+
+function primaryDisplayOptions() {
+  return [['', t('option.auto')], ...liveOutputOptions()];
+}
+
 function settingName(definition) {
   return tFallback(`setting.${definition.key}.name`, definition.name);
 }
@@ -715,7 +894,7 @@ function settingNote(definition) {
 }
 
 function settingOptionText(definition, value, fallback) {
-  return tFallback(`settingOption.${definition.key}.${value}`, fallback);
+  return tFallback(`settingOption.${definition.optionKey ?? definition.key}.${value}`, fallback);
 }
 
 function settingOptions(definition, currentValue = '') {
@@ -1087,6 +1266,127 @@ function persistBrowserSortKey() {
   sendConfigPatch({'project-browser-sort-key': key});
 }
 
+const applicationRuleConditionOptions = [
+  ['0', 'Running'],
+  ['1', 'Focused'],
+  ['2', 'Maximized'],
+  ['3', 'Fullscreen'],
+  ['4', 'Playing audio'],
+];
+
+const applicationRulePlaybackOptions = [
+  ['1', 'Mute'],
+  ['3', 'Pause'],
+  ['4', 'Stop (free memory)'],
+];
+
+function normalizeApplicationRules(value) {
+  if (!Array.isArray(value))
+    return [];
+  return value
+    .map(rule => ({
+      name: `${rule?.name ?? rule?.application ?? ''}`.trim(),
+      condition: Number.parseInt(`${rule?.condition ?? 0}`, 10),
+      playback: Number.parseInt(`${rule?.playback ?? 1}`, 10),
+    }))
+    .filter(rule => rule.name);
+}
+
+function createRuleSelect(options, value, labelKeyPrefix) {
+  const select = document.createElement('select');
+  for (const [optionValue, fallback] of options) {
+    const option = document.createElement('option');
+    option.value = optionValue;
+    option.textContent = tFallback(`${labelKeyPrefix}.${optionValue}`, fallback);
+    select.append(option);
+  }
+  select.value = `${value}`;
+  return select;
+}
+
+function readApplicationRules(control) {
+  return [...control.querySelectorAll('.application-rule-row')]
+    .map(row => ({
+      name: row.querySelector('[data-rule-field="name"]')?.value?.trim() ?? '',
+      condition: Number.parseInt(row.querySelector('[data-rule-field="condition"]')?.value ?? '0', 10),
+      playback: Number.parseInt(row.querySelector('[data-rule-field="playback"]')?.value ?? '1', 10),
+    }))
+    .filter(rule => rule.name);
+}
+
+function addApplicationRuleRow(control, definition, rule = {}) {
+  const row = document.createElement('div');
+  row.className = 'application-rule-row';
+
+  const name = document.createElement('input');
+  name.type = 'text';
+  name.spellcheck = false;
+  name.dataset.ruleField = 'name';
+  name.value = `${rule.name ?? ''}`;
+
+  const condition = createRuleSelect(
+    applicationRuleConditionOptions,
+    rule.condition ?? 0,
+    'settingOption.applicationRule.condition');
+  condition.dataset.ruleField = 'condition';
+
+  const playback = createRuleSelect(
+    applicationRulePlaybackOptions,
+    rule.playback ?? 1,
+    'settingOption.playback');
+  playback.dataset.ruleField = 'playback';
+
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'icon-button secondary-button application-rule-remove';
+  remove.textContent = '×';
+  remove.title = t('action.removeRule');
+  remove.setAttribute('aria-label', t('action.removeRule'));
+  remove.addEventListener('click', () => {
+    row.remove();
+    scheduleConfigPatch(definition, readApplicationRules(control));
+  });
+
+  for (const field of [name, condition, playback])
+    field.addEventListener('input', () => scheduleConfigPatch(definition, readApplicationRules(control)));
+  condition.addEventListener('change', () => scheduleConfigPatch(definition, readApplicationRules(control)));
+  playback.addEventListener('change', () => scheduleConfigPatch(definition, readApplicationRules(control)));
+
+  row.append(name, condition, playback, remove);
+  control.querySelector('.application-rule-list')?.append(row);
+}
+
+function renderApplicationRulesControl(control, definition, value) {
+  const rules = normalizeApplicationRules(value);
+  const list = control.querySelector('.application-rule-list');
+  list?.replaceChildren();
+  for (const rule of rules)
+    addApplicationRuleRow(control, definition, rule);
+}
+
+function createApplicationRulesControl(definition) {
+  const control = document.createElement('div');
+  control.className = 'application-rules-control';
+  const list = document.createElement('div');
+  list.className = 'application-rule-list';
+
+  const add = document.createElement('button');
+  add.type = 'button';
+  add.className = 'secondary-button application-rule-add';
+  add.textContent = t('action.addRule');
+  add.addEventListener('click', () => {
+    addApplicationRuleRow(control, definition, {
+      name: '',
+      condition: 0,
+      playback: 1,
+    });
+  });
+
+  control.append(list, add);
+  renderApplicationRulesControl(control, definition, app.global[definition.key]);
+  return control;
+}
+
 function settingValue(definition, control) {
   switch (definition.type) {
   case 'boolean':
@@ -1102,6 +1402,8 @@ function settingValue(definition, control) {
     return Number.parseInt(control.value || '0', 10);
   case 'list':
     return splitList(control.value);
+  case 'rules':
+    return readApplicationRules(control);
   default:
     return control.value ?? '';
   }
@@ -1122,6 +1424,9 @@ function applySettingControlValue(definition, value) {
     break;
   case 'list':
     control.value = Array.isArray(value) ? value.join(', ') : `${value ?? ''}`;
+    break;
+  case 'rules':
+    renderApplicationRulesControl(control, definition, value);
     break;
   default:
     control.value = value !== undefined && value !== null ? `${value}` : '';
@@ -1237,6 +1542,8 @@ function createSettingRow(definition) {
     control = document.createElement('textarea');
     control.spellcheck = false;
     control.addEventListener('input', () => scheduleConfigPatch(definition, settingValue(definition, control)));
+  } else if (definition.type === 'rules') {
+    control = createApplicationRulesControl(definition);
   } else {
     control = document.createElement('input');
     control.type = definition.type === 'number' ? 'number' : 'text';
@@ -1259,6 +1566,8 @@ function createSettingRow(definition) {
 
 function buildSettings() {
   for (const definition of SETTINGS) {
+    if (displaySettingsHiddenFromSettingsPage.has(definition.key))
+      continue;
     const target = document.querySelector(`.setting-list[data-section="${definition.section}"]`);
     target?.append(createSettingRow(definition));
   }
@@ -1286,6 +1595,8 @@ function updateSettingTexts() {
       const currentValue = control.value;
       rebuildSelectOptions(definition, control, currentValue);
       control.value = currentValue;
+    } else if (definition.type === 'rules') {
+      renderApplicationRulesControl(control, definition, readApplicationRules(control));
     }
   }
 }
@@ -1441,27 +1752,513 @@ function buildUserPropertyPayload(project, overrides = {}) {
   return {};
 }
 
+function currentConfigDisplayKey() {
+  return `${app.global?.['current-config-display-key'] ?? ''}`.trim();
+}
+
+function multiDisplayMode() {
+  return app.global?.['multi-display-mode'] === 'independent' ? 'independent' : 'clone';
+}
+
+function perOutputProjects() {
+  const value = app.global?.['per-output-projects'];
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function savedProjectsForDisplay(displayKey) {
+  const entry = perOutputEntryByKey(displayKey);
+  const saved = entry?.['saved-projects'] ?? entry?.savedProjects;
+  return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {};
+}
+
+function storedProjectEntry(displayKey, projectPath) {
+  if (!displayKey || !projectPath)
+    return {};
+  const entry = savedProjectsForDisplay(displayKey)[projectPath];
+  return entry && typeof entry === 'object' && !Array.isArray(entry) ? cloneJson(entry) : {};
+}
+
+function writeStoredProjectEntry(displayKey, project, payload) {
+  if (!displayKey || !project?.path)
+    return;
+  const projects = {...perOutputProjects()};
+  const entry = {...perOutputEntryByKey(displayKey)};
+  const saved = {...savedProjectsForDisplay(displayKey)};
+  saved[project.path] = {
+    'project-type': project.type,
+    'user-properties': cloneJson(payload ?? {}),
+  };
+  entry['saved-projects'] = saved;
+  delete entry['user-properties'];
+  delete entry.userProperties;
+  projects[displayKey] = entry;
+  app.global['per-output-projects'] = projects;
+}
+
+function sortedLiveOutputs() {
+  return [...(app.state?.outputs ?? [])]
+    .filter(output => outputDisplayKey(output))
+    .sort((left, right) => {
+      const leftX = Number(left?.x ?? 0);
+      const rightX = Number(right?.x ?? 0);
+      const leftY = Number(left?.y ?? 0);
+      const rightY = Number(right?.y ?? 0);
+      const leftIndex = Number(left?.monitorIndex ?? 0);
+      const rightIndex = Number(right?.monitorIndex ?? 0);
+      return leftY - rightY || leftX - rightX || leftIndex - rightIndex || outputConsumerId(left) - outputConsumerId(right);
+    });
+}
+
+function outputPixelSize(output) {
+  const width = Number(output?.physicalWidth ?? output?.routeWidth ?? output?.logicalWidth ?? 0);
+  const height = Number(output?.physicalHeight ?? output?.routeHeight ?? output?.logicalHeight ?? 0);
+  return {
+    width: Number.isFinite(width) && width > 0 ? width : 1920,
+    height: Number.isFinite(height) && height > 0 ? height : 1080,
+  };
+}
+
+function primaryDisplayKey(outputs = sortedLiveOutputs()) {
+  const configured = `${app.global?.['primary-display-key'] ?? ''}`.trim();
+  if (configured && (outputs.length === 0 || outputs.some(output => outputDisplayKey(output) === configured)))
+    return configured;
+  const reportedPrimary = outputs.find(output => output?.primary);
+  return outputDisplayKey(reportedPrimary ?? outputs[0]);
+}
+
+function selectedDisplayKey(outputs = sortedLiveOutputs()) {
+  const current = currentConfigDisplayKey();
+  if (current && outputs.some(output => outputDisplayKey(output) === current))
+    return current;
+  return primaryDisplayKey(outputs);
+}
+
+function wallpaperTargetDisplayKey(outputs = sortedLiveOutputs()) {
+  return multiDisplayMode() === 'clone'
+    ? primaryDisplayKey(outputs)
+    : selectedDisplayKey(outputs);
+}
+
+function outputByDisplayKey(displayKey, outputs = sortedLiveOutputs()) {
+  return outputs.find(output => outputDisplayKey(output) === displayKey) ?? null;
+}
+
+function wallpaperTargetOutput(outputs = sortedLiveOutputs()) {
+  return outputByDisplayKey(wallpaperTargetDisplayKey(outputs), outputs);
+}
+
+function perOutputEntryByKey(displayKey) {
+  if (!displayKey)
+    return {};
+  const entry = perOutputProjects()[displayKey];
+  return entry && typeof entry === 'object' && !Array.isArray(entry) ? entry : {};
+}
+
+function projectPathFromOutputEntry(entry) {
+  return entry?.['project-path'] ?? entry?.projectPath ?? '';
+}
+
+function displayPreviewProjectForOutput(output, outputs) {
+  const sourceOutput = multiDisplayMode() === 'clone'
+    ? outputByDisplayKey(primaryDisplayKey(outputs), outputs)
+    : output;
+  const projectPath = projectPathFromOutputEntry(
+    perOutputEntryByKey(outputDisplayKey(sourceOutput)),
+  );
+  return projectPath ? projectByPath(projectPath) : null;
+}
+
+function projectPreviewImageSource(project) {
+  return project?.previewPath
+    ? `/api/thumbnail?path=${encodeURIComponent(project.previewPath)}`
+    : '';
+}
+
+function perOutputMuted(displayKey) {
+  const entry = perOutputEntryByKey(displayKey);
+  if (typeof entry.mute === 'boolean')
+    return entry.mute;
+  if (typeof entry.muted === 'boolean')
+    return entry.muted;
+  return false;
+}
+
+function displayPatch(patch) {
+  sendConfigPatch(patch, () => refreshState());
+  renderDisplayModal();
+}
+
+function setDisplayMode(mode) {
+  const outputs = sortedLiveOutputs();
+  const normalized = mode === 'independent' ? 'independent' : 'clone';
+  const selectedKey = selectedDisplayKey(outputs);
+  const patch = {'multi-display-mode': normalized};
+  if (normalized === 'independent' && selectedKey)
+    patch['current-config-display-key'] = selectedKey;
+  displayPatch(patch);
+  syncSelectedProjectFromState();
+}
+
+function selectDisplayForWallpaper(displayKey) {
+  if (!displayKey)
+    return;
+  if (multiDisplayMode() === 'clone')
+    return;
+  displayPatch({'current-config-display-key': displayKey});
+  syncSelectedProjectFromState();
+}
+
+function setPrimaryDisplay(displayKey) {
+  if (!displayKey)
+    return;
+  displayPatch({'primary-display-key': displayKey});
+  syncSelectedProjectFromState();
+}
+
+function togglePerOutputMute(displayKey) {
+  if (!displayKey)
+    return;
+  const projects = {...perOutputProjects()};
+  projects[displayKey] = {
+    ...perOutputEntryByKey(displayKey),
+    mute: !perOutputMuted(displayKey),
+  };
+  displayPatch({'per-output-projects': projects});
+}
+
+async function removeWallpaperForCurrentDisplay() {
+  const displayKey = outputDisplayKey(wallpaperTargetOutput());
+  if (!displayKey)
+    return;
+
+  setLocalizedStatus('status.removingWallpaper', 'working');
+  try {
+    await requestJson('/api/wallpaper/remove', {
+      method: 'POST',
+      body: JSON.stringify({displayKey}),
+    });
+    const projects = {...perOutputProjects()};
+    delete projects[displayKey];
+    app.global['per-output-projects'] = projects;
+    app.selectedProject = null;
+    app.selectedOverrides = {};
+    setLocalizedStatus('status.wallpaperRemoved', 'ok');
+    populateSettings();
+    syncSelectedProjectFromState();
+    renderDisplayModal();
+  } catch (error) {
+    setStatus(error.message, 'error');
+  }
+}
+
+function monitorLayoutStyle(output, bounds) {
+  const box = bounds.boxes.get(outputDisplayKey(output)) ?? {
+    x: 0,
+    y: 0,
+    ...outputPixelSize(output),
+  };
+  return [
+    `left:${(box.x / bounds.width) * 100}%`,
+    `top:${(box.y / bounds.height) * 100}%`,
+    `width:${(box.width / bounds.width) * 100}%`,
+    `height:${(box.height / bounds.height) * 100}%`,
+  ].join(';');
+}
+
+function outputBounds(outputs) {
+  /*
+   * The producer exposes x/y in compositor logical coordinates, while the
+   * labels users care about are physical render sizes. A scaled 3200x2000
+   * monitor can therefore have a smaller logical width than an unscaled
+   * 1920x1080 monitor. Build a visual grid from the logical topology, but size
+   * each cell from physical pixels so the chooser matches the displayed
+   * resolution instead of the desktop scale factor.
+   */
+  const logicalX = [...new Set(outputs.map(output => Number(output?.x ?? 0)))]
+    .sort((left, right) => left - right);
+  const logicalY = [...new Set(outputs.map(output => Number(output?.y ?? 0)))]
+    .sort((left, right) => left - right);
+  const columnWidths = logicalX.map(x => Math.max(
+    1,
+    ...outputs
+      .filter(output => Number(output?.x ?? 0) === x)
+      .map(output => outputPixelSize(output).width),
+  ));
+  const rowHeights = logicalY.map(y => Math.max(
+    1,
+    ...outputs
+      .filter(output => Number(output?.y ?? 0) === y)
+      .map(output => outputPixelSize(output).height),
+  ));
+  const columnOffsets = [];
+  const rowOffsets = [];
+  let offset = 0;
+  for (const width of columnWidths) {
+    columnOffsets.push(offset);
+    offset += width;
+  }
+  offset = 0;
+  for (const height of rowHeights) {
+    rowOffsets.push(offset);
+    offset += height;
+  }
+
+  const boxes = new Map();
+  let maxX = 1;
+  let maxY = 1;
+  for (const output of outputs) {
+    const size = outputPixelSize(output);
+    const x = Number(output?.x ?? 0);
+    const y = Number(output?.y ?? 0);
+    const column = Math.max(0, logicalX.indexOf(x));
+    const row = Math.max(0, logicalY.indexOf(y));
+    const box = {
+      x: columnOffsets[column] ?? 0,
+      y: rowOffsets[row] ?? 0,
+      width: size.width,
+      height: size.height,
+    };
+    boxes.set(outputDisplayKey(output), box);
+    maxX = Math.max(maxX, box.x + box.width);
+    maxY = Math.max(maxY, box.y + box.height);
+  }
+  return {
+    boxes,
+    width: maxX,
+    height: maxY,
+    aspect: maxX / maxY,
+  };
+}
+
+function cloneDisplayBadge(output, outputs) {
+  const primaryKey = primaryDisplayKey(outputs);
+  const key = outputDisplayKey(output);
+  if (key === primaryKey)
+    return '1';
+  const cloneOutputs = outputs.filter(item => outputDisplayKey(item) !== primaryKey);
+  return `c${cloneOutputs.findIndex(item => outputDisplayKey(item) === key) + 1}`;
+}
+
+function createDisplayActionMenu(output, outputs) {
+  const menu = document.createElement('div');
+  menu.className = 'display-monitor-menu';
+
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'display-monitor-menu-button';
+  trigger.title = t('display.menu');
+  trigger.setAttribute('aria-label', t('display.menu'));
+  trigger.innerHTML = `
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="m6 9 6 6 6-6"></path>
+    </svg>
+  `;
+
+  const list = document.createElement('div');
+  list.className = 'display-monitor-menu-list';
+  const key = outputDisplayKey(output);
+
+  if (multiDisplayMode() === 'clone') {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'display-monitor-menu-item';
+    item.textContent = t('display.setPrimary');
+    item.disabled = key === primaryDisplayKey(outputs);
+    item.addEventListener('click', event => {
+      event.stopPropagation();
+      setPrimaryDisplay(key);
+      closeDisplayMenus();
+    });
+    list.append(item);
+  } else {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'display-monitor-menu-item';
+    item.textContent = perOutputMuted(key) ? t('display.muted') : t('display.toggleMute');
+    item.addEventListener('click', event => {
+      event.stopPropagation();
+      togglePerOutputMute(key);
+      closeDisplayMenus();
+    });
+    list.append(item);
+  }
+
+  trigger.addEventListener('click', event => {
+    event.stopPropagation();
+    const open = !menu.classList.contains('is-open');
+    closeDisplayMenus();
+    menu.classList.toggle('is-open', open);
+  });
+
+  menu.append(trigger, list);
+  return menu;
+}
+
+function createDisplayMonitor(output, outputs, bounds, index) {
+  const key = outputDisplayKey(output);
+  const selectedKey = selectedDisplayKey(outputs);
+  const isClone = multiDisplayMode() === 'clone';
+  const isPrimary = key === primaryDisplayKey(outputs);
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'display-monitor';
+  button.dataset.displayKey = key;
+  button.classList.toggle('is-selected', isClone || key === selectedKey);
+  button.classList.toggle('is-primary', isPrimary);
+  button.classList.toggle('is-muted', !isClone && perOutputMuted(key));
+  button.style.cssText = monitorLayoutStyle(output, bounds);
+  button.title = outputDisplayLabel(output);
+  button.addEventListener('click', () => selectDisplayForWallpaper(key));
+
+  const previewSource = projectPreviewImageSource(displayPreviewProjectForOutput(output, outputs));
+  if (previewSource) {
+    const preview = document.createElement('span');
+    preview.className = 'display-monitor-preview';
+    const image = document.createElement('img');
+    image.alt = '';
+    image.decoding = 'async';
+    image.src = previewSource;
+    preview.append(image);
+    button.append(preview);
+  }
+
+  const size = outputPixelSize(output);
+  const label = document.createElement('span');
+  label.className = 'display-monitor-label';
+  label.textContent = `${size.width}x${size.height}, ${output?.displayName || `Display${index + 1}`}`;
+
+  const badge = document.createElement('span');
+  badge.className = 'display-monitor-badge';
+  badge.textContent = isClone ? cloneDisplayBadge(output, outputs) : `${index + 1}`;
+
+  button.append(label, badge, createDisplayActionMenu(output, outputs));
+  return button;
+}
+
+function closeDisplayMenus() {
+  dom.displayCanvas?.querySelectorAll('.display-monitor-menu.is-open')
+    .forEach(menu => menu.classList.remove('is-open'));
+}
+
+function syncDisplayModeSelect() {
+  if (!dom.displayModeSelect)
+    return;
+  dom.displayModeSelect.value = multiDisplayMode();
+  const wrapper = dom.displayModeSelect.closest('.custom-select');
+  const text = wrapper?.querySelector('.custom-select-trigger-text');
+  const selected = dom.displayModeSelect.options[dom.displayModeSelect.selectedIndex];
+  if (text && selected)
+    text.textContent = selected.textContent;
+}
+
+function renderDisplayModal() {
+  if (!dom.displayCanvas)
+    return;
+  const outputs = sortedLiveOutputs();
+  syncDisplayModeSelect();
+  if (dom.displayRemoveWallpaperButton)
+    dom.displayRemoveWallpaperButton.disabled = !activeProjectPath();
+  dom.displayCanvas.classList.toggle('is-empty', outputs.length === 0);
+  dom.displayEmpty?.classList.toggle('is-visible', outputs.length === 0);
+  dom.displayCanvas.replaceChildren();
+  if (outputs.length === 0)
+    return;
+
+  const bounds = outputBounds(outputs);
+  const layout = document.createElement('div');
+  layout.className = 'display-layout';
+  layout.style.aspectRatio = `${bounds.aspect}`;
+  for (const [index, output] of outputs.entries())
+    layout.append(createDisplayMonitor(output, outputs, bounds, index));
+  dom.displayCanvas.append(layout);
+}
+
+function openDisplayModal() {
+  app.displayModalOpen = true;
+  renderDisplayModal();
+  dom.displayModal?.classList.add('is-open');
+  dom.displayModal?.setAttribute('aria-hidden', 'false');
+  dom.displayModalCloseButton?.focus();
+}
+
+function closeDisplayModal() {
+  app.displayModalOpen = false;
+  closeDisplayMenus();
+  dom.displayModal?.classList.remove('is-open');
+  dom.displayModal?.setAttribute('aria-hidden', 'true');
+  dom.displayButton?.focus();
+}
+
+function activePerOutputEntry() {
+  const key = outputDisplayKey(wallpaperTargetOutput());
+  if (!key)
+    return null;
+  return perOutputEntryByKey(key);
+}
+
+function activeProjectPath() {
+  const entry = activePerOutputEntry();
+  return projectPathFromOutputEntry(entry);
+}
+
+function activeUserPropertiesForProject(project) {
+  if (!project || activeProjectPath() !== project.path)
+    return undefined;
+  const displayKey = outputDisplayKey(wallpaperTargetOutput());
+  const stored = storedProjectEntry(displayKey, project.path);
+  const storedProperties = stored?.['user-properties'] ?? stored?.userProperties;
+  if (storedProperties !== undefined && typeof storedProperties === 'object')
+    return storedProperties;
+  return undefined;
+}
+
+function updatePerOutputProjectEntry(project) {
+  const key = outputDisplayKey(wallpaperTargetOutput());
+  if (!key || !project)
+    return false;
+
+  const projects = {...perOutputProjects()};
+  const previous = projects[key] && typeof projects[key] === 'object' ? projects[key] : {};
+  const entry = {
+    ...previous,
+    'project-path': project.path,
+    'project-type': project.type,
+  };
+  delete entry['user-properties'];
+  delete entry.userProperties;
+  projects[key] = entry;
+  app.global['per-output-projects'] = projects;
+  return true;
+}
+
 function storedPayloadForProject(project) {
   if (!project)
     return {};
-  const wallpapers = app.state?.wallpapers ?? {};
-  const stored = wallpapers?.[project.path]?.['user-properties'];
-  if (stored !== undefined)
-    return cloneJson(stored);
-  if (app.global?.['project-path'] === project.path)
-    return parseJsonObject(app.global?.['user-properties']);
+  const displayKey = outputDisplayKey(wallpaperTargetOutput());
+  const stored = storedProjectEntry(displayKey, project.path);
+  const storedProperties = stored?.['user-properties'] ?? stored?.userProperties;
+  if (storedProperties !== undefined && typeof storedProperties === 'object')
+    return cloneJson(storedProperties);
   return {};
 }
 
 function setStoredPayloadForProject(project, payload) {
   if (!project)
     return;
-  if (!app.state.wallpapers)
-    app.state.wallpapers = {};
-  app.state.wallpapers[project.path] = {'user-properties': cloneJson(payload)};
-  if (app.global['project-path'] === project.path)
-    app.global['user-properties'] = JSON.stringify(payload);
+  const displayKey = outputDisplayKey(wallpaperTargetOutput());
+  writeStoredProjectEntry(displayKey, project, payload);
+  updatePerOutputProjectEntry(project);
   updateStateOutput();
+}
+
+function syncSelectedProjectFromState() {
+  const projectPath = activeProjectPath();
+  app.selectedProject = projectPath ? projectByPath(projectPath) : null;
+  app.selectedOverrides = app.selectedProject
+    ? payloadToOverrides(app.selectedProject, storedPayloadForProject(app.selectedProject))
+    : {};
+  updateActiveProjectCard(projectPath);
+  renderInspector();
 }
 
 function buildValueMap(project, overrides = {}) {
@@ -1793,6 +2590,7 @@ async function sendWallpaperProperties() {
         projectPath: app.selectedProject.path,
         wallpaperId: app.selectedProject.path,
         projectType: app.selectedProject.type,
+        displayKey: outputDisplayKey(wallpaperTargetOutput()),
         properties: payload,
       }),
     });
@@ -2001,7 +2799,7 @@ function renderInspector() {
   updateInspectorPanelState();
 }
 
-function scrollProjectCardIntoView(projectPath = app.global['project-path']) {
+function scrollProjectCardIntoView(projectPath = activeProjectPath()) {
   if (!projectPath || !dom.projectGrid)
     return;
   const card = [...dom.projectGrid.querySelectorAll('.project-card')]
@@ -2010,20 +2808,21 @@ function scrollProjectCardIntoView(projectPath = app.global['project-path']) {
 }
 
 function closeInspectorAndRestoreProject() {
-  const projectPath = app.selectedProject?.path ?? app.global['project-path'];
+  const projectPath = app.selectedProject?.path ?? activeProjectPath();
   setInspectorOpen(false);
   requestAnimationFrame(() => scrollProjectCardIntoView(projectPath));
 }
 
-function updateActiveProjectCard(projectPath = app.global['project-path']) {
+function updateActiveProjectCard(projectPath = activeProjectPath()) {
   for (const card of dom.projectGrid.querySelectorAll('.project-card'))
     card.classList.toggle('is-active', card.dataset.projectPath === projectPath);
 }
 
 async function selectProject(project, {openInspector = false} = {}) {
+  const displayKey = outputDisplayKey(wallpaperTargetOutput());
+
   app.selectedProject = project;
   app.selectedOverrides = payloadToOverrides(project, storedPayloadForProject(project));
-  app.global['project-path'] = project.path;
   updateActiveProjectCard(project.path);
   renderInspector();
   if (openInspector)
@@ -2039,6 +2838,7 @@ async function selectProject(project, {openInspector = false} = {}) {
         projectPath: project.path,
         wallpaperId: project.path,
         projectType: project.type,
+        displayKey,
         properties: payload,
       }),
     });
@@ -2165,7 +2965,7 @@ function createProjectCard(project, index) {
   const card = document.createElement('article');
   card.className = 'project-card';
   card.dataset.projectPath = project.path;
-  card.classList.toggle('is-active', app.global['project-path'] === project.path);
+  card.classList.toggle('is-active', activeProjectPath() === project.path);
   card.title = project.path;
 
   const selectButton = document.createElement('button');
@@ -2306,6 +3106,9 @@ async function refreshState({projects = false} = {}) {
     app.global = app.state.global ?? {};
     updateStateOutput();
     populateSettings();
+    renderDisplayModal();
+    if (app.projects.length > 0)
+      syncSelectedProjectFromState();
     setLocalizedStatus('status.connected', 'ok');
     if (projects)
       await refreshProjects();
@@ -2341,18 +3144,12 @@ async function refreshProjects() {
       SETTINGS.find(item => item.key === 'change-wallpaper-directory-path'),
       app.global['change-wallpaper-directory-path'],
     );
-    const activePath = app.global['project-path'];
-    app.selectedProject = activePath
-      ? projectByPath(activePath)
-      : null;
-    if (app.selectedProject)
-      app.selectedOverrides = payloadToOverrides(app.selectedProject, storedPayloadForProject(app.selectedProject));
-    else
-      app.selectedOverrides = {};
+    syncSelectedProjectFromState();
     syncBrowserControlsFromState();
     updateStateOutput();
     renderProjects();
     renderInspector();
+    renderDisplayModal();
     setLocalizedStatus('status.loadedWallpapers', 'ok', {count: app.projects.length});
   } catch (error) {
     setStatus(error.message, 'error');
@@ -2368,6 +3165,8 @@ function showView(viewId) {
   document.querySelector('.topbar').classList.toggle('is-settings', isSettings);
   dom.settingsBackButton.style.display = isSettings ? '' : 'none';
   dom.settingsButton.style.display = isSettings ? 'none' : '';
+  if (dom.displayButton)
+    dom.displayButton.style.display = isSettings ? 'none' : '';
 }
 
 function refreshLocalizedUi() {
@@ -2383,6 +3182,7 @@ function refreshLocalizedUi() {
   renderDynamicFilters();
   renderProjects();
   renderInspector();
+  renderDisplayModal();
   updateInspectorPanelState();
 }
 
@@ -2403,6 +3203,19 @@ function installEventHandlers() {
   dom.resetDefaultsButton?.addEventListener('click', resetAllDefaults);
   dom.settingsButton?.addEventListener('click', () => showView('settingsView'));
   dom.settingsBackButton?.addEventListener('click', () => showView('browseView'));
+  dom.displayButton?.addEventListener('click', openDisplayModal);
+  dom.displayModalCloseButton?.addEventListener('click', closeDisplayModal);
+  dom.displayModeSelect?.addEventListener('change', () => setDisplayMode(dom.displayModeSelect.value));
+  dom.displayChangeWallpaperButton?.addEventListener('click', () => {
+    closeDisplayModal();
+    showView('browseView');
+    dom.projectGrid?.focus?.();
+  });
+  dom.displayRemoveWallpaperButton?.addEventListener('click', removeWallpaperForCurrentDisplay);
+  dom.displayModal?.addEventListener('click', event => {
+    if (event.target === dom.displayModal)
+      closeDisplayModal();
+  });
   dom.refreshButton.addEventListener('click', () => refreshState({projects: true}));
   dom.inspectorBackButton.addEventListener('click', closeInspectorAndRestoreProject);
   dom.projectGrid.addEventListener('click', handleProjectGridClick);
@@ -2440,11 +3253,17 @@ function installEventHandlers() {
     dom.filterDropdown.classList.toggle('is-open');
   });
   document.addEventListener('click', event => {
+    if (!dom.displayCanvas?.contains(event.target))
+      closeDisplayMenus();
     if (dom.filterDropdown && dom.filterDropdownButton &&
         !dom.filterDropdownButton.contains(event.target) &&
         !dom.filterDropdown.contains(event.target)) {
       dom.filterDropdown.classList.remove('is-open');
     }
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && app.displayModalOpen)
+      closeDisplayModal();
   });
   dom.settingsForm.addEventListener('submit', event => event.preventDefault());
 }

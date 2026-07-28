@@ -22,6 +22,15 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import * as Logger from '../logger.js';
 import * as Wallpaper from '../ui/wallpaper.js';
+import {shellMonitorConnector} from '../services/monitorIdentity.js';
+import {
+    VIVID_DISPLAY_WINDOW_STATE_SCHEMA_V2,
+    VIVID_WINDOW_FLAG_FOCUSED,
+    VIVID_WINDOW_FLAG_FULLSCREEN,
+    VIVID_WINDOW_FLAG_MAXIMIZED,
+    VIVID_WINDOW_FLAG_NON_MINIMIZED,
+} from '../helper/protocol-constants.js';
+import { J } from '../helper/protocol-json-fields.js';
 
 const logger = new Logger.Logger('desktopFacts');
 const moduleDir = GLib.path_get_dirname(GLib.filename_from_uri(import.meta.url)[0]);
@@ -32,7 +41,7 @@ if (!imports.searchPath.some(path => path === commonDir))
 const Mpris = imports.mpris;
 const shellVersion = parseInt(Config.PACKAGE_VERSION.split('.')[0]);
 
-const FACT_SCHEMA = 'display-window-state-v1';
+const FACT_SCHEMA = VIVID_DISPLAY_WINDOW_STATE_SCHEMA_V2;
 const FACT_REFRESH_WARN_USEC = 8_000;
 const FACT_REPORT_WARN_USEC = 10_000;
 
@@ -153,17 +162,60 @@ function windowIsVisible(metaWindow) {
     return windowIsReportable(metaWindow) && !metaWindow.minimized;
 }
 
-function windowIsMaximizedOrFullscreen(metaWindow) {
-    if (!windowIsVisible(metaWindow))
+function windowIsMaximized(metaWindow) {
+    if (!windowIsVisible(metaWindow) || metaWindow.fullscreen)
         return false;
 
     if (shellVersion < 49)
-        return metaWindow.get_maximized() === Meta.MaximizeFlags.BOTH || metaWindow.fullscreen;
+        return metaWindow.get_maximized() === Meta.MaximizeFlags.BOTH;
 
-    return metaWindow.is_maximized() || metaWindow.fullscreen;
+    return metaWindow.is_maximized();
+}
+
+function accumulateDisplayFlags(flags, window) {
+    let next = flags | VIVID_WINDOW_FLAG_NON_MINIMIZED;
+    if (window.fullscreen)
+        next = (next & ~VIVID_WINDOW_FLAG_MAXIMIZED) | VIVID_WINDOW_FLAG_FULLSCREEN;
+    else if (window.maximized)
+        next = (next & ~VIVID_WINDOW_FLAG_FULLSCREEN) | VIVID_WINDOW_FLAG_MAXIMIZED;
+    return next;
+}
+
+function buildDisplayFlags(windows, focusWindow) {
+    const displays = {};
+    const monitors = Main.layoutManager.monitors ?? [];
+    for (const monitor of monitors) {
+        const displayKey = shellMonitorConnector(monitor.index, monitor);
+        if (displayKey)
+            displays[displayKey] = {flags: 0};
+    }
+
+    for (const window of windows) {
+        const displayKey = window.displayKey;
+        if (!displayKey || !displays[displayKey])
+            continue;
+        displays[displayKey].flags = accumulateDisplayFlags(displays[displayKey].flags, window);
+    }
+
+    if (focusWindow?.focused && focusWindow.displayKey && displays[focusWindow.displayKey])
+        displays[focusWindow.displayKey].flags |= VIVID_WINDOW_FLAG_FOCUSED;
+
+    return displays;
+}
+
+function buildDisplayWindowInfo(metaWindow) {
+    const monitorIndex = Number(metaWindow.get_monitor?.() ?? -1);
+    return {
+        displayKey: shellMonitorConnector(monitorIndex),
+        focused: !!metaWindow.appears_focused,
+        fullscreen: !!metaWindow.fullscreen,
+        maximized: windowIsMaximized(metaWindow),
+        minimized: !!metaWindow.minimized,
+    };
 }
 
 function buildWindowInfo(metaWindow, windowTracker, processIdentifiers = []) {
+    const monitorIndex = Number(metaWindow.get_monitor?.() ?? -1);
     const app = windowTracker?.get_window_app(metaWindow) ?? null;
     const originalIdentifiers = [
         app?.get_id?.() ?? '',
@@ -177,10 +229,10 @@ function buildWindowInfo(metaWindow, windowTracker, processIdentifiers = []) {
     return {
         title: metaWindow.title ?? '',
         pid: Number(metaWindow.get_pid?.() ?? 0),
-        monitorIndex: Number(metaWindow.get_monitor?.() ?? -1),
+        displayKey: shellMonitorConnector(monitorIndex),
         focused: !!metaWindow.appears_focused,
         fullscreen: !!metaWindow.fullscreen,
-        maximized: windowIsMaximizedOrFullscreen(metaWindow),
+        maximized: windowIsMaximized(metaWindow),
         minimized: !!metaWindow.minimized,
         identifiers: uniqueStrings(originalIdentifiers),
         originalIdentifiers,
@@ -215,9 +267,9 @@ class FactModule {
     }
 }
 
-class CoveringWindowFactModule extends FactModule {
+class ActiveWorkspaceDisplayFactModule extends FactModule {
     constructor(onUpdated) {
-        super('coveringWindows', onUpdated);
+        super('activeWorkspaceDisplay', onUpdated);
         this._workspaceManager = null;
         this._activeWorkspace = null;
         this._workspaceSignalHandles = [];
@@ -229,6 +281,7 @@ class CoveringWindowFactModule extends FactModule {
         this._connect(this._workspaceManager, 'active-workspace-changed', () => {
             this._trackActiveWorkspace();
             this._refresh();
+            this._updated();
         });
         this._trackActiveWorkspace();
         this._refresh();
@@ -247,13 +300,15 @@ class CoveringWindowFactModule extends FactModule {
 
         connectTracked(this._workspaceSignalHandles, this._activeWorkspace, 'window-added',
             (_workspace, metaWindow) => {
-                this._trackWindow(metaWindow);
+                this._trackWindow(metaWindow, false);
                 this._refresh();
+                this._updated();
             });
         connectTracked(this._workspaceSignalHandles, this._activeWorkspace, 'window-removed',
             (_workspace, metaWindow) => {
                 this._untrackWindow(metaWindow);
                 this._refresh();
+                this._updated();
             });
     }
 
@@ -294,18 +349,21 @@ class CoveringWindowFactModule extends FactModule {
     }
 
     _refresh() {
-        const visibleWindows = [...this._trackedWindows.keys()].filter(windowIsVisible);
-        const coveringWindows = visibleWindows.filter(windowIsMaximizedOrFullscreen);
-        const monitors = Main.layoutManager.monitors ?? [];
-        const coveredMonitors = new Set(coveringWindows.map(metaWindow => metaWindow.get_monitor()));
+        const startedUsec = GLib.get_monotonic_time();
+        /*
+         * Display flags drive producer pause/stop policy and must describe only
+         * the active GNOME workspace. The full window inventory intentionally
+         * spans the session for running-application rules, but GNOME can keep
+         * inactive-workspace windows in that inventory; using it here would let
+         * a fullscreen or maximized window on another workspace pause the
+         * current workspace.
+         */
+        const windows = [...this._trackedWindows.keys()]
+            .filter(windowIsVisible)
+            .map(buildDisplayWindowInfo);
 
-        this._facts = {
-            maximizedOrFullscreenOnAnyMonitor: coveringWindows.length > 0,
-            maximizedOrFullscreenOnAllMonitors:
-                monitors.length > 0 && monitors.every(monitor => coveredMonitors.has(monitor.index)),
-            coveredMonitorIndices: [...coveredMonitors],
-            visibleWindowCount: visibleWindows.length,
-        };
+        this._facts = {displayWindows: windows};
+        warnSlowFactWork('activeWorkspaceDisplay.refresh', startedUsec, ` windows=${windows.length}`);
     }
 
     disable() {
@@ -358,11 +416,9 @@ class FocusWindowFactModule extends FactModule {
 
     _refresh() {
         const focusWindow = this._display?.focus_window ?? null;
-        const pausableFocus = windowIsVisible(focusWindow) && !!focusWindow.appears_focused;
-
+        const reportableFocus = windowIsVisible(focusWindow) && !!focusWindow.appears_focused;
         this._facts = {
-            windowFocused: pausableFocus,
-            focusWindow: focusWindow
+            focusWindow: reportableFocus
                 ? buildWindowInfo(focusWindow, this._windowTracker)
                 : null,
         };
@@ -526,6 +582,9 @@ class WindowInventoryFactModule extends FactModule {
             'gtk-application-id',
             'minimized',
             'appears-focused',
+            'maximized-horizontally',
+            'maximized-vertically',
+            'fullscreen',
         ]) {
             connectTracked(tracked.signals, metaWindow, `notify::${propertyName}`, () => {
                 this._refresh();
@@ -580,6 +639,7 @@ export class AutoPause {
         this._reportSourceId = 0;
         this._pendingReasons = new Set();
         this._unsubscribeDisplay = null;
+        this._lastPolicyTrace = '';
     }
 
     enable() {
@@ -589,7 +649,7 @@ export class AutoPause {
         this._enabled = true;
         const schedule = reason => this._scheduleReport(reason);
         this._modules = [
-            new CoveringWindowFactModule(schedule),
+            new ActiveWorkspaceDisplayFactModule(schedule),
             new FocusWindowFactModule(schedule),
             new PowerFactModule(schedule),
             new MprisFactModule(schedule),
@@ -650,22 +710,51 @@ export class AutoPause {
         const reasons = [...this._pendingReasons];
         this._pendingReasons.clear();
 
-        /*
-         * This object deliberately contains observations, not policy decisions.
-         * The producer owns configuration and decides whether these facts imply
-         * pause, resume, or stop. Keeping the fact schema explicit makes KDE or
-         * another desktop consumer implement the same producer contract without
-         * copying GNOME-specific policy code.
-         */
+        const windows = facts.windows ?? [];
+        const displayWindows = facts.displayWindows ?? [];
+        const focusWindow = facts.focusWindow ?? null;
+        const displays = buildDisplayFlags(displayWindows, focusWindow);
         const payload = {
-            schema: FACT_SCHEMA,
-            source: 'gnome-shell',
-            timeUsec: GLib.get_monotonic_time(),
-            reasons,
-            facts,
+            [J.WINDOW_STATE.schema]: FACT_SCHEMA,
+            [J.WINDOW_STATE.source]: 'gnome-shell',
+            [J.WINDOW_STATE.timeUsec]: GLib.get_monotonic_time(),
+            [J.WINDOW_STATE.reasons]: reasons,
+            [J.WINDOW_STATE.displays]: displays,
+            [J.WINDOW_STATE.session]: {
+                onBattery: facts.onBattery === true,
+                mprisPlaying: facts.mprisPlaying === true,
+                mprisPlayers: facts.mprisPlayers ?? [],
+                windows: windows.map(window => ({
+                    title: window.title,
+                    pid: window.pid,
+                    displayKey: window.displayKey,
+                    focused: window.focused,
+                    fullscreen: window.fullscreen,
+                    maximized: window.maximized,
+                    minimized: window.minimized,
+                    identifiers: window.identifiers,
+                })),
+                applicationIdentifiers: facts.applicationIdentifiers ?? [],
+            },
         };
 
         const sent = this._consumer?.sendWindowState?.(payload) ?? false;
+        const displayTrace = Object.entries(displays)
+            .map(([displayKey, entry]) => `${displayKey}:${entry.flags}`)
+            .join(',');
+        const policyTrace =
+            `focusDisplay=${focusWindow?.displayKey ?? '(none)'}` +
+            ` displays=[${displayTrace}]` +
+            ` activeWorkspaceWindows=${displayWindows.length}` +
+            ` inventoryWindows=${windows.length}` +
+            ` onBattery=${facts.onBattery === true}` +
+            ` mprisPlaying=${facts.mprisPlaying === true}` +
+            ` sent=${sent}` +
+            ` reasons=${reasons.join(',')}`;
+        if (policyTrace !== this._lastPolicyTrace) {
+            this._lastPolicyTrace = policyTrace;
+            logger.warn(`desktop facts policy-trace ${policyTrace}`);
+        }
         /*
          * Auto-pause runs inside GNOME Shell because only the desktop consumer can
          * observe Shell windows, focus, power and MPRIS state. Slow fact reports
@@ -675,7 +764,7 @@ export class AutoPause {
         const elapsedUsec = GLib.get_monotonic_time() - startedUsec;
         if (elapsedUsec > FACT_REPORT_WARN_USEC) {
             logger.warn(`desktop facts report slow duration=${formatUsec(elapsedUsec)} ` +
-                `sent=${sent} reasons=${reasons.join(',')} windows=${facts.windows?.length ?? 0}`);
+                `sent=${sent} reasons=${reasons.join(',')} windows=${windows.length}`);
         }
         logger.debug(`desktop facts ${sent ? 'sent' : 'queued until connected'} reasons=${reasons.join(',')}`);
     }

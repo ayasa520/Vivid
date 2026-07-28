@@ -1,0 +1,570 @@
+# Vivid display-v1 protocol specification — sole handwritten source of truth.
+# Regenerate bindings: tools/vivid.sh protocol regen (S3) or python3 protocol_gen.py
+
+[protocol]
+name = "vivid-display-v1"
+version = 2
+min-supported = 1
+
+[[history]]
+version = 1
+summary = "Initial version: JSON HELLO/caps/bind + binary pointer/frame/unbind."
+
+[[history]]
+version = 2
+summary = "Structured error codes, control requestId, caps top-level field removal, BIND JSON field convergence, display-window-state-v2, audio binary opcode."
+
+# Scalar #define constants (VIVID_DISPLAY_* prefix applied by generator).
+[constants]
+WINDOW_STATE_SCHEMA_V2 = { value = "display-window-state-v2" }
+CODEC_MAX_BODY_BYTES = 65531
+CODEC_MAX_FDS_PER_MESSAGE = 64
+FRAME_HEADER_BYTES = 4
+DMABUF_MAX_PLANES = 4
+FRAME_READY_FD_COUNT = 2
+AUDIO_SAMPLES_BIN_MAX_COUNT = 512
+CODEC_FRAME_DONE = 1
+CODEC_FRAME_NEED_IO = 2
+
+[messages.control-header]
+kind = "control-envelope"
+encoding = "binary"
+fields = [
+  { name = "opcode", type = "u16" },
+  { name = "flags", type = "u16" },
+  { name = "json_length", type = "u32" },
+]
+
+[messages.pointer-motion]
+kind = "request"
+opcode = "POINTER_MOTION"
+encoding = "binary"
+fields = [
+  { name = "output_id", type = "u32" },
+  { name = "x", type = "f64" },
+  { name = "y", type = "f64" },
+  { name = "time_usec", type = "u64" },
+]
+
+[messages.pointer-button]
+kind = "request"
+opcode = "POINTER_BUTTON"
+encoding = "binary"
+fields = [
+  { name = "output_id", type = "u32" },
+  { name = "x", type = "f64" },
+  { name = "y", type = "f64" },
+  { name = "button", type = "u32" },
+  { name = "state", type = "u32" },
+  { name = "time_usec", type = "u64" },
+]
+
+[messages.pointer-axis]
+kind = "request"
+opcode = "POINTER_AXIS"
+encoding = "binary"
+fields = [
+  { name = "output_id", type = "u32" },
+  { name = "x", type = "f64" },
+  { name = "y", type = "f64" },
+  { name = "delta_x", type = "f64" },
+  { name = "delta_y", type = "f64" },
+  { name = "source", type = "u32" },
+  { name = "time_usec", type = "u64" },
+]
+
+[messages.frame-ready]
+kind = "event"
+opcode = "FRAME_READY"
+encoding = "binary"
+fields = [
+  { name = "output_id", type = "u32" },
+  { name = "generation", type = "u64" },
+  { name = "buffer_index", type = "u32" },
+  { name = "sequence", type = "u64" },
+  { name = "target_time_usec", type = "u64" },
+  { name = "flags", type = "u32" },
+]
+
+[messages.unbind]
+kind = "event"
+opcode = "UNBIND"
+encoding = "binary"
+fields = [
+  { name = "output_id", type = "u32" },
+  { name = "generation", type = "u64" },
+]
+
+[messages.audio-samples-bin]
+kind = "request"
+opcode = "AUDIO_SAMPLES_BIN"
+encoding = "binary"
+since = 2
+fields = [
+  { name = "count", type = "u32", max = 512 },
+  { name = "time_usec", type = "u64" },
+  { name = "samples", type = "f32[]", count-field = "count" },
+]
+
+[bind-failed-reasons]
+prefix = "VIVID_DISPLAY_BIND_FAILED_"
+members = [
+  { name = "IMPORT_FAILED", value = 1 },
+  { name = "FRAME_REFRESH_FAILED", value = 2 },
+  { name = "OOM", value = 3 },
+  { name = "OTHER", value = 4 },
+]
+
+[flags.window]
+prefix = "VIVID_WINDOW_FLAG_"
+doc = "per-display window flags, display-window-state-v2; bits 4..31 reserved"
+members = [
+  { name = "NON_MINIMIZED", value = 1, doc = "mapped window on display, not minimized" },
+  { name = "FOCUSED", value = 2, doc = "keyboard focus on this display" },
+  { name = "MAXIMIZED", value = 4, doc = "H+V maximized, not fullscreen" },
+  { name = "FULLSCREEN", value = 8, doc = "fullscreen; mutually exclusive with MAXIMIZED" },
+]
+
+[enums.result]
+c-name = "VividDisplayResult"
+prefix = "VIVID_DISPLAY_"
+members = [
+  { name = "OK", value = 0 },
+  { name = "ERR_INVAL", value = -1 },
+  { name = "ERR_IO", value = -2 },
+  { name = "ERR_PROTOCOL", value = -3 },
+  { name = "ERR_NO_SPACE", value = -4 },
+]
+
+[enums.error-code]
+c-name = "VividDisplayErrorCode"
+prefix = "VIVID_DISPLAY_ERR_"
+members = [
+  { name = "PROTO_NAME_MISMATCH", value = 1 },
+  { name = "VERSION_UNSUPPORTED", value = 2 },
+  { name = "HELLO_REQUIRED", value = 3 },
+  { name = "DUPLICATE_HELLO", value = 4 },
+  { name = "CAPS_INVALID", value = 100 },
+  { name = "CAPS_REQUIRED", value = 101 },
+  { name = "NO_DMABUF_SCHEME", value = 102 },
+  { name = "OUTPUT_REJECTED", value = 200 },
+  { name = "BUFFER_ALLOC_FAILED", value = 201 },
+  { name = "WINDOW_STATE_INVALID", value = 202 },
+  { name = "BIND_FAILED_INVALID", value = 203 },
+  { name = "UPDATE_OUTPUT_INVALID", value = 204 },
+  { name = "CONTROL_MALFORMED", value = 300 },
+  { name = "CONTROL_INVALID", value = 301 },
+]
+
+[errors]
+segments = [
+  { range = [1, 99], domain = "handshake", terminal = true },
+  { range = [100, 199], domain = "caps", terminal = false },
+  { range = [200, 299], domain = "output", terminal = false },
+  { range = [300, 399], domain = "control", terminal = false },
+]
+
+[enums.client-role]
+c-name = "VividDisplayClientRole"
+prefix = "VIVID_DISPLAY_CLIENT_"
+members = [
+  { name = "CONSUMER", value = 1 },
+  { name = "CONTROLLER", value = 2 },
+  { name = "CONSUMER_AND_CONTROLLER", value = 3 },
+  { name = "PRODUCER", value = 4 },
+  { name = "DISPLAY", alias-of = "CONSUMER" },
+  { name = "DISPLAY_AND_CONTROLLER", alias-of = "CONSUMER_AND_CONTROLLER" },
+]
+
+[enums.request-opcode]
+c-name = "VividDisplayRequestOpcode"
+prefix = "VIVID_DISPLAY_REQ_"
+members = [
+  { name = "HELLO", value = 1 },
+  { name = "REGISTER_OUTPUT", value = 2 },
+  { name = "UPDATE_OUTPUT", value = 3 },
+  { name = "CONSUMER_CAPS", value = 4 },
+  { name = "BYE", value = 5 },
+  { reserved = 6, reason = "removed SET_PROJECT-era opcode" },
+  { name = "POINTER_MOTION", value = 7 },
+  { name = "POINTER_BUTTON", value = 8 },
+  { name = "POINTER_AXIS", value = 9 },
+  { name = "WINDOW_STATE", value = 10, doc = """
+REQ_WINDOW_STATE carries schema "display-window-state-v2".
+
+Payload: { "schema", "source", "displays": { "<displayKey>": { "flags" } },
+           "session": { ... } }
+
+displayKey is the persistent identity registered via REGISTER_OUTPUT.
+flags use VIVID_WINDOW_FLAG_*; MAXIMIZED and FULLSCREEN are mutually exclusive.
+
+session carries global facts (onBattery, mprisPlaying, windows[], ...) used
+by application rules. Identity model: displayKey = persistence key;
+outputId = daemon session key; monitorIndex = per-connection transport coordinate.
+""" },
+  { name = "CONTROL", value = 11 },
+  { name = "MEDIA_STATE", value = 12 },
+  { name = "AUDIO_SAMPLES", value = 13, doc = "reserved; v2 uses AUDIO_SAMPLES_BIN" },
+  { name = "BIND_FAILED", value = 14 },
+  { name = "UNBIND_DONE", value = 15 },
+  { name = "AUDIO_SAMPLES_BIN", value = 16, since = 2, doc = """
+v2 binary audio samples (negotiatedVersion >= 2):
+body: u32le count (<=512) + u64le timeUsec + count * f32le sample in [0,1]
+""" },
+]
+
+[enums.event-opcode]
+c-name = "VividDisplayEventOpcode"
+prefix = "VIVID_DISPLAY_EVT_"
+members = [
+  { name = "WELCOME", value = 1 },
+  { name = "OUTPUT_ACCEPTED", value = 2 },
+  { name = "BIND_BUFFERS", value = 3 },
+  { name = "SET_CONFIG", value = 4 },
+  { name = "FRAME_READY", value = 5 },
+  { name = "UNBIND", value = 6 },
+  { name = "CONTROL", value = 7 },
+  { name = "AUDIO_FRAME", value = 8 },
+  { name = "ERROR", value = 9 },
+]
+
+[enums.control-opcode]
+c-name = "VividDisplayControlOpcode"
+prefix = "VIVID_DISPLAY_CONTROL_"
+members = [
+  { name = "GET_STATE", value = 1 },
+  { name = "STATE_SNAPSHOT", value = 2 },
+  { reserved = 3, reason = "removed control opcode" },
+  { name = "SET_PLAYING", value = 4 },
+  { name = "SET_MUTED", value = 5 },
+  { name = "SET_VOLUME", value = 6 },
+  { name = "SET_CONTENT_FIT", value = 7 },
+  { name = "SET_SCENE_FPS", value = 8 },
+  { reserved = 9, reason = "removed control opcode" },
+  { name = "OPEN_SETTINGS", value = 10 },
+  { name = "ACK", value = 11 },
+  { name = "ERROR", value = 12 },
+  { name = "SET_STATE", value = 13 },
+]
+
+[enums.button-state]
+c-name = "VividDisplayButtonState"
+prefix = "VIVID_DISPLAY_BUTTON_"
+members = [
+  { name = "RELEASED", value = 0 },
+  { name = "PRESSED", value = 1 },
+]
+
+[enums.axis-source]
+c-name = "VividDisplayAxisSource"
+prefix = "VIVID_DISPLAY_AXIS_"
+members = [
+  { name = "WHEEL", value = 0 },
+  { name = "FINGER", value = 1 },
+  { name = "CONTINUOUS", value = 2 },
+]
+
+# JSON wire field names for dual-end messages (S6). Keys are logical ids; values are wire strings.
+[json-fields.HELLO]
+protocol = "protocol"
+version = "version"
+clientName = "clientName"
+role = "role"
+features = "features"
+
+[json-fields.WELCOME]
+protocol = "protocol"
+version = "version"
+negotiatedVersion = "negotiatedVersion"
+features = "features"
+
+[json-fields.CONSUMER_CAPS]
+dmabufCaps = "dmabufCaps"
+
+[json-fields.DMABUF_CAPS]
+version = "version"
+backend = "backend"
+probe = "probe"
+relayModes = "relayModes"
+renderNode = "renderNode"
+deviceUuid = "deviceUuid"
+driverUuid = "driverUuid"
+vendor = "vendor"
+pciAddress = "pciAddress"
+fourccs = "fourccs"
+modifiers = "modifiers"
+implicitLinearFourccs = "implicitLinearFourccs"
+memoryHints = "memoryHints"
+syncCaps = "syncCaps"
+colorCaps = "colorCaps"
+extentMax = "extentMax"
+textureTarget = "textureTarget"
+skipsExternalOnlyModifiers = "skipsExternalOnlyModifiers"
+diagnostics = "diagnostics"
+fourcc = "fourcc"
+modifier = "modifier"
+planeCount = "planeCount"
+
+[json-fields.EXTENT_MAX]
+width = "width"
+height = "height"
+
+[json-fields.REGISTER_OUTPUT]
+consumerOutputId = "consumerOutputId"
+monitorIndex = "monitorIndex"
+layoutOutputCount = "layoutOutputCount"
+x = "x"
+y = "y"
+width = "width"
+height = "height"
+physicalWidth = "physicalWidth"
+physicalHeight = "physicalHeight"
+scale = "scale"
+refreshRateMhz = "refreshRateMhz"
+desktop = "desktop"
+displayKey = "displayKey"
+displayName = "displayName"
+transform = "transform"
+
+[json-fields.UPDATE_OUTPUT]
+outputId = "outputId"
+consumerOutputId = "consumerOutputId"
+monitorIndex = "monitorIndex"
+layoutOutputCount = "layoutOutputCount"
+x = "x"
+y = "y"
+width = "width"
+height = "height"
+physicalWidth = "physicalWidth"
+physicalHeight = "physicalHeight"
+scale = "scale"
+refreshRateMhz = "refreshRateMhz"
+desktop = "desktop"
+displayKey = "displayKey"
+displayName = "displayName"
+transform = "transform"
+
+[json-fields.OUTPUT_ACCEPTED]
+consumerOutputId = "consumerOutputId"
+outputId = "outputId"
+monitorIndex = "monitorIndex"
+active = "active"
+logicalWidth = "logicalWidth"
+logicalHeight = "logicalHeight"
+width = "width"
+height = "height"
+scale = "scale"
+
+[json-fields.BIND_BUFFERS]
+outputId = "outputId"
+generation = "generation"
+memoryType = "memoryType"
+format = "format"
+width = "width"
+height = "height"
+logicalWidth = "logicalWidth"
+logicalHeight = "logicalHeight"
+scale = "scale"
+refreshRateMhz = "refreshRateMhz"
+fourcc = "fourcc"
+modifier = "modifier"
+planesPerBuffer = "planesPerBuffer"
+premultiplied = "premultiplied"
+syncMode = "syncMode"
+renderNode = "render-node"
+producerRenderNode = "producerRenderNode"
+producerVendor = "producerVendor"
+producerPciAddress = "producerPciAddress"
+producerDeviceUuid = "producerDeviceUuid"
+producerDriverUuid = "producerDriverUuid"
+producerDrmRenderMajor = "producerDrmRenderMajor"
+producerDrmRenderMinor = "producerDrmRenderMinor"
+consumerBackend = "consumerBackend"
+consumerRenderNode = "consumerRenderNode"
+consumerDeviceUuid = "consumerDeviceUuid"
+consumerDriverUuid = "consumerDriverUuid"
+consumerDrmRenderMajor = "consumerDrmRenderMajor"
+consumerDrmRenderMinor = "consumerDrmRenderMinor"
+negotiatedPath = "negotiatedPath"
+presentationPath = "presentationPath"
+memoryHint = "memoryHint"
+memorySource = "memorySource"
+consumerIdentityMode = "consumerIdentityMode"
+buffers = "buffers"
+
+[json-fields.BIND_BUFFERS_BUFFER]
+index = "index"
+size = "size"
+planes = "planes"
+
+[json-fields.BIND_BUFFERS_PLANE]
+fdIndex = "fdIndex"
+stride = "stride"
+offset = "offset"
+
+[json-fields.SET_CONFIG]
+outputId = "outputId"
+generation = "generation"
+configGeneration = "configGeneration"
+source = "source"
+destination = "destination"
+transform = "transform"
+clearColor = "clearColor"
+
+[json-fields.RECT]
+x = "x"
+y = "y"
+width = "width"
+height = "height"
+
+[json-fields.WINDOW_STATE]
+schema = "schema"
+source = "source"
+timeUsec = "timeUsec"
+reasons = "reasons"
+displays = "displays"
+session = "session"
+flags = "flags"
+
+[json-fields.BIND_FAILED]
+outputId = "outputId"
+generation = "generation"
+fourcc = "fourcc"
+modifier = "modifier"
+reason = "reason"
+message = "message"
+
+[json-fields.UNBIND_DONE]
+outputId = "outputId"
+generation = "generation"
+
+[json-fields.EVT_ERROR]
+code = "code"
+fatal = "fatal"
+message = "message"
+
+[json-fields.CONTROL_ENVELOPE]
+requestId = "requestId"
+ok = "ok"
+code = "code"
+message = "message"
+requestOpcode = "requestOpcode"
+configSaved = "configSaved"
+
+[[config-keys.members]]
+kebab = "reset-defaults"
+camel = "resetDefaults"
+type = "bool"
+
+[[config-keys.members]]
+kebab = "mute"
+type = "bool"
+
+[[config-keys.members]]
+kebab = "volume"
+type = "int"
+
+[[config-keys.members]]
+kebab = "change-wallpaper"
+camel = "changeWallpaper"
+type = "bool"
+
+[[config-keys.members]]
+kebab = "change-wallpaper-directory-path"
+camel = "changeWallpaperDirectoryPath"
+type = "string"
+
+[[config-keys.members]]
+kebab = "change-wallpaper-interval"
+camel = "changeWallpaperInterval"
+type = "int"
+
+[[config-keys.members]]
+kebab = "change-wallpaper-mode"
+camel = "changeWallpaperMode"
+type = "int"
+
+[[config-keys.members]]
+kebab = "playback-on-focus"
+camel = "playbackOnFocus"
+type = "int"
+
+[[config-keys.members]]
+kebab = "playback-on-maximize-or-fullscreen"
+camel = "playbackOnMaximizeOrFullscreen"
+type = "int"
+
+[[config-keys.members]]
+kebab = "playback-on-audio"
+camel = "playbackOnAudio"
+type = "int"
+
+[[config-keys.members]]
+kebab = "playback-on-battery"
+camel = "playbackOnBattery"
+type = "int"
+
+[[config-keys.members]]
+kebab = "application-rules"
+camel = "applicationRules"
+type = "array"
+
+[[config-keys.members]]
+kebab = "debug-mode"
+camel = "debugMode"
+type = "bool"
+
+[[config-keys.members]]
+kebab = "render-device"
+camel = "renderDevice"
+type = "string"
+
+[[config-keys.members]]
+kebab = "content-fit"
+camel = "contentFit"
+type = "int"
+
+[[config-keys.members]]
+kebab = "scene-fps"
+camel = "sceneFps"
+type = "int"
+
+[[config-keys.members]]
+kebab = "startup-delay"
+camel = "startupDelay"
+type = "int"
+
+[[config-keys.members]]
+kebab = "show-panel-menu"
+camel = "showPanelMenu"
+type = "bool"
+
+[[config-keys.members]]
+kebab = "project-browser-filter-state"
+camel = "projectBrowserFilterState"
+type = "string"
+
+[[config-keys.members]]
+kebab = "project-browser-sort-key"
+camel = "projectBrowserSortKey"
+type = "string"
+
+[[config-keys.members]]
+kebab = "multi-display-mode"
+camel = "multiDisplayMode"
+type = "string"
+
+[[config-keys.members]]
+kebab = "primary-display-key"
+camel = "primaryDisplayKey"
+type = "string"
+
+[[config-keys.members]]
+kebab = "current-config-display-key"
+camel = "currentConfigDisplayKey"
+type = "string"
+
+[[config-keys.members]]
+kebab = "per-output-projects"
+camel = "perOutputProjects"
+type = "object"

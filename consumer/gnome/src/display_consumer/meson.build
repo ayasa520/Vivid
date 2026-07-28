@@ -9,9 +9,6 @@ vivid_display_consumer_deps = [
   dependency('gio-unix-2.0'),
   dependency('json-glib-1.0'),
   dependency('gtk4', version: '>=4.14'),
-  dependency('gtk4-wayland', version: '>=4.14'),
-  dependency('egl'),
-  dependency('gbm'),
   dependency('libdrm'),
   dependency('vulkan'),
 ]

@@ -111,17 +111,25 @@ typedef enum
 } VividProducerRendererDmaBufPrepareStatus;
 
 VividProducerRenderer* vivid_producer_renderer_new(void);
+VividProducerRenderer* vivid_producer_renderer_new_from_gpu_devices(
+    const VividGpuDeviceList* gpu_devices);
 void                    vivid_producer_renderer_free(VividProducerRenderer* renderer);
 
 void vivid_producer_renderer_apply_config(VividProducerRenderer*     renderer,
-                                           const VividProducerConfig* config);
+                                           const VividProducerConfig* config,
+                                           const gchar*               project_path,
+                                           const gchar*               user_properties_json);
 void vivid_producer_renderer_set_playback_paused(VividProducerRenderer* renderer,
                                                   gboolean                paused);
+void vivid_producer_renderer_set_playback_stopped(VividProducerRenderer* renderer,
+                                                   gboolean                stopped);
 void vivid_producer_renderer_set_media_state_json(VividProducerRenderer* renderer,
                                                    const gchar*            media_state_json);
 void vivid_producer_renderer_set_audio_samples(VividProducerRenderer* renderer,
                                                 GVariant*               audio_samples);
 guint64 vivid_producer_renderer_generation(VividProducerRenderer* renderer);
+const gchar* vivid_producer_renderer_project_path(VividProducerRenderer* renderer);
+const gchar* vivid_producer_renderer_user_properties_json(VividProducerRenderer* renderer);
 
 /*
  * GPU device facts for the control plane: the cached enumeration result and
@@ -168,6 +176,9 @@ gboolean vivid_producer_renderer_request_dmabuf_frame(VividProducerRenderer* ren
 void vivid_producer_renderer_buffer_set_clear(VividProducerRendererBufferSet* set);
 void vivid_producer_renderer_set_release_gate(VividProducerRenderer*         renderer,
                                                const VividRendererReleaseGate* gate);
+
+gboolean vivid_producer_renderer_get_clear_rgba(VividProducerRenderer* renderer,
+                                                 gfloat                 rgba[4]);
 
 void vivid_producer_renderer_pointer_motion(VividProducerRenderer* renderer,
                                              gdouble                 x,

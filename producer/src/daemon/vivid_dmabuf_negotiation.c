@@ -146,8 +146,6 @@ const gchar*
 vivid_dmabuf_relay_mode_name(guint32 relay_mode)
 {
     switch (relay_mode) {
-    case VIVID_DMABUF_RELAY_MODE_DIRECT_IMPORT:
-        return "direct";
     case VIVID_DMABUF_RELAY_MODE_SHADOW_COPY:
         return "shadow-copy";
     default:
@@ -367,21 +365,14 @@ vivid_dmabuf_negotiate_pick(const VividDmaBufPeerCaps* producer,
             return FALSE;
         }
 
-        guint32 relay_mode = 0;
         /*
-         * GNOME/GTK consumers may be waywallen-style relay endpoints: Vulkan
-         * imports the producer DMA-BUF and then exposes a separate LINEAR shadow
-         * DMA-BUF to GDK. In that mode direct-import-v1 is intentionally absent,
-         * but same-device non-LINEAR modifiers are still the best producer-side
-         * allocation because the relay, not GDK, imports them. Prefer direct
-         * when both modes are valid for the chosen tuple; otherwise allow the
-         * relay to carry the same exact modifier/plane intersection.
+         * All desktop consumers use a waywallen-style shadow endpoint. KDE
+         * copies into a toolkit-owned texture, while GNOME's Vulkan relay
+         * exposes a separate LINEAR shadow DMA-BUF to GDK. The relay imports
+         * the producer buffer itself, so same-device non-LINEAR modifiers
+         * remain the best producer-side allocation.
          */
-        if ((consumer->relay_modes & VIVID_DMABUF_RELAY_MODE_DIRECT_IMPORT) != 0) {
-            relay_mode = VIVID_DMABUF_RELAY_MODE_DIRECT_IMPORT;
-        } else if ((consumer->relay_modes & VIVID_DMABUF_RELAY_MODE_SHADOW_COPY) != 0) {
-            relay_mode = VIVID_DMABUF_RELAY_MODE_SHADOW_COPY;
-        } else {
+        if ((consumer->relay_modes & VIVID_DMABUF_RELAY_MODE_SHADOW_COPY) == 0) {
             if (out_error)
                 *out_error = VIVID_DMABUF_NEGOTIATE_ERROR_NO_RELAY_MODE;
             return FALSE;
@@ -393,7 +384,7 @@ vivid_dmabuf_negotiate_pick(const VividDmaBufPeerCaps* producer,
             : cap.modifier;
         out_scheme->plane_count = cap.plane_count;
         out_scheme->same_device = TRUE;
-        out_scheme->relay_mode = relay_mode;
+        out_scheme->relay_mode = VIVID_DMABUF_RELAY_MODE_SHADOW_COPY;
         out_scheme->memory_hint =
             pick_memory_hint_same_device(producer->memory_hints,
                                          consumer->memory_hints);

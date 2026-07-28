@@ -249,11 +249,15 @@ void VividMediaBridge::onDisplayConnectionChanged()
         startAudioCapture();
     } else {
         stopAudioCapture(false);
+        stopMprisMonitor();
     }
 }
 
 void VividMediaBridge::startMprisMonitor()
 {
+    if (m_mprisMonitoring)
+        return;
+
     auto connection = QDBusConnection::sessionBus();
     connection.connect(QString(),
                        QStringLiteral("/org/freedesktop/DBus"),
@@ -267,11 +271,15 @@ void VividMediaBridge::startMprisMonitor()
                        QStringLiteral("PropertiesChanged"),
                        this,
                        SLOT(onMprisPropertiesChanged(QString,QVariantMap,QStringList)));
+    m_mprisMonitoring = true;
     m_mediaPollTimer.start();
 }
 
 void VividMediaBridge::stopMprisMonitor()
 {
+    if (!m_mprisMonitoring)
+        return;
+
     auto connection = QDBusConnection::sessionBus();
     connection.disconnect(QString(),
                           QStringLiteral("/org/freedesktop/DBus"),
@@ -286,6 +294,7 @@ void VividMediaBridge::stopMprisMonitor()
                           this,
                           SLOT(onMprisPropertiesChanged(QString,QVariantMap,QStringList)));
     m_mediaPollTimer.stop();
+    m_mprisMonitoring = false;
 }
 
 void VividMediaBridge::onMprisNameOwnerChanged(const QString& name,
@@ -298,11 +307,13 @@ void VividMediaBridge::onMprisNameOwnerChanged(const QString& name,
 
 void VividMediaBridge::onMprisPropertiesChanged(const QString& interfaceName,
                                                     const QVariantMap& changedProperties,
-                                                    const QStringList&)
+                                                    const QStringList& invalidatedProperties)
 {
     if (interfaceName == QLatin1String(MprisPlayerInterface) &&
         (changedProperties.contains(QStringLiteral("PlaybackStatus")) ||
-         changedProperties.contains(QStringLiteral("Metadata")))) {
+         changedProperties.contains(QStringLiteral("Metadata")) ||
+         invalidatedProperties.contains(QStringLiteral("PlaybackStatus")) ||
+         invalidatedProperties.contains(QStringLiteral("Metadata")))) {
         scheduleMediaRefresh();
     }
 }
@@ -381,6 +392,7 @@ VividMediaBridge::MprisSnapshot VividMediaBridge::queryMprisSnapshot(const QStri
 void VividMediaBridge::refreshMediaState()
 {
     const QVector<MprisSnapshot> snapshots = queryMprisSnapshots();
+    updateDisplayMprisPolicyFacts(snapshots);
     if (snapshots.isEmpty()) {
         m_lastSnapshot.reset();
         sendMediaPayload(nullptr, nullptr);
@@ -390,6 +402,29 @@ void VividMediaBridge::refreshMediaState()
     m_lastSnapshot = snapshots.first();
     ThumbnailPayload thumbnail = loadThumbnail(m_lastSnapshot->artUrl);
     sendMediaPayload(&m_lastSnapshot.value(), thumbnail.valid ? &thumbnail : nullptr);
+}
+
+void VividMediaBridge::updateDisplayMprisPolicyFacts(const QVector<MprisSnapshot>& snapshots)
+{
+    QJsonArray players;
+    for (const MprisSnapshot& snapshot : snapshots) {
+        if (snapshot.name.isEmpty())
+            continue;
+
+        players.append(QJsonObject {
+            { QStringLiteral("name"), snapshot.name },
+            { QStringLiteral("playbackStatus"), snapshot.playbackStatus },
+        });
+    }
+
+    /*
+     * Title/artwork updates are consumed by wallpapers, while the producer's
+     * playback-on-audio policy reads mprisPlaying/mprisPlayers from
+     * window-state facts. Publish both from the same MPRIS snapshot so KDE does
+     * not let the media UI and policy engine drift apart.
+     */
+    if (m_display)
+        m_display->setMprisPlaybackFacts(players);
 }
 
 QJsonObject VividMediaBridge::defaultMediaPayload() const
@@ -813,18 +848,8 @@ void VividMediaBridge::processAudioChunk(const QVector<float>& interleaved)
         m_audioFrame[i + AudioBandsPerChannel] = rightValues.value(i);
     }
 
-    if (m_display && m_display->sendAudioSamples(m_audioFrame, now)) {
-        m_audioFrameCount++;
-        if (m_audioFrameCount <= 8 || m_audioFrameCount % 300 == 0) {
-            double maxSample = 0.0;
-            for (double value : m_audioFrame)
-                maxSample = std::max(maxSample, value);
-            qCDebug(lcWallpaperMedia, "audio samples sent frame=%llu count=%d max=%.4f",
-                    static_cast<unsigned long long>(m_audioFrameCount),
-                    static_cast<int>(m_audioFrame.size()),
-                    maxSample);
-        }
-    }
+    if (m_display)
+        m_display->sendAudioSamples(m_audioFrame, now);
 }
 
 void VividMediaBridge::initializeSpectrumTables()
@@ -870,7 +895,6 @@ void VividMediaBridge::resetSpectrumState()
     m_leftSamples.fill(0.0f, AudioSampleBufferSize);
     m_rightSamples.fill(0.0f, AudioSampleBufferSize);
     m_audioFrame.fill(0.0, AudioFrameLength);
-    m_audioFrameCount = 0;
     m_lastAudioEmitUsec = 0;
 
     auto initState = [](SpectrumState& state) {

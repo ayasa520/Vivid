@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -52,6 +53,13 @@ constexpr std::array kRequiredDeviceExtensions {
 constexpr std::array kVaImportDeviceExtensions {
     VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
 };
+
+std::mutex&
+vulkan_instance_mutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
 
 const char*
 bool_to_string(bool value)
@@ -321,6 +329,14 @@ find_physical_device_by_uuid(VkInstance instance,
 bool
 create_probe_instance(VkInstance& instance, const char* app_name)
 {
+    /*
+     * query_export_caps() may run while another output route is creating its
+     * real Vulkan instance. Serialize instance creation inside the video backend
+     * so independent displays do not re-enter the loader/ICD bootstrap at the
+     * same time.
+     */
+    std::lock_guard<std::mutex> lock(vulkan_instance_mutex());
+
     VkApplicationInfo app_info {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pNext = nullptr,
@@ -641,6 +657,7 @@ create_vulkan_instance(VividVideoVulkanBackend& backend)
         .ppEnabledExtensionNames = enabled_extensions.data(),
     };
 
+    std::lock_guard<std::mutex> lock(vulkan_instance_mutex());
     VkResult result = vkCreateInstance(&create_info, nullptr, &backend.instance);
     if (result != VK_SUCCESS) {
         g_warning("VividVideoProducer: failed to create Vulkan instance result=%s",
@@ -838,7 +855,8 @@ choose_physical_device(VividVideoVulkanBackend& backend,
     }
 
     g_message("VividVideoProducer: Vulkan GPU selected by uuid name=%s node=%s "
-              "type=%d dedicated-export=%s forbid-device-local-export=%s",
+              "type=%d dedicated-required=%s dedicated-used=true "
+              "forbid-device-local-export=%s",
               selected_properties.deviceName,
               gpu_device.render_node[0] ? gpu_device.render_node : "(unknown)",
               static_cast<int>(selected_properties.deviceType),
@@ -1045,9 +1063,15 @@ create_export_image(VividVideoVulkanBackend& backend,
     };
     VkExportMemoryAllocateInfo export_info {
         .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
-        .pNext = backend.export_requires_dedicated
-            ? static_cast<void*>(&dedicated_info)
-            : nullptr,
+        /*
+         * Match Waywallen's Vulkan pool allocator: every exported DMA-BUF
+         * image gets a dedicated allocation.  The capability bit cached in
+         * export_requires_dedicated comes from the LINEAR image tuple, while
+         * this allocation may use DRM modifier tiling.  Reusing the LINEAR
+         * verdict here left NVIDIA modifier images non-dedicated and gave the
+         * EGL importer a different lifetime contract from Waywallen.
+         */
+        .pNext = &dedicated_info,
         .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
     };
     VkMemoryAllocateInfo allocate_info {

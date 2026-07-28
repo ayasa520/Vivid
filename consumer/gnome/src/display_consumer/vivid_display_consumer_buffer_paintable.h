@@ -31,12 +31,6 @@ gboolean vivid_display_consumer_buffer_paintable_bind_json(
     GUnixFDList*                          fd_list,
     GError**                              error);
 
-gboolean vivid_display_consumer_buffer_paintable_show_frame(
-    VividDisplayConsumerBufferPaintable* self,
-    guint64                               generation,
-    guint32                               buffer_index,
-    GError**                              error);
-
 gboolean vivid_display_consumer_buffer_paintable_show_frame_with_sync(
     VividDisplayConsumerBufferPaintable* self,
     guint64                               generation,
@@ -44,17 +38,6 @@ gboolean vivid_display_consumer_buffer_paintable_show_frame_with_sync(
     gint                                  acquire_sync_fd,
     gint                                  release_syncobj_fd,
     GError**                              error);
-
-gboolean vivid_display_consumer_buffer_paintable_attach_release_syncobj(
-    VividDisplayConsumerBufferPaintable* self,
-    guint64                               generation,
-    guint32                               buffer_index,
-    gint                                  release_syncobj_fd,
-    GError**                              error);
-
-void vivid_display_consumer_buffer_paintable_flush_pending_release_syncobj(
-    VividDisplayConsumerBufferPaintable* self,
-    const gchar*                          reason);
 
 void vivid_display_consumer_buffer_paintable_set_config(
     VividDisplayConsumerBufferPaintable* self,
