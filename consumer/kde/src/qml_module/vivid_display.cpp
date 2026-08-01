@@ -2744,23 +2744,26 @@ bool VividDisplay::sendAudioSamples(const QVector<double>& samples, quint64 time
     if (m_fd < 0 || m_connState != Connected)
         return false;
 
-    const int sampleCount = std::min<int>(static_cast<int>(samples.size()),
-                                          static_cast<int>(Proto::VIVID_DISPLAY_AUDIO_SAMPLES_BIN_MAX_COUNT));
-    if (sampleCount <= 0)
+    constexpr int sampleCount = static_cast<int>(
+        Proto::VIVID_DISPLAY_AUDIO_SAMPLES_BIN_MAX_COUNT
+    );
+    if (samples.size() != static_cast<qsizetype>(sampleCount))
         return false;
 
     QByteArray body;
     body.resize(12 + sampleCount * static_cast<int>(sizeof(float)));
-    std::vector<float> clamped(static_cast<size_t>(sampleCount));
-    for (int i = 0; i < sampleCount; i++)
-        clamped[static_cast<size_t>(i)] =
-            static_cast<float>(std::clamp(samples.at(i), 0.0, 1.0));
+    std::vector<float> encoded(static_cast<size_t>(sampleCount));
+    for (int i = 0; i < sampleCount; i++) {
+        const double value = samples.at(i);
+        encoded[static_cast<size_t>(i)] =
+            std::isfinite(value) && value > 0.0 ? static_cast<float>(value) : 0.0f;
+    }
     const int written = vivid_display_audio_samples_bin_body_write(
         reinterpret_cast<uint8_t*>(body.data()),
         static_cast<size_t>(body.size()),
         static_cast<uint32_t>(sampleCount),
         timeUsec,
-        clamped.data());
+        encoded.data());
     if (written < 0)
         return false;
     body.resize(written);

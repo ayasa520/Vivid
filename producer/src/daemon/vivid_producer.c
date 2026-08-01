@@ -353,7 +353,6 @@ struct _Producer
     gboolean policy_paused;
     gboolean policy_stopped;
     guint64 media_state_received;
-    guint64 audio_samples_received;
     guint32 renderer_rebind_barrier_output_id;
 };
 
@@ -7245,11 +7244,11 @@ handle_audio_samples_bin(Client* client, const guint8* body, gsize body_len)
         return TRUE;
 
     const guint32 count = vivid_display_codec_read_u32(body);
-    if (count == 0 || count > VIVID_DISPLAY_AUDIO_SAMPLES_BIN_MAX_COUNT)
+    if (count != VIVID_DISPLAY_AUDIO_SAMPLES_BIN_MAX_COUNT)
         return TRUE;
 
     const gsize expected = vivid_display_audio_samples_bin_body_bytes(count);
-    if (body_len < expected)
+    if (body_len != expected)
         return TRUE;
 
     g_autofree float* samples = g_new(float, count);
@@ -7265,11 +7264,10 @@ handle_audio_samples_bin(Client* client, const guint8* body, gsize body_len)
 
     GVariantBuilder builder;
     g_variant_builder_init(&builder, G_VARIANT_TYPE("ad"));
-    gdouble max_sample = 0.0;
     for (guint32 i = 0; i < decoded_count; i++) {
         gfloat sample = samples[i];
-        sample = CLAMP(sample, 0.f, 1.f);
-        max_sample = MAX(max_sample, (gdouble)sample);
+        if (!isfinite(sample) || sample <= 0.f)
+            sample = 0.f;
         g_variant_builder_add(&builder, "d", (gdouble)sample);
     }
 
@@ -7282,17 +7280,6 @@ handle_audio_samples_bin(Client* client, const guint8* body, gsize body_len)
         vivid_producer_renderer_set_audio_samples(route->renderer, audio_samples);
     }
     g_variant_unref(audio_samples);
-
-    client->producer->audio_samples_received++;
-    if (client->producer->audio_samples_received <= 8 ||
-        client->producer->audio_samples_received % 300 == 0) {
-        g_message("VividProducer: audio samples(bin) received #%" G_GUINT64_FORMAT
-                  " count=%u max=%.4f bytes=%" G_GSIZE_FORMAT,
-                  client->producer->audio_samples_received,
-                  count,
-                  max_sample,
-                  body_len);
-    }
 
     return TRUE;
 }

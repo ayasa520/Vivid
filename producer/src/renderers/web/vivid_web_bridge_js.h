@@ -100,9 +100,6 @@ static const char kVividWebBridgeJs[] = R"VIVID_JS(
         writable: true,
         value: function(callback) {
             wallpaperAudioListenerValue = typeof callback === 'function' ? callback : null;
-            window.setTimeout(function() {
-                flushAudioFrame();
-            }, 0);
         },
     });
 

@@ -26,7 +26,7 @@ Machine-readable tables generated from `producer/src/protocol/vivid_display_v1.t
 | `FRAME_HEADER_BYTES` | 4 |
 | `FRAME_READY_FD_COUNT` | 2 |
 | `DMABUF_MAX_PLANES` | 4 |
-| `AUDIO_SAMPLES_BIN_MAX_COUNT` | 512 |
+| `AUDIO_SAMPLES_BIN_MAX_COUNT` | 128 |
 
 ## Display transport frame header
 
@@ -57,7 +57,7 @@ Every display socket message:
 | 13 | `VIVID_DISPLAY_REQ_AUDIO_SAMPLES` | JSON | 0 | reserved; v2 uses AUDIO_SAMPLES_BIN |
 | 14 | `VIVID_DISPLAY_REQ_BIND_FAILED` | JSON | 0 |  |
 | 15 | `VIVID_DISPLAY_REQ_UNBIND_DONE` | JSON | 0 |  |
-| 16 | `VIVID_DISPLAY_REQ_AUDIO_SAMPLES_BIN` | binary, variable (audio-samples-bin) | 0 | since v2. v2 binary audio samples (negotiatedVersion >= 2): body: u32le count (<=512) + u64le timeUsec + count * f32le sample in [0,1] |
+| 16 | `VIVID_DISPLAY_REQ_AUDIO_SAMPLES_BIN` | binary, variable (audio-samples-bin) | 0 | since v2. v2 binary audio samples (negotiatedVersion >= 2): body: u32le count (=128) + u64le timeUsec + 128 non-negative finite f32le spectrum samples; values may exceed 1.0 |
 
 ## Event opcodes (producer -> client)
 

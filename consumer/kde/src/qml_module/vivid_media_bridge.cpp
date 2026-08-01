@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 
 Q_LOGGING_CATEGORY(lcWallpaperMedia, "wallpaper.display.kde.media")
 
@@ -40,18 +41,14 @@ constexpr int MediaDebounceDelayMs = 80;
 
 constexpr int AudioBandsPerChannel = 64;
 constexpr int AudioFrameLength = AudioBandsPerChannel * 2;
-constexpr int AudioSampleRate = 44100;
-constexpr int AudioFftSize = 2048;
-constexpr int AudioSampleBufferSize = AudioFftSize * 2;
-constexpr quint64 AudioUpdateIntervalUsec = 16667;
-constexpr double AudioMinFrequencyHz = 30.0;
-constexpr double AudioMaxFrequencyHz = 18000.0;
-constexpr double AudioMinDb = -80.0;
-constexpr double AudioMaxDb = 0.0;
-constexpr double AudioSilenceRmsThreshold = 0.003;
-constexpr double AudioSpectrumOutputGain = 4.0;
-constexpr double AudioBandPeakBlend = 0.35;
-constexpr double AudioBandEdgeRatio = 1.1051178997261066;
+constexpr int AudioReferenceSampleRate = 44100;
+constexpr int AudioUpdateIntervalMs = 33;
+constexpr double AudioWindowParameter = 30.0;
+constexpr double AudioStepParameter = 10.0;
+constexpr double AudioInputBias = 127.0;
+constexpr double AudioBandExponent = 0.25;
+constexpr double AudioWeightCenter = 0.5009999871;
+constexpr double AudioOutputGain = 1.0;
 constexpr double Pi = 3.14159265358979323846;
 
 double clamp01(double value)
@@ -61,11 +58,63 @@ double clamp01(double value)
     return std::clamp(value, 0.0, 1.0);
 }
 
-double clip(double value, double min, double max)
+/**
+ * Execute an unscaled forward or scaled inverse radix-2 FFT in place. The
+ * Wallpaper Engine transform length is derived from the endpoint sample rate
+ * and is generally not a power of two, so Bluestein uses this primitive for
+ * its power-of-two convolution without changing the analyzed DFT length.
+ */
+void transformRadix2InPlace(QVector<double>& real, QVector<double>& imag, bool inverse)
 {
-    if (!std::isfinite(value))
-        return min;
-    return std::clamp(value, min, max);
+    const int size = std::min(real.size(), imag.size());
+    for (int index = 1, reversed = 0; index < size; index++) {
+        int bit = size >> 1;
+        while (reversed & bit) {
+            reversed ^= bit;
+            bit >>= 1;
+        }
+        reversed ^= bit;
+        if (index < reversed) {
+            std::swap(real[index], real[reversed]);
+            std::swap(imag[index], imag[reversed]);
+        }
+    }
+
+    for (int blockSize = 2; blockSize <= size; blockSize <<= 1) {
+        const int halfSize = blockSize >> 1;
+        const double angle = (inverse ? 2.0 : -2.0) * Pi / blockSize;
+        const double phaseRealStep = std::cos(angle);
+        const double phaseImagStep = std::sin(angle);
+        for (int offset = 0; offset < size; offset += blockSize) {
+            double phaseReal = 1.0;
+            double phaseImag = 0.0;
+            for (int index = 0; index < halfSize; index++) {
+                const int evenIndex = offset + index;
+                const int oddIndex = evenIndex + halfSize;
+                const double oddReal =
+                    real[oddIndex] * phaseReal - imag[oddIndex] * phaseImag;
+                const double oddImag =
+                    real[oddIndex] * phaseImag + imag[oddIndex] * phaseReal;
+                real[oddIndex] = real[evenIndex] - oddReal;
+                imag[oddIndex] = imag[evenIndex] - oddImag;
+                real[evenIndex] += oddReal;
+                imag[evenIndex] += oddImag;
+                const double nextPhaseReal =
+                    phaseReal * phaseRealStep - phaseImag * phaseImagStep;
+                const double nextPhaseImag =
+                    phaseReal * phaseImagStep + phaseImag * phaseRealStep;
+                phaseReal = nextPhaseReal;
+                phaseImag = nextPhaseImag;
+            }
+        }
+    }
+
+    if (inverse) {
+        for (int index = 0; index < size; index++) {
+            real[index] /= size;
+            imag[index] /= size;
+        }
+    }
 }
 
 quint64 monotonicUsec()
@@ -170,8 +219,18 @@ VividMediaBridge::VividMediaBridge(QObject* parent)
     m_audioRestartTimer.setInterval(1000);
     connect(&m_audioRestartTimer, &QTimer::timeout, this, &VividMediaBridge::startAudioCapture);
 
-    initializeSpectrumTables();
-    resetSpectrumState();
+    /*
+     * PulseAudio fragment boundaries are independent from Wallpaper Engine's
+     * analysis cadence. Capture callbacks append continuous PCM into the ring,
+     * while this precise timer samples the newest complete analysis window every
+     * 33 ms regardless of how the server grouped the source fragments.
+     */
+    m_audioProcessTimer.setTimerType(Qt::PreciseTimer);
+    m_audioProcessTimer.setInterval(AudioUpdateIntervalMs);
+    connect(&m_audioProcessTimer, &QTimer::timeout,
+            this, &VividMediaBridge::processNextAudioFrame);
+
+    m_audioFrame.fill(0.0, AudioFrameLength);
 }
 
 VividMediaBridge::~VividMediaBridge()
@@ -223,7 +282,7 @@ void VividMediaBridge::stop()
     if (!m_running && !m_paMainloop)
         return;
 
-    stopAudioCapture(false);
+    stopAudioCapture();
     stopMprisMonitor();
     m_mediaRefreshTimer.stop();
     m_mediaPollTimer.stop();
@@ -248,7 +307,7 @@ void VividMediaBridge::onDisplayConnectionChanged()
         scheduleMediaRefresh(0);
         startAudioCapture();
     } else {
-        stopAudioCapture(false);
+        stopAudioCapture();
         stopMprisMonitor();
     }
 }
@@ -643,21 +702,38 @@ void VividMediaBridge::startAudioCapture()
     }
 
     pa_context_set_state_callback(m_paContext, &VividMediaBridge::pulseContextStateCallback, this);
-    if (pa_context_connect(m_paContext, nullptr, PA_CONTEXT_NOFLAGS, nullptr) < 0 ||
-        pa_threaded_mainloop_start(m_paMainloop) < 0) {
-        qCWarning(lcWallpaperMedia, "PulseAudio capture failed: unable to connect/start mainloop");
+    if (pa_context_connect(m_paContext, nullptr, PA_CONTEXT_NOFLAGS, nullptr) < 0) {
+        qCWarning(lcWallpaperMedia, "PulseAudio capture failed: unable to connect context");
         scheduleAudioRestart();
         return;
     }
+    if (pa_threaded_mainloop_start(m_paMainloop) < 0) {
+        qCWarning(lcWallpaperMedia, "PulseAudio capture failed: unable to start mainloop");
+        scheduleAudioRestart();
+        return;
+    }
+    m_paMainloopStarted = true;
 }
 
-void VividMediaBridge::stopAudioCapture(bool emitSilence)
+void VividMediaBridge::stopAudioCapture()
 {
-    Q_UNUSED(emitSilence)
     m_audioRestartTimer.stop();
+    m_audioProcessTimer.stop();
     m_audioShouldRun = false;
+    m_leftPcmRing.fill(0.0f);
+    m_rightPcmRing.fill(0.0f);
+    m_pcmWriteIndex = 0;
+    m_pcmFramesAvailable = 0;
+    m_pcmFramesWritten = 0;
+    m_lastAnalyzedFramesWritten = 0;
 
-    if (m_paMainloop)
+    /*
+     * pa_threaded_mainloop_start() may fail after the context has already been
+     * created. In that state no worker thread exists, so locking or stopping the
+     * mainloop violates libpulse's lifecycle contract. Track the successful
+     * start explicitly and only synchronize with a thread that actually exists.
+     */
+    if (m_paMainloop && m_paMainloopStarted)
         pa_threaded_mainloop_lock(m_paMainloop);
     if (m_paStream) {
         pa_stream_set_read_callback(m_paStream, nullptr, nullptr);
@@ -672,13 +748,15 @@ void VividMediaBridge::stopAudioCapture(bool emitSilence)
         pa_context_unref(m_paContext);
         m_paContext = nullptr;
     }
-    if (m_paMainloop)
+    if (m_paMainloop && m_paMainloopStarted)
         pa_threaded_mainloop_unlock(m_paMainloop);
     if (m_paMainloop) {
-        pa_threaded_mainloop_stop(m_paMainloop);
+        if (m_paMainloopStarted)
+            pa_threaded_mainloop_stop(m_paMainloop);
         pa_threaded_mainloop_free(m_paMainloop);
         m_paMainloop = nullptr;
     }
+    m_paMainloopStarted = false;
 }
 
 void VividMediaBridge::scheduleAudioRestart()
@@ -686,7 +764,7 @@ void VividMediaBridge::scheduleAudioRestart()
     QMetaObject::invokeMethod(this, [this]() {
         if (!m_audioShouldRun)
             return;
-        stopAudioCapture(false);
+        stopAudioCapture();
         m_audioShouldRun = false;
         m_audioRestartTimer.start();
     }, Qt::QueuedConnection);
@@ -724,11 +802,52 @@ void VividMediaBridge::pulseServerInfoCallback(pa_context* context,
         return;
     }
 
-    const QByteArray monitorName =
-        QByteArray(info->default_sink_name) + QByteArrayLiteral(".monitor");
+    pa_operation* operation = pa_context_get_sink_info_by_name(
+        context,
+        info->default_sink_name,
+        &VividMediaBridge::pulseSinkInfoCallback,
+        self);
+    if (operation)
+        pa_operation_unref(operation);
+    else
+        self->scheduleAudioRestart();
+}
+
+void VividMediaBridge::pulseSinkInfoCallback(pa_context* context,
+                                              const pa_sink_info* info,
+                                              int eol,
+                                              void* userdata)
+{
+    auto* self = static_cast<VividMediaBridge*>(userdata);
+    if (eol > 0)
+        return;
+    if (!info || !info->monitor_source_name || info->sample_spec.rate == 0) {
+        self->scheduleAudioRestart();
+        return;
+    }
+
+    const QByteArray monitorName(info->monitor_source_name);
+    const int sampleRate = static_cast<int>(info->sample_spec.rate);
+
+    /*
+     * Pulse callbacks run on pa_threaded_mainloop's worker thread, while the
+     * timer and PCM ring live on the QObject thread. Queue configuration before
+     * stream creation; subsequent stream-state and read callbacks enqueue their
+     * work from the same Pulse thread, preserving this event order without a
+     * cross-thread blocking call during shutdown.
+     */
+    QMetaObject::invokeMethod(self, [self, sampleRate]() {
+        if (!self->configureSpectrumTransform(sampleRate)) {
+            qCWarning(lcWallpaperMedia,
+                      "audio spectrum configuration failed sampleRate=%d",
+                      sampleRate);
+            self->scheduleAudioRestart();
+        }
+    }, Qt::QueuedConnection);
+
     pa_sample_spec spec {};
     spec.format = PA_SAMPLE_FLOAT32LE;
-    spec.rate = AudioSampleRate;
+    spec.rate = static_cast<uint32_t>(sampleRate);
     spec.channels = 2;
     if (!pa_sample_spec_valid(&spec)) {
         self->scheduleAudioRestart();
@@ -747,7 +866,11 @@ void VividMediaBridge::pulseServerInfoCallback(pa_context* context,
 
     pa_buffer_attr attr {};
     attr.maxlength = static_cast<uint32_t>(-1);
-    attr.fragsize = static_cast<uint32_t>(AudioSampleRate * sizeof(float) * 2 / 60);
+    const uint64_t captureFragmentFrames =
+        static_cast<uint64_t>(sampleRate) * AudioUpdateIntervalMs / 1000;
+    attr.fragsize = static_cast<uint32_t>(
+        captureFragmentFrames * sizeof(float) * spec.channels
+    );
     if (pa_stream_connect_record(stream,
                                   monitorName.constData(),
                                   &attr,
@@ -760,10 +883,14 @@ void VividMediaBridge::pulseStreamStateCallback(pa_stream* stream, void* userdat
 {
     auto* self = static_cast<VividMediaBridge*>(userdata);
     switch (pa_stream_get_state(stream)) {
-    case PA_STREAM_READY:
-        qCInfo(lcWallpaperMedia, "audio sample capture started bands=%d sampleRate=%d",
-               AudioFrameLength, AudioSampleRate);
+    case PA_STREAM_READY: {
+        QMetaObject::invokeMethod(self, [self]() {
+            if (!self->m_audioShouldRun || !self->m_spectrumConfiguration.valid())
+                return;
+            self->m_audioProcessTimer.start();
+        }, Qt::QueuedConnection);
         break;
+    }
     case PA_STREAM_FAILED:
     case PA_STREAM_TERMINATED:
         self->scheduleAudioRestart();
@@ -780,273 +907,302 @@ void VividMediaBridge::pulseStreamReadCallback(pa_stream* stream,
     auto* self = static_cast<VividMediaBridge*>(userdata);
     const void* data = nullptr;
     size_t bytes = 0;
-    while (pa_stream_peek(stream, &data, &bytes) >= 0 && bytes > 0) {
-        if (data) {
-            const auto* samples = static_cast<const float*>(data);
-            const int count = static_cast<int>(bytes / sizeof(float));
-            QVector<float> chunk(count);
-            std::copy(samples, samples + count, chunk.begin());
-            QMetaObject::invokeMethod(self, [self, chunk = std::move(chunk)]() {
-                self->handlePulseAudioChunk(chunk);
+    int peekResult = 0;
+    while ((peekResult = pa_stream_peek(stream, &data, &bytes)) >= 0 && bytes > 0) {
+        constexpr size_t bytesPerFrame = sizeof(float) * 2;
+        const size_t frameCount = bytes / bytesPerFrame;
+        const qsizetype sampleCount = static_cast<qsizetype>(frameCount * 2);
+        if (bytes % bytesPerFrame != 0) {
+            qCWarning(lcWallpaperMedia,
+                      "PulseAudio capture returned a non-frame-aligned fragment bytes=%zu",
+                      bytes);
+        }
+
+        if (sampleCount > 0) {
+            /*
+             * A null data pointer with a non-zero byte count is a PulseAudio
+             * hole, not an empty callback. Materialize it as zero PCM so the
+             * continuous capture timeline advances and the previous spectrum
+             * does not remain visible after the sink becomes silent.
+             */
+            QVector<float> chunk(sampleCount, 0.0f);
+            if (data) {
+                const auto* samples = static_cast<const float*>(data);
+                std::copy(samples, samples + sampleCount, chunk.begin());
+            }
+            QMetaObject::invokeMethod(self, [self, chunk = std::move(chunk)]() mutable {
+                self->handlePulseAudioChunk(std::move(chunk));
             }, Qt::QueuedConnection);
         }
-        pa_stream_drop(stream);
+        if (pa_stream_drop(stream) < 0) {
+            pa_context* context = pa_stream_get_context(stream);
+            qCWarning(lcWallpaperMedia,
+                      "PulseAudio capture failed while dropping fragment: %s",
+                      context ? pa_strerror(pa_context_errno(context)) : "unknown error");
+            self->scheduleAudioRestart();
+            return;
+        }
         data = nullptr;
         bytes = 0;
     }
+
+    if (peekResult < 0) {
+        pa_context* context = pa_stream_get_context(stream);
+        qCWarning(lcWallpaperMedia,
+                  "PulseAudio capture failed while peeking fragment: %s",
+                  context ? pa_strerror(pa_context_errno(context)) : "unknown error");
+        self->scheduleAudioRestart();
+    }
 }
 
-void VividMediaBridge::handlePulseAudioChunk(const QVector<float>& interleaved)
+void VividMediaBridge::handlePulseAudioChunk(QVector<float> interleaved)
 {
     if (!m_audioShouldRun || !m_display ||
         m_display->connState() != VividDisplay::Connected)
         return;
-    processAudioChunk(interleaved);
+
+    appendAudioChunk(interleaved);
 }
 
-void VividMediaBridge::processAudioChunk(const QVector<float>& interleaved)
+void VividMediaBridge::processNextAudioFrame()
 {
-    const int frameCount = interleaved.size() / 2;
-    if (frameCount <= 0)
+    if (!m_audioShouldRun || !m_display ||
+        m_display->connState() != VividDisplay::Connected ||
+        !m_spectrumConfiguration.valid() ||
+        m_pcmFramesWritten == m_lastAnalyzedFramesWritten)
         return;
 
-    if (frameCount >= AudioSampleBufferSize) {
-        const int startFrame = frameCount - AudioSampleBufferSize;
-        for (int i = 0; i < AudioSampleBufferSize; i++) {
-            const int source = (startFrame + i) * 2;
-            const float left = interleaved.value(source);
-            m_leftSamples[i] = left;
-            m_rightSamples[i] = interleaved.value(source + 1, left);
-        }
-    } else {
-        std::move(m_leftSamples.begin() + frameCount, m_leftSamples.end(), m_leftSamples.begin());
-        std::move(m_rightSamples.begin() + frameCount, m_rightSamples.end(), m_rightSamples.begin());
-        const int writeOffset = AudioSampleBufferSize - frameCount;
-        for (int i = 0; i < frameCount; i++) {
-            const int source = i * 2;
-            const float left = interleaved.value(source);
-            m_leftSamples[writeOffset + i] = left;
-            m_rightSamples[writeOffset + i] = interleaved.value(source + 1, left);
-        }
-    }
-
-    const quint64 now = monotonicUsec();
-    if (m_lastAudioEmitUsec != 0 && now - m_lastAudioEmitUsec < AudioUpdateIntervalUsec)
+    const quint64 snapshotFramesWritten = m_pcmFramesWritten;
+    const int populatedFrames = copyLatestAudioWindow();
+    if (populatedFrames <= 0)
         return;
-    m_lastAudioEmitUsec = now;
 
-    QVector<float> left(AudioFftSize);
-    QVector<float> right(AudioFftSize);
-    const int offset = AudioSampleBufferSize - AudioFftSize;
-    std::copy(m_leftSamples.begin() + offset, m_leftSamples.end(), left.begin());
-    std::copy(m_rightSamples.begin() + offset, m_rightSamples.end(), right.begin());
-
-    const QVector<double> leftValues = processSpectrumFrame(left, m_leftSpectrum);
-    const QVector<double> rightValues = processSpectrumFrame(right, m_rightSpectrum);
+    const QVector<double> leftValues = processSpectrumFrame(m_leftSamples, m_leftSpectrum);
+    const QVector<double> rightValues = processSpectrumFrame(m_rightSamples, m_rightSpectrum);
     for (int i = 0; i < AudioBandsPerChannel; i++) {
         m_audioFrame[i] = leftValues.value(i);
         m_audioFrame[i + AudioBandsPerChannel] = rightValues.value(i);
     }
 
-    if (m_display)
-        m_display->sendAudioSamples(m_audioFrame, now);
+    m_display->sendAudioSamples(m_audioFrame, monotonicUsec());
+    m_lastAnalyzedFramesWritten = snapshotFramesWritten;
 }
 
-void VividMediaBridge::initializeSpectrumTables()
+void VividMediaBridge::appendAudioChunk(const QVector<float>& interleaved)
 {
-    m_bandEdgesHz.resize(AudioBandsPerChannel + 1);
-    m_bandEdgesHz[0] = AudioMinFrequencyHz;
-    for (int i = 1; i <= AudioBandsPerChannel; i++)
-        m_bandEdgesHz[i] = m_bandEdgesHz[i - 1] * AudioBandEdgeRatio;
-    m_bandEdgesHz[AudioBandsPerChannel] = AudioMaxFrequencyHz;
-    m_bandCentersHz.resize(AudioBandsPerChannel);
-    for (int i = 0; i < AudioBandsPerChannel; i++)
-        m_bandCentersHz[i] = std::sqrt(m_bandEdgesHz[i] * m_bandEdgesHz[i + 1]);
+    if (!m_spectrumConfiguration.valid() || m_leftPcmRing.isEmpty() ||
+        m_leftPcmRing.size() != m_rightPcmRing.size())
+        return;
 
-    const int frequencyCount = AudioFftSize / 2 + 1;
-    m_frequenciesHz.resize(frequencyCount);
-    for (int i = 0; i < frequencyCount; i++)
-        m_frequenciesHz[i] = (static_cast<double>(i) * AudioSampleRate) / AudioFftSize;
-
-    m_window.resize(AudioFftSize);
-    double windowSum = 0.0;
-    for (int i = 0; i < AudioFftSize; i++) {
-        m_window[i] = 0.5 * (1.0 - std::cos((2.0 * Pi * i) / (AudioFftSize - 1)));
-        windowSum += m_window[i];
+    const qsizetype frameCount = interleaved.size() / 2;
+    const qsizetype capacity = m_leftPcmRing.size();
+    for (qsizetype frame = 0; frame < frameCount; frame++) {
+        const qsizetype source = frame * 2;
+        const float left = interleaved.at(source);
+        m_leftPcmRing[m_pcmWriteIndex] = left;
+        m_rightPcmRing[m_pcmWriteIndex] = interleaved.value(source + 1, left);
+        m_pcmWriteIndex = (m_pcmWriteIndex + 1) % capacity;
     }
-    m_magnitudeReference = std::max(1.0, windowSum * 0.5);
 
-    m_bandBinRanges.resize(AudioBandsPerChannel);
-    for (int i = 0; i < AudioBandsPerChannel; i++) {
-        const double low = m_bandEdgesHz[i];
-        const double high = m_bandEdgesHz[i + 1];
-        int begin = 0;
-        while (begin < m_frequenciesHz.size() && m_frequenciesHz[begin] < low)
-            begin++;
-        int end = begin;
-        while (end < m_frequenciesHz.size() && m_frequenciesHz[end] < high)
-            end++;
-        m_bandBinRanges[i] = { begin, end };
+    m_pcmFramesAvailable = std::min(capacity, m_pcmFramesAvailable + frameCount);
+    m_pcmFramesWritten += static_cast<quint64>(frameCount);
+}
+
+int VividMediaBridge::copyLatestAudioWindow()
+{
+    if (!m_spectrumConfiguration.valid() || m_leftPcmRing.isEmpty())
+        return 0;
+
+    m_leftSamples.fill(0.0f);
+    m_rightSamples.fill(0.0f);
+    const qsizetype targetCount = m_spectrumConfiguration.pcmSampleCount;
+    const qsizetype copyCount = std::min(targetCount, m_pcmFramesAvailable);
+    const qsizetype targetOffset = targetCount - copyCount;
+    const qsizetype capacity = m_leftPcmRing.size();
+    const qsizetype sourceStart =
+        (m_pcmWriteIndex - copyCount + capacity) % capacity;
+    for (qsizetype frame = 0; frame < copyCount; frame++) {
+        const qsizetype source = (sourceStart + frame) % capacity;
+        m_leftSamples[targetOffset + frame] = m_leftPcmRing[source];
+        m_rightSamples[targetOffset + frame] = m_rightPcmRing[source];
     }
+    return static_cast<int>(copyCount);
+}
+
+bool VividMediaBridge::configureSpectrumTransform(int sampleRate)
+{
+    if (sampleRate <= 0)
+        return false;
+
+    SpectrumConfiguration configuration;
+    configuration.sampleRate = sampleRate;
+    configuration.fftSize = static_cast<int>(
+        std::max(static_cast<double>(sampleRate) / AudioReferenceSampleRate, 1.0) *
+        AudioBandsPerChannel * AudioWindowParameter
+    );
+    configuration.analysisBinCount = static_cast<int>(
+        AudioBandsPerChannel * AudioStepParameter
+    );
+    configuration.pcmSampleCount = static_cast<int>(
+        configuration.fftSize -
+        (AudioStepParameter / AudioWindowParameter) * configuration.fftSize
+    );
+    configuration.convolutionSize = 1;
+    while (configuration.convolutionSize < configuration.fftSize * 2 - 1)
+        configuration.convolutionSize <<= 1;
+    if (!configuration.valid())
+        return false;
+
+    const bool planMatches =
+        m_spectrumConfiguration.sampleRate == configuration.sampleRate &&
+        m_spectrumConfiguration.fftSize == configuration.fftSize &&
+        m_spectrumConfiguration.pcmSampleCount == configuration.pcmSampleCount &&
+        m_spectrumConfiguration.analysisBinCount == configuration.analysisBinCount &&
+        m_spectrumConfiguration.convolutionSize == configuration.convolutionSize &&
+        m_audioChirpReal.size() == configuration.fftSize &&
+        m_audioKernelReal.size() == configuration.convolutionSize;
+    m_spectrumConfiguration = configuration;
+
+    const int captureFramesPerTick = static_cast<int>(
+        (static_cast<int64_t>(sampleRate) * AudioUpdateIntervalMs + 999) / 1000
+    );
+    const int ringCapacity =
+        configuration.pcmSampleCount + captureFramesPerTick * 2;
+    m_leftPcmRing.fill(0.0f, ringCapacity);
+    m_rightPcmRing.fill(0.0f, ringCapacity);
+    m_leftSamples.fill(0.0f, configuration.pcmSampleCount);
+    m_rightSamples.fill(0.0f, configuration.pcmSampleCount);
+
+    if (planMatches) {
+        resetSpectrumState();
+        return true;
+    }
+
+    m_audioChirpReal.fill(0.0, configuration.fftSize);
+    m_audioChirpImag.fill(0.0, configuration.fftSize);
+    m_audioKernelReal.fill(0.0, configuration.convolutionSize);
+    m_audioKernelImag.fill(0.0, configuration.convolutionSize);
+
+    /*
+     * Bluestein preserves Wallpaper Engine's sample-rate-derived, potentially
+     * non-power-of-two transform length. The immutable convolution kernel is
+     * rebuilt only when the PulseAudio server mix rate changes.
+     */
+    for (int index = 0; index < configuration.fftSize; index++) {
+        const qint64 squared = static_cast<qint64>(index) * index;
+        const double angle = Pi * (squared % (configuration.fftSize * 2)) /
+            configuration.fftSize;
+        const double cosine = std::cos(angle);
+        const double sine = std::sin(angle);
+        m_audioChirpReal[index] = cosine;
+        m_audioChirpImag[index] = -sine;
+        m_audioKernelReal[index] = cosine;
+        m_audioKernelImag[index] = sine;
+        if (index > 0) {
+            m_audioKernelReal[configuration.convolutionSize - index] = cosine;
+            m_audioKernelImag[configuration.convolutionSize - index] = sine;
+        }
+    }
+    transformRadix2InPlace(m_audioKernelReal, m_audioKernelImag, false);
+    resetSpectrumState();
+    return true;
 }
 
 void VividMediaBridge::resetSpectrumState()
 {
-    m_leftSamples.fill(0.0f, AudioSampleBufferSize);
-    m_rightSamples.fill(0.0f, AudioSampleBufferSize);
     m_audioFrame.fill(0.0, AudioFrameLength);
-    m_lastAudioEmitUsec = 0;
+    m_leftPcmRing.fill(0.0f);
+    m_rightPcmRing.fill(0.0f);
+    m_leftSamples.fill(0.0f);
+    m_rightSamples.fill(0.0f);
+    m_pcmWriteIndex = 0;
+    m_pcmFramesAvailable = 0;
+    m_pcmFramesWritten = 0;
+    m_lastAnalyzedFramesWritten = 0;
 
-    auto initState = [](SpectrumState& state) {
-        state.smoothed.fill(0.0, AudioBandsPerChannel);
-        state.lastDb.fill(AudioMinDb, AudioBandsPerChannel);
-        state.bandDb.fill(0.0, AudioBandsPerChannel);
-        state.normalized.fill(0.0, AudioBandsPerChannel);
-        state.horizontal.fill(0.0, AudioBandsPerChannel);
-        state.real.fill(0.0, AudioFftSize);
-        state.imag.fill(0.0, AudioFftSize);
-        state.magnitudes.fill(0.0, AudioFftSize / 2 + 1);
-        state.normalizedMagnitudes.fill(0.0, AudioFftSize / 2 + 1);
-        state.binDb.fill(0.0, AudioFftSize / 2 + 1);
+    if (!m_spectrumConfiguration.valid())
+        return;
+
+    const int convolutionSize = m_spectrumConfiguration.convolutionSize;
+    auto initState = [convolutionSize](SpectrumState& state) {
+        state.real.fill(0.0, convolutionSize);
+        state.imag.fill(0.0, convolutionSize);
+        state.values.fill(0.0, AudioBandsPerChannel);
     };
     initState(m_leftSpectrum);
     initState(m_rightSpectrum);
 }
 
 QVector<double> VividMediaBridge::processSpectrumFrame(const QVector<float>& pcm,
-                                                           SpectrumState& state)
+                                                        SpectrumState& state)
 {
-    double sumSquares = 0.0;
-    for (float sample : pcm)
-        sumSquares += static_cast<double>(sample) * sample;
-    const double rms =
-        std::sqrt(sumSquares / static_cast<double>(std::max<qsizetype>(1, pcm.size())) + 1e-12);
-    if (rms < AudioSilenceRmsThreshold) {
-        for (double& value : state.smoothed)
-            value *= 0.82;
-        state.lastDb.fill(AudioMinDb);
-        return state.smoothed;
-    }
-
+    const SpectrumConfiguration& configuration = m_spectrumConfiguration;
     std::fill(state.real.begin(), state.real.end(), 0.0);
     std::fill(state.imag.begin(), state.imag.end(), 0.0);
-    for (int i = 0; i < AudioFftSize; i++)
-        state.real[i] = static_cast<double>(pcm.value(i)) * m_window[i];
 
-    for (int i = 1, j = 0; i < AudioFftSize; i++) {
-        int bit = AudioFftSize >> 1;
-        while (j & bit) {
-            j ^= bit;
-            bit >>= 1;
-        }
-        j ^= bit;
-        if (i < j) {
-            std::swap(state.real[i], state.real[j]);
-            std::swap(state.imag[i], state.imag[j]);
-        }
+    /*
+     * Wallpaper Engine fills the sample-rate-derived populated prefix from PCM
+     * and leaves the remaining slots at the encoding of a zero sample. This is
+     * deliberately not a conventional real-input FFT or a windowed spectrum.
+     */
+    for (int index = 0; index < configuration.fftSize; index++) {
+        const double sample = index < configuration.pcmSampleCount
+            ? static_cast<double>(pcm.value(index))
+            : 0.0;
+        const double inputReal = AudioInputBias * (sample + 1.0);
+        const double inputImag = 1.0 / inputReal;
+        const double chirpReal = m_audioChirpReal[index];
+        const double chirpImag = m_audioChirpImag[index];
+        state.real[index] = inputReal * chirpReal - inputImag * chirpImag;
+        state.imag[index] = inputReal * chirpImag + inputImag * chirpReal;
     }
 
-    for (int size = 2; size <= AudioFftSize; size <<= 1) {
-        const int halfSize = size >> 1;
-        const double theta = (-2.0 * Pi) / size;
-        const double phaseRealStep = std::cos(theta);
-        const double phaseImagStep = std::sin(theta);
-        for (int offset = 0; offset < AudioFftSize; offset += size) {
-            double phaseReal = 1.0;
-            double phaseImag = 0.0;
-            for (int i = 0; i < halfSize; i++) {
-                const int even = offset + i;
-                const int odd = even + halfSize;
-                const double oddReal =
-                    state.real[odd] * phaseReal - state.imag[odd] * phaseImag;
-                const double oddImag =
-                    state.real[odd] * phaseImag + state.imag[odd] * phaseReal;
-                state.real[odd] = state.real[even] - oddReal;
-                state.imag[odd] = state.imag[even] - oddImag;
-                state.real[even] += oddReal;
-                state.imag[even] += oddImag;
-                const double nextPhaseReal =
-                    phaseReal * phaseRealStep - phaseImag * phaseImagStep;
-                const double nextPhaseImag =
-                    phaseReal * phaseImagStep + phaseImag * phaseRealStep;
-                phaseReal = nextPhaseReal;
-                phaseImag = nextPhaseImag;
-            }
-        }
+    transformRadix2InPlace(state.real, state.imag, false);
+    for (int index = 0; index < configuration.convolutionSize; index++) {
+        const double valueReal = state.real[index];
+        const double valueImag = state.imag[index];
+        const double kernelReal = m_audioKernelReal[index];
+        const double kernelImag = m_audioKernelImag[index];
+        state.real[index] = valueReal * kernelReal - valueImag * kernelImag;
+        state.imag[index] = valueReal * kernelImag + valueImag * kernelReal;
+    }
+    transformRadix2InPlace(state.real, state.imag, true);
+
+    for (int index = 0; index < configuration.fftSize; index++) {
+        const double valueReal = state.real[index];
+        const double valueImag = state.imag[index];
+        const double chirpReal = m_audioChirpReal[index];
+        const double chirpImag = m_audioChirpImag[index];
+        state.real[index] = valueReal * chirpReal - valueImag * chirpImag;
+        state.imag[index] = valueReal * chirpImag + valueImag * chirpReal;
     }
 
-    for (int i = 0; i < state.magnitudes.size(); i++) {
-        const double magnitude =
-            std::sqrt(state.real[i] * state.real[i] + state.imag[i] * state.imag[i]);
-        const double normalized =
-            clamp01((magnitude / m_magnitudeReference) * AudioSpectrumOutputGain);
-        state.magnitudes[i] = magnitude;
-        state.normalizedMagnitudes[i] = normalized;
-        state.binDb[i] = normalized <= 0.0
-            ? AudioMinDb
-            : clip(20.0 * std::log10(normalized + 1e-12), AudioMinDb, AudioMaxDb);
+    state.values.fill(0.0);
+    int previousBand = 0;
+    for (int bin = 1; bin < configuration.analysisBinCount; bin++) {
+        const double realValue = state.real[bin];
+        const double imagValue = state.imag[bin];
+        double magnitudeSquared = realValue * realValue + imagValue * imagValue;
+        if (!std::isfinite(magnitudeSquared))
+            magnitudeSquared = 0.0;
+
+        const double position =
+            static_cast<double>(bin - 1) / (configuration.analysisBinCount - 1);
+        const int rawBand = static_cast<int>(
+            std::pow(position, AudioBandExponent) * AudioBandsPerChannel
+        ) % AudioBandsPerChannel;
+        const int band = std::min(rawBand, previousBand + 1);
+        previousBand = band;
+
+        const double weight = AudioWeightCenter -
+            std::cos(Pi * position) * (1.0 - AudioWeightCenter);
+        const double magnitude = std::sqrt(magnitudeSquared * weight);
+        state.values[band] = std::max(state.values[band], magnitude);
     }
 
-    auto interpolate = [](const QVector<double>& xs, const QVector<double>& ys, double target) {
-        if (xs.isEmpty() || ys.isEmpty())
-            return AudioMinDb;
-        if (target <= xs.first())
-            return ys.first();
-        const int last = std::min(xs.size(), ys.size()) - 1;
-        if (target >= xs[last])
-            return ys[last];
-        int lower = 0;
-        while (lower < last && xs[lower + 1] < target)
-            lower++;
-        const int upper = std::min(last, lower + 1);
-        const double lowerX = xs[lower];
-        const double upperX = xs[upper];
-        if (upperX <= lowerX)
-            return ys[lower];
-        const double mix = (target - lowerX) / (upperX - lowerX);
-        return ys[lower] + (ys[upper] - ys[lower]) * mix;
-    };
-
-    for (int i = 0; i < AudioBandsPerChannel; i++) {
-        const double centerMagnitude =
-            interpolate(m_frequenciesHz, state.normalizedMagnitudes, m_bandCentersHz[i]);
-        double powerSum = 0.0;
-        int sampleCount = 0;
-        double peakMagnitude = 0.0;
-        const auto [begin, end] = m_bandBinRanges[i];
-        for (int bin = begin; bin < end && bin < state.normalizedMagnitudes.size(); bin++) {
-            const double magnitude = state.normalizedMagnitudes[bin];
-            powerSum += magnitude * magnitude;
-            peakMagnitude = std::max(peakMagnitude, magnitude);
-            sampleCount++;
-        }
-        double bandMagnitude = centerMagnitude;
-        if (sampleCount > 0) {
-            const double rmsMagnitude = std::sqrt(powerSum / sampleCount + 1e-12);
-            const double blended =
-                peakMagnitude * AudioBandPeakBlend + rmsMagnitude * (1.0 - AudioBandPeakBlend);
-            bandMagnitude = std::max(centerMagnitude, blended);
-        }
-        bandMagnitude = clamp01(bandMagnitude);
-        state.normalized[i] = bandMagnitude;
-        state.bandDb[i] = bandMagnitude <= 0.0
-            ? AudioMinDb
-            : clip(20.0 * std::log10(bandMagnitude + 1e-12), AudioMinDb, AudioMaxDb);
-    }
-
-    state.lastDb = state.bandDb;
-    for (int i = 0; i < AudioBandsPerChannel; i++) {
-        const double left = state.normalized[std::max(0, i - 1)];
-        const double center = state.normalized[i];
-        const double right = state.normalized[std::min(AudioBandsPerChannel - 1, i + 1)];
-        state.horizontal[i] = left * 0.08 + center * 0.84 + right * 0.08;
-    }
-    for (int i = 0; i < AudioBandsPerChannel; i++) {
-        const double target = state.horizontal[i];
-        const double current = state.smoothed[i];
-        state.smoothed[i] = target > current
-            ? current * 0.25 + target * 0.75
-            : current * 0.75 + target * 0.25;
-    }
-    return state.smoothed;
+    const double outputScale = AudioOutputGain * 0.001 * configuration.analysisBinCount /
+        (configuration.fftSize * 0.5);
+    for (double& value : state.values)
+        value *= outputScale;
+    return state.values;
 }

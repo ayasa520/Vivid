@@ -6,7 +6,7 @@
 
 namespace vivid::protocol {
 
-inline constexpr std::uint32_t VIVID_DISPLAY_AUDIO_SAMPLES_BIN_MAX_COUNT = 512u;
+inline constexpr std::uint32_t VIVID_DISPLAY_AUDIO_SAMPLES_BIN_MAX_COUNT = 128u;
 inline constexpr std::uint32_t VIVID_DISPLAY_AXIS_CONTINUOUS = 2u;
 inline constexpr std::uint32_t VIVID_DISPLAY_AXIS_FINGER = 1u;
 inline constexpr std::uint32_t VIVID_DISPLAY_AXIS_WHEEL = 0u;

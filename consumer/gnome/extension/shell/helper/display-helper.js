@@ -701,22 +701,24 @@ const MEDIA_PALETTE_RANK_POPULATION_FLOOR = 0.35;
 const MEDIA_PALETTE_RANK_LUMINANCE_WEIGHT = 1.15;
 const MEDIA_PALETTE_RANK_TARGET_LUMINANCE = 0.52;
 
-const WEB_AUDIO_UPDATE_INTERVAL_NS = 16_666_667;
+const WEB_AUDIO_UPDATE_INTERVAL_NS = 33_000_000;
+const WEB_AUDIO_UPDATE_INTERVAL_MS = Math.max(1, Math.round(WEB_AUDIO_UPDATE_INTERVAL_NS / 1_000_000));
 const WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL = 64;
 const WEB_AUDIO_FRAME_LENGTH = WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL * 2;
-const WEB_AUDIO_POLL_INTERVAL_MS = Math.max(1, Math.round(WEB_AUDIO_UPDATE_INTERVAL_NS / 1_000_000));
+const WEB_AUDIO_CAPTURE_POLL_INTERVAL_MS = 5;
+const WEB_AUDIO_CAPTURE_LATENCY_US = Math.max(1, Math.round(WEB_AUDIO_UPDATE_INTERVAL_NS / 1000));
+const WEB_AUDIO_CAPTURE_BUFFER_US = WEB_AUDIO_CAPTURE_LATENCY_US * 2;
+const WEB_AUDIO_CAPTURE_QUEUE_BUFFERS = Math.ceil(
+    WEB_AUDIO_CAPTURE_BUFFER_US / WEB_AUDIO_CAPTURE_LATENCY_US
+);
 const WEB_AUDIO_RESTART_DELAY_MS = 1000;
-const WEB_AUDIO_SAMPLE_RATE = 44100;
-const WEB_AUDIO_FFT_SIZE = 2048;
-const WEB_AUDIO_SLOW_PROCESSING_LOG_THRESHOLD_US = 8000;
-const WEB_AUDIO_FRAME_LOG_INTERVAL_FRAMES = Math.max(1, Math.round(5000 / WEB_AUDIO_POLL_INTERVAL_MS));
-const WEB_AUDIO_MIN_FREQUENCY_HZ = 30;
-const WEB_AUDIO_MAX_FREQUENCY_HZ = 18000;
-const WEB_AUDIO_MIN_DB = -80;
-const WEB_AUDIO_MAX_DB = 0;
-const WEB_AUDIO_SILENCE_RMS_THRESHOLD = 0.003;
-const WEB_AUDIO_SPECTRUM_OUTPUT_GAIN = 4.0;
-const WEB_AUDIO_BAND_PEAK_BLEND = 0.35;
+const WEB_AUDIO_REFERENCE_SAMPLE_RATE = 44100;
+const WEB_AUDIO_WINDOW_PARAMETER = 30.0;
+const WEB_AUDIO_STEP_PARAMETER = 10.0;
+const WEB_AUDIO_INPUT_BIAS = 127.0;
+const WEB_AUDIO_BAND_EXPONENT = 0.25;
+const WEB_AUDIO_WEIGHT_CENTER = 0.5009999871;
+const WEB_AUDIO_OUTPUT_GAIN = 1.0;
 const AUDIO_SAMPLE_MAX_VALUES = VIVID_DISPLAY_AUDIO_SAMPLES_BIN_MAX_COUNT;
 
 const cloneArray = values => {
@@ -783,14 +785,13 @@ const normalizeMediaStatePayload = payload => {
 };
 
 const normalizeAudioSamplesPayload = samples => {
-    if (!samples || typeof samples.length !== 'number')
+    if (!samples || samples.length !== AUDIO_SAMPLE_MAX_VALUES)
         return buildSilentWebAudioFrame();
 
-    const limit = Math.min(AUDIO_SAMPLE_MAX_VALUES, Math.max(0, samples.length));
-    const normalized = [];
-    for (let index = 0; index < limit; index++) {
+    const normalized = buildSilentWebAudioFrame();
+    for (let index = 0; index < AUDIO_SAMPLE_MAX_VALUES; index++) {
         const value = Number(samples[index] ?? 0);
-        normalized.push(Number.isFinite(value) ? clipNumber(value, 0, 1) : 0);
+        normalized[index] = Number.isFinite(value) && value > 0 ? value : 0;
     }
     return normalized;
 };
@@ -1443,193 +1444,80 @@ class SceneMediaMonitor {
 
 const buildSilentWebAudioFrame = () => new Array(WEB_AUDIO_FRAME_LENGTH).fill(0);
 
-const buildLogBandEdgesHz = () => Array.from(
-    {length: WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL + 1},
-    (_unused, index) => {
-        const t = index / WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL;
-        return WEB_AUDIO_MIN_FREQUENCY_HZ *
-            Math.pow(WEB_AUDIO_MAX_FREQUENCY_HZ / WEB_AUDIO_MIN_FREQUENCY_HZ, t);
-    }
-);
+/**
+ * Read the PulseAudio default sink mix rate instead of asking GStreamer to choose a
+ * client-side default. Wallpaper Engine derives its transform length from the
+ * render endpoint sample rate, so resampling a 48 kHz desktop mix to 44.1 kHz
+ * changes the FFT length, populated input count, leakage shape, and output gain.
+ */
+const detectPulseDefaultSinkSampleRate = () => {
+    const pactl = GLib.find_program_in_path('pactl');
+    if (!pactl)
+        throw new Error('pactl is required to query the PulseAudio server sample rate');
 
-const WEB_AUDIO_BAND_EDGES_HZ = buildLogBandEdgesHz();
-const WEB_AUDIO_BAND_CENTERS_HZ = WEB_AUDIO_BAND_EDGES_HZ.slice(0, -1).map((edge, index) =>
-    Math.sqrt(edge * WEB_AUDIO_BAND_EDGES_HZ[index + 1])
-);
-const WEB_AUDIO_FREQUENCIES_HZ = Array.from(
-    {length: Math.floor(WEB_AUDIO_FFT_SIZE / 2) + 1},
-    (_unused, index) => (index * WEB_AUDIO_SAMPLE_RATE) / WEB_AUDIO_FFT_SIZE
-);
-const WEB_AUDIO_WINDOW = Float32Array.from(
-    {length: WEB_AUDIO_FFT_SIZE},
-    (_unused, index) => 0.5 * (1 - Math.cos((2 * Math.PI * index) / (WEB_AUDIO_FFT_SIZE - 1)))
-);
-const WEB_AUDIO_MAGNITUDE_REFERENCE = Math.max(
-    1,
-    WEB_AUDIO_WINDOW.reduce((sum, sample) => sum + sample, 0) * 0.5
-);
-const WEB_AUDIO_BAND_BIN_RANGES = WEB_AUDIO_BAND_EDGES_HZ.slice(0, -1).map((_edge, index) => {
-    const low = WEB_AUDIO_BAND_EDGES_HZ[index];
-    const high = WEB_AUDIO_BAND_EDGES_HZ[index + 1];
-    let begin = 0;
-    while (begin < WEB_AUDIO_FREQUENCIES_HZ.length && WEB_AUDIO_FREQUENCIES_HZ[begin] < low)
-        begin++;
-    let end = begin;
-    while (end < WEB_AUDIO_FREQUENCIES_HZ.length && WEB_AUDIO_FREQUENCIES_HZ[end] < high)
-        end++;
-    return {begin, end};
-});
-
-const createSpectrumProcessorState = () => ({
-    smoothed: new Float32Array(WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL),
-    lastDb: new Float32Array(WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL).fill(WEB_AUDIO_MIN_DB),
-    bandDb: new Float32Array(WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL),
-    normalized: new Float32Array(WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL),
-    horizontallySmoothed: new Float32Array(WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL),
-    real: new Float64Array(WEB_AUDIO_FFT_SIZE),
-    imag: new Float64Array(WEB_AUDIO_FFT_SIZE),
-    magnitudes: new Float32Array(Math.floor(WEB_AUDIO_FFT_SIZE / 2) + 1),
-    normalizedMagnitudes: new Float32Array(Math.floor(WEB_AUDIO_FFT_SIZE / 2) + 1),
-    binDb: new Float32Array(Math.floor(WEB_AUDIO_FFT_SIZE / 2) + 1),
-});
-
-const appendInterleavedStereoChunk = (leftBuffer, rightBuffer, interleaved, frameCount) => {
-    if (!(leftBuffer instanceof Float32Array) || !(rightBuffer instanceof Float32Array) ||
-        !(interleaved instanceof Float32Array) || frameCount <= 0)
-        return;
-
-    const capacity = Math.min(leftBuffer.length, rightBuffer.length);
-    if (frameCount >= capacity) {
-        const startFrame = frameCount - capacity;
-        for (let i = 0; i < capacity; i++) {
-            const sourceIndex = (startFrame + i) * 2;
-            const left = interleaved[sourceIndex] ?? 0;
-            leftBuffer[i] = left;
-            rightBuffer[i] = interleaved[sourceIndex + 1] ?? left;
+    const runJson = argumentsList => {
+        const process = Gio.Subprocess.new(
+            [pactl, '-f', 'json', ...argumentsList],
+            Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
+        );
+        const [communicated, stdout, stderr] = process.communicate_utf8(null, null);
+        if (!communicated || !process.get_successful()) {
+            throw new Error(
+                `pactl ${argumentsList.join(' ')} failed: ${String(stderr ?? '').trim()}`
+            );
         }
-        return;
-    }
+        return JSON.parse(stdout);
+    };
 
-    leftBuffer.copyWithin(0, frameCount);
-    rightBuffer.copyWithin(0, frameCount);
-    const writeOffset = capacity - frameCount;
-    for (let i = 0; i < frameCount; i++) {
-        const sourceIndex = i * 2;
-        const left = interleaved[sourceIndex] ?? 0;
-        leftBuffer[writeOffset + i] = left;
-        rightBuffer[writeOffset + i] = interleaved[sourceIndex + 1] ?? left;
-    }
+    const serverInfo = runJson(['info']);
+    const sinks = runJson(['list', 'sinks']);
+    const defaultSink = Array.isArray(sinks)
+        ? sinks.find(sink => sink?.name === serverInfo.default_sink_name)
+        : null;
+    const specification = String(
+        defaultSink?.sample_specification ?? serverInfo.default_sample_specification ?? ''
+    );
+    const match = specification.match(/\b(\d+)Hz\b/);
+    const sampleRate = match ? Number(match[1]) : 0;
+    if (!Number.isInteger(sampleRate) || sampleRate <= 0)
+        throw new Error(`invalid PulseAudio sample specification: ${specification}`);
+    return sampleRate;
 };
 
-const interpolateLinearly = (xs, ys, target) => {
-    if (!Array.isArray(xs) || !(ys instanceof Float32Array) || xs.length === 0 || ys.length === 0)
-        return WEB_AUDIO_MIN_DB;
-
-    if (target <= xs[0])
-        return ys[0];
-    const lastIndex = Math.min(xs.length, ys.length) - 1;
-    if (target >= xs[lastIndex])
-        return ys[lastIndex];
-
-    let lowerIndex = 0;
-    while (lowerIndex < lastIndex && xs[lowerIndex + 1] < target)
-        lowerIndex++;
-
-    const upperIndex = Math.min(lastIndex, lowerIndex + 1);
-    const lowerX = xs[lowerIndex];
-    const upperX = xs[upperIndex];
-    if (upperX <= lowerX)
-        return ys[lowerIndex];
-
-    const mix = (target - lowerX) / (upperX - lowerX);
-    return ys[lowerIndex] + (ys[upperIndex] - ys[lowerIndex]) * mix;
-};
-
-const resampleSpectrumValues = (values, resolution) => {
-    const targetSize = Math.max(0, Number(resolution) || 0);
-    const sourceSize = values?.length ?? 0;
-    const result = new Array(targetSize).fill(0);
-    if (targetSize === 0 || sourceSize === 0)
-        return result;
-
-    if (targetSize === sourceSize)
-        return Array.from(values);
-
-    for (let i = 0; i < targetSize; i++) {
-        const sourcePosition = ((i + 0.5) * sourceSize / targetSize) - 0.5;
-        const clampedPosition = clipNumber(sourcePosition, 0, sourceSize - 1);
-        const lowerIndex = Math.floor(clampedPosition);
-        const upperIndex = Math.min(sourceSize - 1, lowerIndex + 1);
-        const mix = clampedPosition - lowerIndex;
-        const lowerValue = Number(values[lowerIndex] ?? 0);
-        const upperValue = Number(values[upperIndex] ?? 0);
-        result[i] = lowerValue + (upperValue - lowerValue) * mix;
-    }
-    return result;
-};
-
-const shouldLogWebAudioFrame = frameCount =>
-    frameCount <= 8 || frameCount % WEB_AUDIO_FRAME_LOG_INTERVAL_FRAMES === 0;
-
-const normalizeAbsoluteSpectrumMagnitude = magnitude =>
-    clipNumber(((Number(magnitude) || 0) / WEB_AUDIO_MAGNITUDE_REFERENCE) * WEB_AUDIO_SPECTRUM_OUTPUT_GAIN, 0, 1);
-
-const magnitudeToDb = magnitude => {
-    if (!Number.isFinite(magnitude) || magnitude <= 0)
-        return WEB_AUDIO_MIN_DB;
-    return clipNumber(20 * Math.log10(magnitude + 1e-12), WEB_AUDIO_MIN_DB, WEB_AUDIO_MAX_DB);
-};
-
-const computeSceneLow16Pair = values => {
-    const bins16 = resampleSpectrumValues(values, 16);
-    return [Number(bins16[0] ?? 0), Number(bins16[1] ?? 0)];
-};
-
-const computeSceneLow16Average = (leftPair, rightPair) =>
-    (Number(leftPair[0] ?? 0) + Number(leftPair[1] ?? 0) +
-        Number(rightPair[0] ?? 0) + Number(rightPair[1] ?? 0)) * 0.25;
-
-const formatSpectrumPair = values =>
-    `[${Number(values[0] ?? 0).toFixed(4)}, ${Number(values[1] ?? 0).toFixed(4)}]`;
-
-const computeRfftMagnitudes = (pcm, state) => {
-    const real = state.real;
-    const imag = state.imag;
-    const magnitudes = state.magnitudes;
-
-    real.fill(0);
-    imag.fill(0);
-
-    for (let i = 0; i < WEB_AUDIO_FFT_SIZE; i++)
-        real[i] = (pcm[i] ?? 0) * WEB_AUDIO_WINDOW[i];
-
-    for (let i = 1, j = 0; i < WEB_AUDIO_FFT_SIZE; i++) {
-        let bit = WEB_AUDIO_FFT_SIZE >> 1;
-        while (j & bit) {
-            j ^= bit;
+/**
+ * Execute an unscaled forward or scaled inverse radix-2 FFT in place. Wallpaper
+ * Engine uses a sample-rate-derived transform length that is generally not a
+ * power of two, so Bluestein wraps this primitive without changing that length.
+ */
+const transformRadix2InPlace = (real, imag, inverse) => {
+    const size = Math.min(real.length, imag.length);
+    for (let index = 1, reversed = 0; index < size; index++) {
+        let bit = size >> 1;
+        while (reversed & bit) {
+            reversed ^= bit;
             bit >>= 1;
         }
-        j ^= bit;
-        if (i < j) {
-            const realValue = real[i];
-            real[i] = real[j];
-            real[j] = realValue;
-            const imagValue = imag[i];
-            imag[i] = imag[j];
-            imag[j] = imagValue;
+        reversed ^= bit;
+        if (index < reversed) {
+            const realValue = real[index];
+            real[index] = real[reversed];
+            real[reversed] = realValue;
+            const imagValue = imag[index];
+            imag[index] = imag[reversed];
+            imag[reversed] = imagValue;
         }
     }
 
-    for (let size = 2; size <= WEB_AUDIO_FFT_SIZE; size <<= 1) {
-        const halfSize = size >> 1;
-        const theta = (-2 * Math.PI) / size;
-        const phaseRealStep = Math.cos(theta);
-        const phaseImagStep = Math.sin(theta);
-        for (let offset = 0; offset < WEB_AUDIO_FFT_SIZE; offset += size) {
+    for (let blockSize = 2; blockSize <= size; blockSize <<= 1) {
+        const halfSize = blockSize >> 1;
+        const angle = (inverse ? 2 : -2) * Math.PI / blockSize;
+        const phaseRealStep = Math.cos(angle);
+        const phaseImagStep = Math.sin(angle);
+        for (let offset = 0; offset < size; offset += blockSize) {
             let phaseReal = 1;
             let phaseImag = 0;
-            for (let i = 0; i < halfSize; i++) {
-                const evenIndex = offset + i;
+            for (let index = 0; index < halfSize; index++) {
+                const evenIndex = offset + index;
                 const oddIndex = evenIndex + halfSize;
                 const oddReal = real[oddIndex] * phaseReal - imag[oddIndex] * phaseImag;
                 const oddImag = real[oddIndex] * phaseImag + imag[oddIndex] * phaseReal;
@@ -1645,105 +1533,221 @@ const computeRfftMagnitudes = (pcm, state) => {
         }
     }
 
-    for (let index = 0; index < magnitudes.length; index++)
-        magnitudes[index] = Math.hypot(real[index], imag[index]);
-    return magnitudes;
+    if (inverse) {
+        for (let index = 0; index < size; index++) {
+            real[index] /= size;
+            imag[index] /= size;
+        }
+    }
 };
 
-const applyHorizontalSmoothing = (values, target) => {
-    for (let i = 0; i < values.length; i++) {
-        const left = values[Math.max(0, i - 1)] ?? 0;
-        const center = values[i] ?? 0;
-        const right = values[Math.min(values.length - 1, i + 1)] ?? 0;
-        target[i] = left * 0.08 + center * 0.84 + right * 0.08;
+/**
+ * Precompute the convolution kernel for the exact complex DFT length. The plan
+ * is immutable and shared by both channels; only per-channel workspaces mutate
+ * while processing captured PCM.
+ */
+const createBluesteinPlan = transformSize => {
+    let convolutionSize = 1;
+    while (convolutionSize < transformSize * 2 - 1)
+        convolutionSize <<= 1;
+
+    const chirpReal = new Float64Array(transformSize);
+    const chirpImag = new Float64Array(transformSize);
+    const kernelReal = new Float64Array(convolutionSize);
+    const kernelImag = new Float64Array(convolutionSize);
+    for (let index = 0; index < transformSize; index++) {
+        const angle = Math.PI * ((index * index) % (transformSize * 2)) / transformSize;
+        const cosine = Math.cos(angle);
+        const sine = Math.sin(angle);
+        chirpReal[index] = cosine;
+        chirpImag[index] = -sine;
+        kernelReal[index] = cosine;
+        kernelImag[index] = sine;
+        if (index > 0) {
+            kernelReal[convolutionSize - index] = cosine;
+            kernelImag[convolutionSize - index] = sine;
+        }
     }
-    return target;
+    transformRadix2InPlace(kernelReal, kernelImag, false);
+    return {convolutionSize, chirpReal, chirpImag, kernelReal, kernelImag};
 };
 
-const processSpectrumFrame = (pcm, state) => {
-    if (!(pcm instanceof Float32Array) || !(state?.smoothed instanceof Float32Array)) {
-        return {
-            values: new Float32Array(WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL),
-            dbValues: new Float32Array(WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL).fill(WEB_AUDIO_MIN_DB),
-            rms: 0,
-            framePeak: 0,
-        };
-    }
+const createSpectrumConfiguration = sampleRate => {
+    if (!Number.isInteger(sampleRate) || sampleRate <= 0)
+        throw new Error(`invalid audio sample rate ${sampleRate}`);
 
-    const rms = Math.sqrt(pcm.reduce((sum, sample) => sum + sample * sample, 0) /
-        Math.max(1, pcm.length) + 1e-12);
-    if (rms < WEB_AUDIO_SILENCE_RMS_THRESHOLD) {
-        for (let i = 0; i < WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL; i++)
-            state.smoothed[i] *= 0.82;
-        state.lastDb.fill(WEB_AUDIO_MIN_DB);
-        return {
-            values: state.smoothed,
-            dbValues: state.lastDb,
-            rms,
-            framePeak: 0,
-        };
-    }
-
-    const magnitudes = computeRfftMagnitudes(pcm, state);
-    const normalizedMagnitudes = state.normalizedMagnitudes;
-    let framePeak = 0;
-    const binDb = state.binDb;
-    for (let i = 0; i < magnitudes.length; i++) {
-        const normalizedMagnitude = normalizeAbsoluteSpectrumMagnitude(magnitudes[i]);
-        normalizedMagnitudes[i] = normalizedMagnitude;
-        framePeak = Math.max(framePeak, normalizedMagnitude);
-        binDb[i] = magnitudeToDb(normalizedMagnitude);
-    }
-
-    const bandDb = state.bandDb;
-    const normalized = state.normalized;
-    for (let i = 0; i < WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL; i++) {
-        const centerMagnitude = interpolateLinearly(
-            WEB_AUDIO_FREQUENCIES_HZ,
-            normalizedMagnitudes,
-            WEB_AUDIO_BAND_CENTERS_HZ[i]
-        );
-
-        let powerSum = 0;
-        let sampleCount = 0;
-        let peakMagnitude = 0;
-        const {begin, end} = WEB_AUDIO_BAND_BIN_RANGES[i];
-        for (let bin = begin; bin < end; bin++) {
-            const magnitude = normalizedMagnitudes[bin] ?? 0;
-            powerSum += magnitude * magnitude;
-            peakMagnitude = Math.max(peakMagnitude, magnitude);
-            sampleCount++;
-        }
-
-        let bandMagnitude = centerMagnitude;
-        if (sampleCount > 0) {
-            const rmsMagnitude = Math.sqrt(powerSum / sampleCount + 1e-12);
-            const blendedPeakMagnitude =
-                peakMagnitude * WEB_AUDIO_BAND_PEAK_BLEND + rmsMagnitude * (1 - WEB_AUDIO_BAND_PEAK_BLEND);
-            bandMagnitude = Math.max(centerMagnitude, blendedPeakMagnitude);
-        }
-
-        bandMagnitude = clipNumber(bandMagnitude, 0, 1);
-        normalized[i] = bandMagnitude;
-        bandDb[i] = magnitudeToDb(bandMagnitude);
-    }
-
-    state.lastDb.set(bandDb);
-    const horizontallySmoothed = applyHorizontalSmoothing(normalized, state.horizontallySmoothed);
-    for (let i = 0; i < WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL; i++) {
-        const target = horizontallySmoothed[i];
-        const current = state.smoothed[i];
-        state.smoothed[i] = target > current
-            ? current * 0.25 + target * 0.75
-            : current * 0.75 + target * 0.25;
-    }
+    const fftSize = Math.trunc(
+        Math.max(sampleRate / WEB_AUDIO_REFERENCE_SAMPLE_RATE, 1.0) *
+        WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL *
+        WEB_AUDIO_WINDOW_PARAMETER
+    );
+    const analysisBinCount = Math.trunc(
+        WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL * WEB_AUDIO_STEP_PARAMETER
+    );
+    const pcmSampleCount = Math.trunc(
+        fftSize - (WEB_AUDIO_STEP_PARAMETER / WEB_AUDIO_WINDOW_PARAMETER) * fftSize
+    );
 
     return {
-        values: state.smoothed,
-        dbValues: state.lastDb,
-        rms,
-        framePeak,
+        sampleRate,
+        fftSize,
+        pcmSampleCount,
+        analysisBinCount,
+        plan: createBluesteinPlan(fftSize),
     };
+};
+
+const createSpectrumProcessorState = configuration => ({
+    real: new Float64Array(configuration.plan.convolutionSize),
+    imag: new Float64Array(configuration.plan.convolutionSize),
+    values: new Float32Array(WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL),
+});
+
+/**
+ * Packet boundaries from PulseAudio and GStreamer are transport details. This
+ * ring preserves the continuous PCM timeline and lets the independent 33 ms
+ * analysis clock take the newest populated Wallpaper Engine window regardless
+ * of how the server split or combined capture buffers.
+ */
+class StereoPcmRing {
+    constructor(capacityFrames) {
+        this._capacity = Math.max(1, Math.trunc(capacityFrames));
+        this._left = new Float32Array(this._capacity);
+        this._right = new Float32Array(this._capacity);
+        this.reset();
+    }
+
+    get totalFrames() {
+        return this._totalFrames;
+    }
+
+    reset() {
+        this._left.fill(0);
+        this._right.fill(0);
+        this._writeIndex = 0;
+        this._availableFrames = 0;
+        this._totalFrames = 0;
+    }
+
+    appendInterleaved(interleaved, frameCount) {
+        if (!(interleaved instanceof Float32Array) || frameCount <= 0)
+            return 0;
+
+        const availableInputFrames = Math.min(
+            Math.trunc(frameCount),
+            Math.floor(interleaved.length / 2)
+        );
+        for (let frame = 0; frame < availableInputFrames; frame++) {
+            const sourceIndex = frame * 2;
+            const left = Number(interleaved[sourceIndex] ?? 0);
+            this._left[this._writeIndex] = left;
+            this._right[this._writeIndex] = Number(interleaved[sourceIndex + 1] ?? left);
+            this._writeIndex = (this._writeIndex + 1) % this._capacity;
+        }
+
+        this._availableFrames = Math.min(
+            this._capacity,
+            this._availableFrames + availableInputFrames
+        );
+        this._totalFrames += availableInputFrames;
+        return availableInputFrames;
+    }
+
+    copyLatest(leftTarget, rightTarget) {
+        if (!(leftTarget instanceof Float32Array) || !(rightTarget instanceof Float32Array) ||
+            leftTarget.length !== rightTarget.length)
+            throw new Error('invalid PCM snapshot buffers');
+
+        leftTarget.fill(0);
+        rightTarget.fill(0);
+        const copyCount = Math.min(leftTarget.length, this._availableFrames);
+        const targetOffset = leftTarget.length - copyCount;
+        const sourceStart = (
+            this._writeIndex - copyCount + this._capacity
+        ) % this._capacity;
+        for (let frame = 0; frame < copyCount; frame++) {
+            const sourceIndex = (sourceStart + frame) % this._capacity;
+            leftTarget[targetOffset + frame] = this._left[sourceIndex];
+            rightTarget[targetOffset + frame] = this._right[sourceIndex];
+        }
+        return copyCount;
+    }
+}
+
+const processSpectrumFrame = (pcm, state, configuration) => {
+    if (!(pcm instanceof Float32Array) || !(state?.values instanceof Float32Array))
+        return new Float32Array(WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL);
+
+    const real = state.real;
+    const imag = state.imag;
+    const plan = configuration.plan;
+    real.fill(0);
+    imag.fill(0);
+
+    /*
+     * Wallpaper Engine derives both counts from the endpoint rate. It fills the
+     * populated prefix from PCM and leaves the remaining complex slots at the
+     * encoding of a zero sample. This biased reciprocal representation is not a
+     * conventional real-input FFT and materially affects the result.
+     */
+    for (let index = 0; index < configuration.fftSize; index++) {
+        const sample = index < configuration.pcmSampleCount ? Number(pcm[index] ?? 0) : 0;
+        const inputReal = WEB_AUDIO_INPUT_BIAS * (sample + 1);
+        const inputImag = 1 / inputReal;
+        const chirpReal = plan.chirpReal[index];
+        const chirpImag = plan.chirpImag[index];
+        real[index] = inputReal * chirpReal - inputImag * chirpImag;
+        imag[index] = inputReal * chirpImag + inputImag * chirpReal;
+    }
+
+    transformRadix2InPlace(real, imag, false);
+    for (let index = 0; index < plan.convolutionSize; index++) {
+        const valueReal = real[index];
+        const valueImag = imag[index];
+        const kernelReal = plan.kernelReal[index];
+        const kernelImag = plan.kernelImag[index];
+        real[index] = valueReal * kernelReal - valueImag * kernelImag;
+        imag[index] = valueReal * kernelImag + valueImag * kernelReal;
+    }
+    transformRadix2InPlace(real, imag, true);
+
+    for (let index = 0; index < configuration.fftSize; index++) {
+        const valueReal = real[index];
+        const valueImag = imag[index];
+        const chirpReal = plan.chirpReal[index];
+        const chirpImag = plan.chirpImag[index];
+        real[index] = valueReal * chirpReal - valueImag * chirpImag;
+        imag[index] = valueReal * chirpImag + valueImag * chirpReal;
+    }
+
+    const values = state.values;
+    values.fill(0);
+    let previousBand = 0;
+    for (let bin = 1; bin < configuration.analysisBinCount; bin++) {
+        const realValue = real[bin];
+        const imagValue = imag[bin];
+        let magnitudeSquared = realValue * realValue + imagValue * imagValue;
+        if (!Number.isFinite(magnitudeSquared))
+            magnitudeSquared = 0;
+
+        const position = (bin - 1) / (configuration.analysisBinCount - 1);
+        const rawBand = Math.trunc(
+            Math.pow(position, WEB_AUDIO_BAND_EXPONENT) * WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL
+        ) % WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL;
+        const band = Math.min(rawBand, previousBand + 1);
+        previousBand = band;
+
+        const weight = WEB_AUDIO_WEIGHT_CENTER -
+            Math.cos(Math.PI * position) * (1 - WEB_AUDIO_WEIGHT_CENTER);
+        const magnitude = Math.sqrt(magnitudeSquared * weight);
+        values[band] = Math.max(values[band], magnitude);
+    }
+
+    const outputScale = WEB_AUDIO_OUTPUT_GAIN * 0.001 * configuration.analysisBinCount /
+        (configuration.fftSize * 0.5);
+    for (let band = 0; band < values.length; band++)
+        values[band] *= outputScale;
+    return values;
 };
 
 const hasGstElementFactory = factoryName => {
@@ -1761,20 +1765,21 @@ class WebAudioVisualizerCapture {
         this._appsink = null;
         this._bus = null;
         this._busSignalIds = [];
-        this._pollSourceId = 0;
+        this._capturePollSourceId = 0;
+        this._analysisSourceId = 0;
         this._processingSourceId = 0;
         this._restartSourceId = 0;
         this._shouldRun = false;
         this._isAvailable = true;
         this._lastFrame = buildSilentWebAudioFrame();
         this._workingFrame = buildSilentWebAudioFrame();
-        this._pendingInterleavedChunk = null;
-        this._pendingInterleavedFrameCount = 0;
-        this._leftSampleBuffer = new Float32Array(WEB_AUDIO_FFT_SIZE * 2);
-        this._rightSampleBuffer = new Float32Array(WEB_AUDIO_FFT_SIZE * 2);
-        this._leftProcessorState = createSpectrumProcessorState();
-        this._rightProcessorState = createSpectrumProcessorState();
-        this._emittedFrameCount = 0;
+        this._configuration = null;
+        this._pcmRing = null;
+        this._leftSampleBuffer = new Float32Array(0);
+        this._rightSampleBuffer = new Float32Array(0);
+        this._leftProcessorState = null;
+        this._rightProcessorState = null;
+        this._lastAnalyzedTotalFrames = 0;
     }
 
     get currentFrame() {
@@ -1790,30 +1795,44 @@ class WebAudioVisualizerCapture {
         this._startPipeline();
     }
 
-    stop({emitSilence = true, reason = 'unspecified'} = {}) {
+    stop({emitSilence = true} = {}) {
         this._shouldRun = false;
         this._cancelRestart();
         this._teardownPipeline();
 
-        if (emitSilence) {
-            log(`audio sample capture stopped reason=${reason}; emitting silence`);
+        if (emitSilence)
             this._emitFrame(buildSilentWebAudioFrame());
-        }
     }
 
     destroy() {
-        this.stop({emitSilence: false, reason: 'destroy'});
+        this.stop({emitSilence: false});
         this._onFrame = null;
     }
 
     _resetSpectrumState() {
+        this._pcmRing?.reset();
         this._leftSampleBuffer.fill(0);
         this._rightSampleBuffer.fill(0);
-        this._leftProcessorState = createSpectrumProcessorState();
-        this._rightProcessorState = createSpectrumProcessorState();
-        this._emittedFrameCount = 0;
-        this._pendingInterleavedChunk = null;
-        this._pendingInterleavedFrameCount = 0;
+        if (this._configuration) {
+            this._leftProcessorState = createSpectrumProcessorState(this._configuration);
+            this._rightProcessorState = createSpectrumProcessorState(this._configuration);
+        }
+        this._workingFrame.fill(0);
+        this._lastAnalyzedTotalFrames = 0;
+    }
+
+    _configureSpectrum(sampleRate) {
+        const configuration = createSpectrumConfiguration(sampleRate);
+        const captureFramesPerTick = Math.ceil(
+            sampleRate * WEB_AUDIO_UPDATE_INTERVAL_MS / 1000
+        );
+        const ringCapacity = configuration.pcmSampleCount + captureFramesPerTick * 2;
+
+        this._configuration = configuration;
+        this._pcmRing = new StereoPcmRing(ringCapacity);
+        this._leftSampleBuffer = new Float32Array(configuration.pcmSampleCount);
+        this._rightSampleBuffer = new Float32Array(configuration.pcmSampleCount);
+        this._resetSpectrumState();
     }
 
     _startPipeline() {
@@ -1838,12 +1857,18 @@ class WebAudioVisualizerCapture {
             return;
         }
 
+        let sampleRate = 0;
         try {
+            sampleRate = detectPulseDefaultSinkSampleRate();
+            this._configureSpectrum(sampleRate);
             this._pipeline = Gst.parse_launch(
-                'pulsesrc device=@DEFAULT_MONITOR@ client-name=VividWallpaperVisualizer do-timestamp=true ! ' +
+                'pulsesrc device=@DEFAULT_MONITOR@ client-name=VividWallpaperVisualizer ' +
+                `do-timestamp=true latency-time=${WEB_AUDIO_CAPTURE_LATENCY_US} ` +
+                `buffer-time=${WEB_AUDIO_CAPTURE_BUFFER_US} ! ` +
                 'audioconvert ! audioresample ! ' +
-                `audio/x-raw,format=F32LE,channels=2,rate=${WEB_AUDIO_SAMPLE_RATE} ! ` +
-                'appsink name=audio_sink emit-signals=false max-buffers=1 drop=true sync=false'
+                `audio/x-raw,format=F32LE,channels=2,rate=${sampleRate} ! ` +
+                `appsink name=audio_sink emit-signals=false ` +
+                `max-buffers=${WEB_AUDIO_CAPTURE_QUEUE_BUFFERS} drop=true sync=false`
             );
         } catch (error) {
             log(`audio sample pipeline create failed: ${error}`);
@@ -1857,8 +1882,6 @@ class WebAudioVisualizerCapture {
             this._scheduleRestart();
             return;
         }
-
-        this._resetSpectrumState();
 
         this._bus = this._pipeline.get_bus();
         this._bus.add_signal_watch();
@@ -1887,64 +1910,80 @@ class WebAudioVisualizerCapture {
             log('audio sample pipeline failed to enter PLAYING state');
             this._scheduleRestart();
         } else {
-            log(`audio sample capture started bands=${WEB_AUDIO_FRAME_LENGTH} sampleRate=${WEB_AUDIO_SAMPLE_RATE}`);
-            this._pollSourceId = GLib.timeout_add(
+            this._capturePollSourceId = GLib.timeout_add(
                 GLib.PRIORITY_DEFAULT,
-                WEB_AUDIO_POLL_INTERVAL_MS,
+                WEB_AUDIO_CAPTURE_POLL_INTERVAL_MS,
                 () => {
                     try {
-                        this._pullLatestAudioSample();
+                        this._pullAvailableAudioSamples();
                     } catch (error) {
                         log(`audio sample polling failed: ${error}`);
                     }
                     return GLib.SOURCE_CONTINUE;
                 }
             );
+            this._analysisSourceId = GLib.timeout_add(
+                GLib.PRIORITY_DEFAULT,
+                WEB_AUDIO_UPDATE_INTERVAL_MS,
+                () => {
+                    this._scheduleSpectrumProcessing();
+                    return GLib.SOURCE_CONTINUE;
+                }
+            );
         }
     }
 
-    _pullLatestAudioSample() {
-        if (!this._appsink)
+    _pullAvailableAudioSamples() {
+        if (!this._appsink || !this._configuration || !this._pcmRing)
             return;
 
-        const sample = this._appsink.emit('try-pull-sample', 0);
-        if (!sample)
-            return;
+        while (true) {
+            const sample = this._appsink.emit('try-pull-sample', 0);
+            if (!sample)
+                break;
 
-        const buffer = sample.get_buffer?.();
-        if (!buffer)
-            return;
+            const caps = sample.get_caps?.();
+            const structure = caps?.get_structure?.(0);
+            const negotiatedRate = Number(structure?.get_value?.('rate') ?? 0);
+            if (negotiatedRate !== this._configuration.sampleRate) {
+                log(
+                    `audio sample rate changed expected=${this._configuration.sampleRate} ` +
+                    `negotiated=${negotiatedRate}`
+                );
+                this._scheduleRestart();
+                return;
+            }
 
-        const [mapped, mapInfo] = buffer.map(Gst.MapFlags.READ);
-        if (!mapped || !mapInfo?.data || mapInfo.size < Float32Array.BYTES_PER_ELEMENT) {
-            if (mapped)
-                buffer.unmap(mapInfo);
-            return;
+            const buffer = sample.get_buffer?.();
+            if (!buffer)
+                continue;
+
+            const [mapped, mapInfo] = buffer.map(Gst.MapFlags.READ);
+            if (!mapped || !mapInfo?.data || mapInfo.size < Float32Array.BYTES_PER_ELEMENT) {
+                if (mapped)
+                    buffer.unmap(mapInfo);
+                continue;
+            }
+
+            const interleaved = new Float32Array(
+                mapInfo.data.buffer,
+                mapInfo.data.byteOffset,
+                Math.floor(mapInfo.size / Float32Array.BYTES_PER_ELEMENT)
+            );
+            this._pcmRing.appendInterleaved(interleaved, Math.floor(interleaved.length / 2));
+            buffer.unmap(mapInfo);
         }
-
-        const interleaved = new Float32Array(
-            mapInfo.data.buffer,
-            mapInfo.data.byteOffset,
-            Math.floor(mapInfo.size / Float32Array.BYTES_PER_ELEMENT)
-        );
-        const frameCount = Math.floor(interleaved.length / 2);
-        const interleavedCopy = new Float32Array(frameCount * 2);
-        interleavedCopy.set(interleaved.subarray(0, frameCount * 2));
-        buffer.unmap(mapInfo);
-
-        this._pendingInterleavedChunk = interleavedCopy;
-        this._pendingInterleavedFrameCount = frameCount;
-        this._schedulePendingAudioProcessing();
     }
 
-    _schedulePendingAudioProcessing() {
-        if (this._processingSourceId)
+    _scheduleSpectrumProcessing() {
+        if (this._processingSourceId || !this._pcmRing ||
+            this._pcmRing.totalFrames === this._lastAnalyzedTotalFrames)
             return;
 
         this._processingSourceId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
             this._processingSourceId = 0;
             try {
-                this._processPendingAudioChunk();
+                this._processLatestAudioWindow();
             } catch (error) {
                 log(`audio sample processing failed: ${error}`);
             }
@@ -1952,59 +1991,35 @@ class WebAudioVisualizerCapture {
         });
     }
 
-    _processPendingAudioChunk() {
-        const interleaved = this._pendingInterleavedChunk;
-        const frameCount = this._pendingInterleavedFrameCount;
-        this._pendingInterleavedChunk = null;
-        this._pendingInterleavedFrameCount = 0;
-        if (!(interleaved instanceof Float32Array) || frameCount <= 0)
+    _processLatestAudioWindow() {
+        if (!this._configuration || !this._pcmRing ||
+            !this._leftProcessorState || !this._rightProcessorState)
             return;
 
-        const startedAtUs = GLib.get_monotonic_time();
-        appendInterleavedStereoChunk(this._leftSampleBuffer, this._rightSampleBuffer, interleaved, frameCount);
-
-        const leftProcessed = processSpectrumFrame(
-            this._leftSampleBuffer.subarray(this._leftSampleBuffer.length - WEB_AUDIO_FFT_SIZE),
-            this._leftProcessorState
+        const snapshotTotalFrames = this._pcmRing.totalFrames;
+        this._pcmRing.copyLatest(
+            this._leftSampleBuffer,
+            this._rightSampleBuffer
         );
-        const rightProcessed = processSpectrumFrame(
-            this._rightSampleBuffer.subarray(this._rightSampleBuffer.length - WEB_AUDIO_FFT_SIZE),
-            this._rightProcessorState
+
+        const leftValues = processSpectrumFrame(
+            this._leftSampleBuffer,
+            this._leftProcessorState,
+            this._configuration
+        );
+        const rightValues = processSpectrumFrame(
+            this._rightSampleBuffer,
+            this._rightProcessorState,
+            this._configuration
         );
         const normalized = this._workingFrame;
         for (let i = 0; i < WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL; i++) {
-            normalized[i] = leftProcessed.values[i];
-            normalized[i + WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL] = rightProcessed.values[i];
-        }
-
-        this._emittedFrameCount++;
-        if (shouldLogWebAudioFrame(this._emittedFrameCount)) {
-            const leftSceneLow16 = computeSceneLow16Pair(leftProcessed.values);
-            const rightSceneLow16 = computeSceneLow16Pair(rightProcessed.values);
-            const sceneLow16Average = computeSceneLow16Average(leftSceneLow16, rightSceneLow16);
-            const frameMax = normalized.reduce((max, value) => Math.max(max, Number(value) || 0), 0);
-            log(
-                `audio samples frame=${this._emittedFrameCount} ` +
-                `rms=${leftProcessed.rms.toFixed(4)}/${rightProcessed.rms.toFixed(4)} ` +
-                `peak=${leftProcessed.framePeak.toFixed(4)}/${rightProcessed.framePeak.toFixed(4)} ` +
-                `max=${frameMax.toFixed(4)} low16avg=${sceneLow16Average.toFixed(4)} ` +
-                `low16=${formatSpectrumPair(leftSceneLow16)}/${formatSpectrumPair(rightSceneLow16)} ` +
-                `bands=${normalized.length}`
-            );
+            normalized[i] = leftValues[i];
+            normalized[i + WEB_AUDIO_OUTPUT_BANDS_PER_CHANNEL] = rightValues[i];
         }
 
         this._emitFrame(normalized);
-
-        const elapsedUs = GLib.get_monotonic_time() - startedAtUs;
-        if (elapsedUs >= WEB_AUDIO_SLOW_PROCESSING_LOG_THRESHOLD_US) {
-            log(
-                `audio sample processing slow: ${(elapsedUs / 1000).toFixed(2)}ms ` +
-                `frameCount=${frameCount} pollIntervalMs=${WEB_AUDIO_POLL_INTERVAL_MS}`
-            );
-        }
-
-        if (this._pendingInterleavedChunk)
-            this._schedulePendingAudioProcessing();
+        this._lastAnalyzedTotalFrames = snapshotTotalFrames;
     }
 
     _emitFrame(frame) {
@@ -2039,9 +2054,14 @@ class WebAudioVisualizerCapture {
     }
 
     _teardownPipeline() {
-        if (this._pollSourceId) {
-            GLib.source_remove(this._pollSourceId);
-            this._pollSourceId = 0;
+        if (this._capturePollSourceId) {
+            GLib.source_remove(this._capturePollSourceId);
+            this._capturePollSourceId = 0;
+        }
+
+        if (this._analysisSourceId) {
+            GLib.source_remove(this._analysisSourceId);
+            this._analysisSourceId = 0;
         }
 
         if (this._processingSourceId) {
@@ -2049,8 +2069,8 @@ class WebAudioVisualizerCapture {
             this._processingSourceId = 0;
         }
 
-        this._pendingInterleavedChunk = null;
-        this._pendingInterleavedFrameCount = 0;
+        this._pcmRing?.reset();
+        this._lastAnalyzedTotalFrames = 0;
 
         if (this._bus) {
             this._busSignalIds.forEach(signalId => {
@@ -2121,7 +2141,7 @@ class MediaRuntimeBridge {
             this._onAudioSamples?.(this.currentAudioSamples);
             this._audioCapture.start();
         } else {
-            this._audioCapture.stop({emitSilence: false, reason: 'transport-disconnected'});
+            this._audioCapture.stop({emitSilence: false});
         }
     }
 
@@ -2667,7 +2687,6 @@ class DisplayConnection {
         this._lastWindowState = null;
         this._lastMediaState = defaultMediaStatePayload();
         this._lastAudioSamples = buildSilentWebAudioFrame();
-        this._audioSamplesSentCount = 0;
         this._negotiatedVersion = PROTOCOL_VERSION;
         this._mediaRuntime = new MediaRuntimeBridge({
             onMediaState: payload => this.sendMediaState(payload),
@@ -2866,19 +2885,7 @@ class DisplayConnection {
             return false;
         }
 
-        const queued = this._queueFrame(frame);
-        if (queued) {
-            this._audioSamplesSentCount++;
-            if (shouldLogWebAudioFrame(this._audioSamplesSentCount)) {
-                const maxSample = this._lastAudioSamples.reduce(
-                    (max, value) => Math.max(max, Number(value) || 0),
-                    0
-                );
-                log(`audio samples queued frame=${this._audioSamplesSentCount} ` +
-                    `count=${count} max=${maxSample.toFixed(4)}`);
-            }
-        }
-        return queued;
+        return this._queueFrame(frame);
     }
 
     _sendBindFailed(payload) {

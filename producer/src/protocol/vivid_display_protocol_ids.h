@@ -35,7 +35,7 @@
 #define VIVID_DISPLAY_FRAME_HEADER_BYTES 4u
 #define VIVID_DISPLAY_DMABUF_MAX_PLANES 4u
 #define VIVID_DISPLAY_FRAME_READY_FD_COUNT 2u
-#define VIVID_DISPLAY_AUDIO_SAMPLES_BIN_MAX_COUNT 512u
+#define VIVID_DISPLAY_AUDIO_SAMPLES_BIN_MAX_COUNT 128u
 #define VIVID_DISPLAY_CODEC_FRAME_DONE 1
 #define VIVID_DISPLAY_CODEC_FRAME_NEED_IO 2
 #define VIVID_DISPLAY_CONTROL_HEADER_BYTES 8u
@@ -117,7 +117,7 @@ typedef enum
     VIVID_DISPLAY_REQ_UNBIND_DONE = 15,
     /*
      * v2 binary audio samples (negotiatedVersion >= 2):
-     * body: u32le count (<=512) + u64le timeUsec + count * f32le sample in [0,1]
+     * body: u32le count (=128) + u64le timeUsec + 128 non-negative finite f32le spectrum samples; values may exceed 1.0
      */
     VIVID_DISPLAY_REQ_AUDIO_SAMPLES_BIN = 16,
 } VividDisplayRequestOpcode;

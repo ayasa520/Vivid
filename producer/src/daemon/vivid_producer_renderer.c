@@ -7,6 +7,7 @@
 
 #include "vivid_producer_renderer.h"
 
+#include "../protocol/vivid_display_protocol_ids.h"
 #include "../renderers/scene/vivid_scene_producer.h"
 #include "../renderers/video/vivid_video_producer.h"
 #include "../renderers/web/vivid_web_producer.h"
@@ -270,10 +271,12 @@ default_scene_media_state_json(void)
 }
 
 static GVariant*
-new_empty_audio_samples_variant(void)
+new_silent_audio_samples_variant(void)
 {
     GVariantBuilder builder;
     g_variant_builder_init(&builder, G_VARIANT_TYPE("ad"));
+    for (guint32 index = 0; index < VIVID_DISPLAY_AUDIO_SAMPLES_BIN_MAX_COUNT; index++)
+        g_variant_builder_add(&builder, "d", 0.0);
     return g_variant_ref_sink(g_variant_builder_end(&builder));
 }
 
@@ -1615,7 +1618,7 @@ vivid_producer_renderer_new_internal(const VividGpuDeviceList* gpu_devices)
     renderer->content_fit = 1;
     renderer->scene_fps = 30;
     renderer->media_state_json = g_strdup(default_scene_media_state_json());
-    renderer->audio_samples = new_empty_audio_samples_variant();
+    renderer->audio_samples = new_silent_audio_samples_variant();
     renderer->render_device = g_strdup("auto");
     renderer->generation = 1;
     if (gpu_devices) {
@@ -1982,7 +1985,7 @@ vivid_producer_renderer_set_audio_samples(VividProducerRenderer* renderer,
     g_clear_pointer(&renderer->audio_samples, g_variant_unref);
     renderer->audio_samples = audio_samples
         ? g_variant_ref_sink(audio_samples)
-        : new_empty_audio_samples_variant();
+        : new_silent_audio_samples_variant();
 
     if (renderer->mode == VIVID_PRODUCER_RENDERER_MODE_SCENE_PENDING)
         vivid_producer_scene_apply_audio_samples(renderer);

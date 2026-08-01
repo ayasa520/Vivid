@@ -17,6 +17,7 @@
 
 struct pa_context;
 struct pa_server_info;
+struct pa_sink_info;
 struct pa_stream;
 struct pa_threaded_mainloop;
 
@@ -77,16 +78,23 @@ private:
     };
 
     struct SpectrumState {
-        QVector<double> smoothed;
-        QVector<double> lastDb;
-        QVector<double> bandDb;
-        QVector<double> normalized;
-        QVector<double> horizontal;
         QVector<double> real;
         QVector<double> imag;
-        QVector<double> magnitudes;
-        QVector<double> normalizedMagnitudes;
-        QVector<double> binDb;
+        QVector<double> values;
+    };
+
+    struct SpectrumConfiguration {
+        int sampleRate { 0 };
+        int fftSize { 0 };
+        int pcmSampleCount { 0 };
+        int analysisBinCount { 0 };
+        int convolutionSize { 0 };
+
+        bool valid() const
+        {
+            return sampleRate > 0 && fftSize > 0 && pcmSampleCount > 0 &&
+                analysisBinCount > 1 && convolutionSize >= fftSize * 2 - 1;
+        }
     };
 
     void start();
@@ -107,18 +115,24 @@ private:
     QString localArtworkPath(const QString& artUrl) const;
 
     void startAudioCapture();
-    void stopAudioCapture(bool emitSilence);
+    void stopAudioCapture();
     void scheduleAudioRestart();
-    void handlePulseAudioChunk(const QVector<float>& interleaved);
-    void processAudioChunk(const QVector<float>& interleaved);
+    void handlePulseAudioChunk(QVector<float> interleaved);
+    void processNextAudioFrame();
+    void appendAudioChunk(const QVector<float>& interleaved);
+    int copyLatestAudioWindow();
     QVector<double> processSpectrumFrame(const QVector<float>& pcm, SpectrumState& state);
     void resetSpectrumState();
-    void initializeSpectrumTables();
+    bool configureSpectrumTransform(int sampleRate);
 
     static void pulseContextStateCallback(pa_context* context, void* userdata);
     static void pulseServerInfoCallback(pa_context* context,
                                         const pa_server_info* info,
                                         void* userdata);
+    static void pulseSinkInfoCallback(pa_context* context,
+                                      const pa_sink_info* info,
+                                      int eol,
+                                      void* userdata);
     static void pulseStreamStateCallback(pa_stream* stream, void* userdata);
     static void pulseStreamReadCallback(pa_stream* stream, size_t nbytes, void* userdata);
 
@@ -129,6 +143,7 @@ private:
     QTimer m_mediaRefreshTimer;
     QTimer m_mediaPollTimer;
     QTimer m_audioRestartTimer;
+    QTimer m_audioProcessTimer;
     bool m_mprisMonitoring { false };
     QHash<QString, ThumbnailPayload> m_thumbnailCache;
     QString m_lastMediaJson;
@@ -137,8 +152,16 @@ private:
     pa_threaded_mainloop* m_paMainloop { nullptr };
     pa_context* m_paContext { nullptr };
     pa_stream* m_paStream { nullptr };
+    bool m_paMainloopStarted { false };
     bool m_audioShouldRun { false };
-    quint64 m_lastAudioEmitUsec { 0 };
+
+    SpectrumConfiguration m_spectrumConfiguration;
+    QVector<float> m_leftPcmRing;
+    QVector<float> m_rightPcmRing;
+    qsizetype m_pcmWriteIndex { 0 };
+    qsizetype m_pcmFramesAvailable { 0 };
+    quint64 m_pcmFramesWritten { 0 };
+    quint64 m_lastAnalyzedFramesWritten { 0 };
 
     QVector<float> m_leftSamples;
     QVector<float> m_rightSamples;
@@ -146,10 +169,8 @@ private:
     SpectrumState m_rightSpectrum;
     QVector<double> m_audioFrame;
 
-    QVector<double> m_bandEdgesHz;
-    QVector<double> m_bandCentersHz;
-    QVector<double> m_frequenciesHz;
-    QVector<double> m_window;
-    QVector<QPair<int, int>> m_bandBinRanges;
-    double m_magnitudeReference { 1.0 };
+    QVector<double> m_audioChirpReal;
+    QVector<double> m_audioChirpImag;
+    QVector<double> m_audioKernelReal;
+    QVector<double> m_audioKernelImag;
 };

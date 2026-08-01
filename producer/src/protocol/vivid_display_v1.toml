@@ -22,7 +22,7 @@ CODEC_MAX_FDS_PER_MESSAGE = 64
 FRAME_HEADER_BYTES = 4
 DMABUF_MAX_PLANES = 4
 FRAME_READY_FD_COUNT = 2
-AUDIO_SAMPLES_BIN_MAX_COUNT = 512
+AUDIO_SAMPLES_BIN_MAX_COUNT = 128
 CODEC_FRAME_DONE = 1
 CODEC_FRAME_NEED_IO = 2
 
@@ -209,7 +209,7 @@ outputId = daemon session key; monitorIndex = per-connection transport coordinat
   { name = "UNBIND_DONE", value = 15 },
   { name = "AUDIO_SAMPLES_BIN", value = 16, since = 2, doc = """
 v2 binary audio samples (negotiatedVersion >= 2):
-body: u32le count (<=512) + u64le timeUsec + count * f32le sample in [0,1]
+body: u32le count (=128) + u64le timeUsec + 128 non-negative finite f32le spectrum samples; values may exceed 1.0
 """ },
 ]
 
