@@ -12,7 +12,6 @@ pkg_check_modules(GDK_PIXBUF REQUIRED gdk-pixbuf-2.0)
 pkg_check_modules(JSON_GLIB REQUIRED json-glib-1.0)
 pkg_check_modules(VULKAN REQUIRED vulkan)
 pkg_check_modules(LIBDRM REQUIRED libdrm)
-pkg_check_modules(PANGOFT2 REQUIRED pangoft2)
 
 set(WESCENE_RENDERER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/wallpaper-scene-renderer)
 
@@ -41,7 +40,6 @@ target_include_directories(vivid-scene-renderer PRIVATE
     ${JSON_GLIB_INCLUDE_DIRS}
     ${VULKAN_INCLUDE_DIRS}
     ${LIBDRM_INCLUDE_DIRS}
-    ${PANGOFT2_INCLUDE_DIRS}
     ${WESCENE_RENDERER_DIR}/src
     ${WESCENE_RENDERER_DIR}/src/Scene/include
     ${WESCENE_RENDERER_DIR}/src/Vulkan/include
@@ -56,7 +54,6 @@ target_compile_options(vivid-scene-renderer PRIVATE
   ${JSON_GLIB_CFLAGS_OTHER}
   ${VULKAN_CFLAGS_OTHER}
   ${LIBDRM_CFLAGS_OTHER}
-  ${PANGOFT2_CFLAGS_OTHER}
 )
 target_link_libraries(vivid-scene-renderer PRIVATE
   ${GLIB_LIBRARIES}
@@ -65,7 +62,6 @@ target_link_libraries(vivid-scene-renderer PRIVATE
   ${JSON_GLIB_LIBRARIES}
   ${VULKAN_LIBRARIES}
   ${LIBDRM_LIBRARIES}
-  ${PANGOFT2_LIBRARIES}
   wescene-renderer
 )
 
