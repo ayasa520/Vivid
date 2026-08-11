@@ -1,0 +1,34 @@
+{
+  "manifest-version": 1,
+  "id": "vivid.web",
+  "kind": "web",
+  "wallpaper-types": ["web"],
+  "executable": "web/vivid-web-renderer",
+  "preload": "web/libvivid-gbm-usage-shim.so",
+  "spawn-version": 1,
+  "setting-defaults": {
+    "remote-debugging-port": 0,
+    "shared-texture-mode": "required"
+  },
+  "identity-settings": [
+    "remote-debugging-port",
+    "render-device",
+    "shared-texture-mode",
+    "target-extent"
+  ],
+  "runtime-settings": [
+    "content-fit",
+    "fps",
+    "muted",
+    "playing",
+    "user-properties",
+    "volume"
+  ],
+  "events": [
+    "audio-samples",
+    "media-state",
+    "pointer-axis",
+    "pointer-button",
+    "pointer-motion"
+  ]
+}

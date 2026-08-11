@@ -43,21 +43,27 @@ pkg_check_modules(LIBDRM REQUIRED libdrm)
 pkg_check_modules(VULKAN REQUIRED vulkan)
 
 # Everything CEF needs at runtime (libcef.so, .pak resources, locales, the
-# helper) is collocated with libVividWeb.so in this directory, so the
-# backend's dladdr-based default CEF dir and the $ORIGIN rpath both work.
-set(VIVID_WEB_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/out)
+# helper) is collocated with the worker executable in this directory.
+set(VIVID_WEB_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/worker-out)
 
-add_library(VividWeb SHARED
+add_executable(vivid-web-renderer
+  vivid_web_renderer_main.cpp
   vivid_web_producer.cpp
   vivid_web_vulkan_route.cpp
   ../../graphics/vivid_gpu_devices.c
+  ../../renderer_host/vivid_renderer_host.c
+  ../../renderer_host/vivid_renderer_release_timeline.c
+  ../../renderer_host/vivid_renderer_transport.c
+  ../../renderer_host/vivid_renderer_worker_common.c
 )
-add_dependencies(VividWeb libcef_dll_wrapper)
+add_dependencies(vivid-web-renderer libcef_dll_wrapper)
 
-target_include_directories(VividWeb PRIVATE
+target_include_directories(vivid-web-renderer PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/../../graphics
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../protocol
   ${CMAKE_CURRENT_SOURCE_DIR}/../../renderer_api
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../renderer_host
   ${CEF_ROOT}
   ${GLIB_INCLUDE_DIRS}
   ${GIO_INCLUDE_DIRS}
@@ -71,7 +77,7 @@ target_include_directories(VividWeb PRIVATE
 
 # -fno-rtti matches the libcef_dll_wrapper build so polymorphic CEF classes
 # never need typeinfo symbols the wrapper does not emit.
-target_compile_options(VividWeb PRIVATE
+target_compile_options(vivid-web-renderer PRIVATE
   -fno-rtti
   ${GLIB_CFLAGS_OTHER}
   ${GIO_CFLAGS_OTHER}
@@ -83,14 +89,14 @@ target_compile_options(VividWeb PRIVATE
   ${VULKAN_CFLAGS_OTHER}
 )
 
-target_compile_definitions(VividWeb PRIVATE
+target_compile_definitions(vivid-web-renderer PRIVATE
   # Chromium installs a glib log handler for the default domain once
   # CefInitialize has run; a dedicated domain keeps this library's warnings on
   # the producer's stderr.
   G_LOG_DOMAIN="VividWeb"
 )
 
-target_link_libraries(VividWeb PRIVATE
+target_link_libraries(vivid-web-renderer PRIVATE
   libcef_lib
   libcef_dll_wrapper
   ${GLIB_LIBRARIES}
@@ -103,9 +109,8 @@ target_link_libraries(VividWeb PRIVATE
   ${VULKAN_LIBRARIES}
 )
 
-set_target_properties(VividWeb PROPERTIES
-  OUTPUT_NAME VividWeb
-  LIBRARY_OUTPUT_DIRECTORY ${VIVID_WEB_OUT_DIR}
+set_target_properties(vivid-web-renderer PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${VIVID_WEB_OUT_DIR}
   INSTALL_RPATH "$ORIGIN"
   BUILD_WITH_INSTALL_RPATH TRUE
 )
@@ -117,6 +122,7 @@ add_dependencies(vivid-web-helper libcef_dll_wrapper)
 
 target_include_directories(vivid-web-helper PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../renderer_host
   ${CEF_ROOT}
 )
 
@@ -134,5 +140,5 @@ set_target_properties(vivid-web-helper PROPERTIES
 )
 
 # Collocate the CEF runtime with the build outputs.
-COPY_FILES(VividWeb "${CEF_BINARY_FILES}" "${CEF_BINARY_DIR}" "${VIVID_WEB_OUT_DIR}")
-COPY_FILES(VividWeb "${CEF_RESOURCE_FILES}" "${CEF_RESOURCE_DIR}" "${VIVID_WEB_OUT_DIR}")
+COPY_FILES(vivid-web-renderer "${CEF_BINARY_FILES}" "${CEF_BINARY_DIR}" "${VIVID_WEB_OUT_DIR}")
+COPY_FILES(vivid-web-renderer "${CEF_RESOURCE_FILES}" "${CEF_RESOURCE_DIR}" "${VIVID_WEB_OUT_DIR}")

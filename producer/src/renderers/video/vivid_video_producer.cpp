@@ -1562,6 +1562,7 @@ struct _VividVideoProducer
 
     bool configured { false };
     bool playing { true };
+    bool looping { true };
     bool muted { false };
     double volume { 1.0 };
     VideoFillMode fill_mode { VideoFillMode::Cover };
@@ -2429,8 +2430,14 @@ poll_bus(VividVideoProducer* self)
         switch (GST_MESSAGE_TYPE(message)) {
         case GST_MESSAGE_EOS:
             self->eos_count++;
-            g_message("VividVideoProducer: video reached EOS; looping count=%" G_GUINT64_FORMAT,
-                      self->eos_count);
+            g_message("VividVideoProducer: video reached EOS count=%" G_GUINT64_FORMAT
+                      " looping=%s",
+                      self->eos_count,
+                      bool_to_string(self->looping));
+            if (!self->looping) {
+                self->playing = false;
+                break;
+            }
             if (!gst_element_seek(self->pipeline,
                                   1.0,
                                   GST_FORMAT_TIME,
@@ -2651,6 +2658,15 @@ vivid_video_producer_set_playing(VividVideoProducer* self, gboolean playing)
     const GstStateChangeReturn result = apply_playback_state(self);
     if (previous_playing != self->playing || result == GST_STATE_CHANGE_FAILURE)
         log_playback_state_request(self, previous_playing, result);
+}
+
+void
+vivid_video_producer_set_looping(VividVideoProducer* self, gboolean looping)
+{
+    if (!self)
+        return;
+
+    self->looping = !!looping;
 }
 
 void

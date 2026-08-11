@@ -95,6 +95,8 @@ typedef struct
 
 VividWebProducer* vivid_web_producer_new(void);
 void               vivid_web_producer_free(VividWebProducer* self);
+void vivid_web_producer_set_remote_debugging_port(VividWebProducer* self,
+                                                   guint16 port);
 
 /*
  * project_dir may be a Wallpaper Engine web project directory (project.json

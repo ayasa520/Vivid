@@ -195,10 +195,12 @@ int ww_vk_query_supports_device_local(const ww_vk_backend_t* backend, int* out_h
 /* ------------------------------------------------------------------ */
 
 /* Minimal lib-owned instance + device + queue suitable for the
- * DMABUF_RELAY backend. Picks the first physical device that exposes
- * VK_EXT_external_memory_dma_buf, VK_EXT_queue_family_foreign,
- * VK_EXT_image_drm_format_modifier and VK_KHR_external_memory_fd plus a
- * transfer-capable queue family.
+ * DMABUF_RELAY backend. The unconstrained entry point picks the first
+ * physical device that exposes VK_EXT_external_memory_dma_buf,
+ * VK_EXT_queue_family_foreign, VK_EXT_image_drm_format_modifier and
+ * VK_KHR_external_memory_fd plus a transfer-capable queue family. The
+ * deviceUUID-constrained entry point selects only the physical device that
+ * produced the previously advertised consumer capabilities.
  *
  * Output handles are owned by the caller — destroy via
  * `ww_vk_destroy_owned`. */
@@ -215,9 +217,12 @@ typedef struct ww_vk_owned {
 } ww_vk_owned_t;
 
 /* Returns 0 on success, -ENOENT if libvulkan.so.1 cannot be loaded,
- * -ENOSYS if no suitable GPU/queue is found, -EIO on any other Vulkan
- * failure. Output struct is zeroed on failure. */
-int  ww_vk_create_owned(ww_vk_owned_t* out);
+ * -ENODEV if the requested deviceUUID is not enumerated, -ENOSYS if no
+ * suitable GPU/queue is found, and -EIO on any other Vulkan failure. Output
+ * is zeroed on failure. */
+int ww_vk_create_owned(ww_vk_owned_t* out);
+int ww_vk_create_owned_for_device_uuid(ww_vk_owned_t* out,
+                                       const uint8_t expected_device_uuid[VK_UUID_SIZE]);
 void ww_vk_destroy_owned(ww_vk_owned_t* o);
 
 /* Map a DRM fourcc to the VkFormat used by the lib-internal blitter +

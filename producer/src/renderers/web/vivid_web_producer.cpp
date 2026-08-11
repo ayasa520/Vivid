@@ -833,14 +833,10 @@ cef_task_type_name(cef_task_type_t type)
 std::string
 resolve_cef_dir(void)
 {
-    const gchar* env = g_getenv("VIVID_WEB_CEF_DIR");
-    if (env && *env)
-        return env;
-
     /*
-     * libVividWeb.so is laid out next to libcef.so, the helper executable
-     * and the CEF resources (the build copies them into one directory), so
-     * the module's own location is the natural default.
+     * The web worker, libcef, helper, and CEF resources form one indivisible
+     * runtime directory. Resolving from the worker image guarantees that a
+     * manifest-selected executable cannot silently load a different CEF tree.
      */
     Dl_info info {};
     if (dladdr(reinterpret_cast<void*>(&resolve_cef_dir), &info) && info.dli_fname) {
@@ -849,7 +845,7 @@ resolve_cef_dir(void)
         g_free(dir);
         return result;
     }
-    return ".";
+    return {};
 }
 
 std::string
@@ -1128,7 +1124,7 @@ private:
 };
 
 bool
-ensure_cef_initialized(void)
+ensure_cef_initialized(guint16 remote_debugging_port)
 {
     g_mutex_lock(&g_cef_lock);
     if (g_cef_state == CefGlobalState::Initialized) {
@@ -1143,19 +1139,18 @@ ensure_cef_initialized(void)
     }
 
     const std::string cef_dir = resolve_cef_dir();
-    std::string helper_path;
-    if (const gchar* env = g_getenv("VIVID_WEB_HELPER_PATH"); env && *env) {
-        helper_path = env;
-    } else {
-        gchar* joined = g_build_filename(cef_dir.c_str(), "vivid-web-helper", NULL);
-        helper_path = joined;
-        g_free(joined);
+    if (cef_dir.empty()) {
+        g_mutex_unlock(&g_cef_lock);
+        g_warning("VividWebProducer: cannot resolve the web worker runtime directory");
+        return false;
     }
+    gchar* joined = g_build_filename(cef_dir.c_str(), "vivid-web-helper", NULL);
+    const std::string helper_path = joined;
+    g_free(joined);
 
     if (!g_file_test(helper_path.c_str(), G_FILE_TEST_IS_EXECUTABLE)) {
         g_mutex_unlock(&g_cef_lock);
-        g_warning("VividWebProducer: CEF helper executable not found at %s "
-                  "(set VIVID_WEB_CEF_DIR or VIVID_WEB_HELPER_PATH)",
+        g_warning("VividWebProducer: CEF helper executable not found at %s",
                   helper_path.c_str());
         return false;
     }
@@ -1170,6 +1165,7 @@ ensure_cef_initialized(void)
     settings.multi_threaded_message_loop = true;
     settings.log_severity = LOGSEVERITY_WARNING;
     settings.background_color = CefColorSetARGB(0xff, 0xff, 0xff, 0xff);
+    settings.remote_debugging_port = remote_debugging_port;
     CefString(&settings.browser_subprocess_path).FromString(helper_path);
     CefString(&settings.resources_dir_path).FromString(cef_dir);
     {
@@ -2365,6 +2361,7 @@ struct _VividWebProducer
 
     CefRefPtr<VividWebClient> client;
     bool shared_textures { false };
+    guint16 remote_debugging_port { 0 };
 
     guint32 pointer_button_mask { 0 };
     int pointer_x_view { 0 };
@@ -2894,6 +2891,17 @@ vivid_web_producer_free(VividWebProducer* self)
     delete self;
 }
 
+void
+vivid_web_producer_set_remote_debugging_port(VividWebProducer* self, guint16 port)
+{
+    if (!self)
+        return;
+
+    g_mutex_lock(&self->lock);
+    self->remote_debugging_port = port;
+    g_mutex_unlock(&self->lock);
+}
+
 gboolean
 vivid_web_producer_configure(VividWebProducer* self,
                               const gchar*       project_dir,
@@ -2923,7 +2931,7 @@ vivid_web_producer_configure(VividWebProducer* self,
     if (gpu_valid)
         apply_gpu_process_environment(gpu);
 
-    if (!ensure_cef_initialized())
+    if (!ensure_cef_initialized(self->remote_debugging_port))
         return FALSE;
 
     g_mutex_lock(&self->lock);

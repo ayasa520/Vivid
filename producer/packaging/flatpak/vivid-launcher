@@ -6,67 +6,10 @@ producer_command="${VIVID_PRODUCER_COMMAND:-vivid-producer}"
 webui_root="${VIVID_WEBUI_ROOT:-/app/share/vivid-producer/webui}"
 webui_server="${VIVID_WEBUI_SERVER:-${webui_root}/vivid_webui_server.py}"
 python_bin="${VIVID_PYTHON:-python3}"
-web_cef_dir="${VIVID_WEB_CEF_DIR:-/app/lib/vivid-web}"
-web_library="${VIVID_WEB_LIBRARY:-${web_cef_dir}/libVividWeb.so}"
-gbm_shim_library="${VIVID_GBM_USAGE_SHIM:-/app/lib/libvivid-gbm-usage-shim.so}"
-original_ld_preload_set=0
-original_ld_preload=""
-if [ "${LD_PRELOAD+x}" = x ]; then
-    original_ld_preload_set=1
-    original_ld_preload="${LD_PRELOAD}"
-fi
-
-# The web backend is installed as a self-contained CEF runtime bundle instead
-# of scattering libcef.so/resources/locales across /app/lib. Publish the exact
-# paths before the producer starts so its dlopen() path, CEF resource lookup,
-# helper executable, and helper rpaths all point at the same bundle.
-export VIVID_WEB_CEF_DIR="${web_cef_dir}"
-export VIVID_WEB_LIBRARY="${web_library}"
-export VIVID_GBM_USAGE_SHIM="${gbm_shim_library}"
-case ":${LD_LIBRARY_PATH:-}:" in
-    *":${web_cef_dir}:"*) ;;
-    *) export LD_LIBRARY_PATH="${web_cef_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" ;;
-esac
-
-gbm_shim_rewrite="${VIVID_GBM_SHIM_REWRITE:-0}"
-gbm_shim_auto="${VIVID_GBM_SHIM_AUTO:-1}"
-gbm_shim_preload=0
-if [ "${gbm_shim_rewrite}" != "0" ]; then
-    gbm_shim_preload=1
-elif [ "${gbm_shim_auto}" != "0" ] && [ -f "${gbm_shim_library}" ]; then
-    gbm_shim_preload=1
-fi
-
-if [ "${gbm_shim_preload}" != "0" ]; then
-    if [ ! -f "${gbm_shim_library}" ]; then
-        echo "GBM usage shim not found: ${gbm_shim_library}" >&2
-        exit 1
-    fi
-
-    # CEF forks its GPU helper after the producer initializes the web backend.
-    # Preloading here is the last process-wide point where every future helper
-    # can inherit the GBM rewrite hooks for NVIDIA shared-texture allocation.
-    case ":${LD_PRELOAD:-}:" in
-        *":${gbm_shim_library}:"*) ;;
-        *) export LD_PRELOAD="${gbm_shim_library}${LD_PRELOAD:+:${LD_PRELOAD}}" ;;
-    esac
-    if [ "${gbm_shim_auto}" != "0" ] && [ "${gbm_shim_rewrite}" = "0" ]; then
-        export VIVID_GBM_SHIM_LOG="${VIVID_GBM_SHIM_LOG:-0}"
-    else
-        export VIVID_GBM_SHIM_LOG="${VIVID_GBM_SHIM_LOG:-1}"
-    fi
-fi
-
-restore_ld_preload() {
-    if [ "${original_ld_preload_set}" = "1" ]; then
-        export LD_PRELOAD="${original_ld_preload}"
-    else
-        unset LD_PRELOAD
-    fi
-}
+renderer_registry="${VIVID_RENDERER_REGISTRY:-/app/lib/vivid-renderers}"
 
 if [ "${VIVID_PRODUCER_ONLY:-0}" = "1" ]; then
-    exec "${producer_command}" "$@"
+    exec "${producer_command}" --renderer-registry "${renderer_registry}" "$@"
 fi
 
 producer_pid=""
@@ -201,9 +144,10 @@ trap handle_termination TERM
 
 start_producer() {
     if [ "${has_setsid}" = "1" ]; then
-        setsid "${producer_command}" "$@" &
+        setsid "${producer_command}" \
+            --renderer-registry "${renderer_registry}" "$@" &
     else
-        "${producer_command}" "$@" &
+        "${producer_command}" --renderer-registry "${renderer_registry}" "$@" &
     fi
     producer_pid="$!"
 }
@@ -220,7 +164,6 @@ start_webui() {
 }
 
 start_producer "$@"
-restore_ld_preload
 
 start_webui
 

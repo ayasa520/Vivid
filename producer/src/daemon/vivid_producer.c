@@ -168,6 +168,9 @@ typedef struct
     guint64  release_point;
     gint64   created_usec;
     ReleaseGroup* release_group;
+    VividProducerRenderer* renderer;
+    guint64 renderer_instance_id;
+    guint64 renderer_release_point;
 } ReleaseReaperRecord;
 
 typedef struct
@@ -181,6 +184,15 @@ typedef struct
 {
     GByteArray* data;
 } ClientOutboxEntry;
+
+typedef struct
+{
+    Client* client;
+    guint16 request_opcode;
+    guint64 request_id;
+    gboolean config_saved;
+    gboolean disconnect_display_clients;
+} PendingControlAck;
 
 typedef enum
 {
@@ -261,6 +273,7 @@ struct _RenderRoute
     guint32 height;
     gdouble scale;
     guint   frame_source_id;
+    gboolean frame_source_is_worker_event;
     guint   orphan_reap_source_id;
 };
 
@@ -292,6 +305,9 @@ struct _ReleaseGroup
     guint completed;
     gint ref_count;
     gboolean signaled;
+    VividProducerRenderer* renderer;
+    guint64 renderer_instance_id;
+    guint64 renderer_release_point;
     GMutex lock;
 };
 
@@ -339,6 +355,7 @@ struct _Producer
     GPtrArray* clients;
     GMainLoop* loop;
     VividProducerConfig config;
+    VividRendererRegistry* renderer_registry;
     VividProducerRenderer* renderer;
     guint32 release_timeline_handle;
     guint64 next_release_point;
@@ -354,6 +371,9 @@ struct _Producer
     gboolean policy_stopped;
     guint64 media_state_received;
     guint32 renderer_rebind_barrier_output_id;
+    GQueue pending_control_acks;
+    gboolean shutdown_requested;
+    gint64 shutdown_started_usec;
 };
 
 static void client_free(Client* client);
@@ -373,6 +393,8 @@ static void producer_apply_config_to_routes(Producer* producer);
 static void producer_apply_config_to_renderers(Producer* producer);
 static void producer_relayout_outputs(Producer* producer, gboolean mark_rebind);
 static void producer_rebind_all_outputs(Producer* producer);
+static void producer_disconnect_display_clients(Producer* producer,
+                                                Client* exempt);
 static RenderRoute* producer_route_for_output(Producer* producer, Output* output);
 static RenderRoute* producer_find_clone_route(Producer* producer);
 static RenderRoute* producer_find_independent_route(Producer* producer, const Output* output);
@@ -381,9 +403,14 @@ static void producer_render_route_apply_config(RenderRoute* route);
 static gboolean route_send_frame(RenderRoute* route);
 static void route_ensure_frame_source(RenderRoute* route);
 static void route_stop_frame_source(RenderRoute* route);
+static void route_schedule_worker_progress(RenderRoute* route);
+static void route_renderer_progress(VividProducerRenderer* renderer,
+                                    gpointer user_data);
 static void route_schedule_orphan_reap(RenderRoute* route);
 static void producer_destroy_orphan_route(RenderRoute* route);
 static void producer_sync_route_frame_sources(Producer* producer);
+static void producer_evaluate_pending_control_acks(Producer* producer);
+static void producer_maybe_finish_shutdown(Producer* producer);
 static Output* producer_primary_output(Producer* producer);
 static Output* producer_output_for_display_key(Producer* producer, const gchar* display_key);
 static Output* producer_find_consumer_output(Producer* producer, guint32 consumer_output_id);
@@ -403,7 +430,7 @@ static gint32 json_object_get_int_default(JsonObject* object,
 static gdouble json_object_get_double_default(JsonObject* object,
                                               const gchar* member,
                                               gdouble      fallback);
-static gboolean json_object_get_boolean_default(JsonObject* object,
+static gboolean json_object_get_boolean_default(const JsonObject* object,
                                                 const gchar* member,
                                                 gboolean     fallback);
 static const gchar* json_object_get_string_default(JsonObject* object,
@@ -573,8 +600,12 @@ producer_render_route_new(Producer* producer, gboolean clone_route, gboolean own
     route->clone_route = clone_route;
     route->owns_renderer = owns_renderer;
     route->scale = 1.0;
+    g_autofree gchar* renderer_route_id =
+        g_strdup_printf("route-%u", route->route_id);
     route->renderer = owns_renderer
         ? vivid_producer_renderer_new_from_gpu_devices(
+              producer->renderer_registry,
+              renderer_route_id,
               producer && producer->renderer
                   ? vivid_producer_renderer_gpu_devices(producer->renderer)
                   : NULL)
@@ -582,6 +613,9 @@ producer_render_route_new(Producer* producer, gboolean clone_route, gboolean own
     vivid_producer_renderer_set_playback_paused(
         route->renderer,
         producer->policy_paused || producer->policy_stopped || !producer->user_playing);
+    vivid_producer_renderer_set_progress_callback(route->renderer,
+                                                  route_renderer_progress,
+                                                  route);
     render_route_attach_release_gate(route);
     g_ptr_array_add(producer->routes, route);
     g_debug("VividProducer: created render route=%u clone=%s owns-renderer=%s",
@@ -600,8 +634,10 @@ render_route_free(RenderRoute* route)
     route_stop_frame_source(route);
     producer_route_cancel_orphan_reap(route);
     render_route_release_gate_context_disable(route->release_gate_context);
-    if (route->renderer)
+    if (route->renderer) {
+        vivid_producer_renderer_set_progress_callback(route->renderer, NULL, NULL);
         vivid_producer_renderer_set_release_gate(route->renderer, NULL);
+    }
     if (route->owns_renderer)
         vivid_producer_renderer_free(route->renderer);
     g_free(route->display_key);
@@ -843,21 +879,21 @@ route_link_apply_clone_layout(RouteLink* link,
 }
 
 static JsonNode*
-json_object_get_member_alias(JsonObject* object,
+json_object_get_member_alias(const JsonObject* object,
                              const gchar* kebab_member,
                              const gchar* camel_member)
 {
     if (!object)
         return NULL;
-    if (kebab_member && json_object_has_member(object, kebab_member))
-        return json_object_get_member(object, kebab_member);
-    if (camel_member && json_object_has_member(object, camel_member))
-        return json_object_get_member(object, camel_member);
+    if (kebab_member && json_object_has_member((JsonObject*)object, kebab_member))
+        return json_object_get_member((JsonObject*)object, kebab_member);
+    if (camel_member && json_object_has_member((JsonObject*)object, camel_member))
+        return json_object_get_member((JsonObject*)object, camel_member);
     return NULL;
 }
 
 static const gchar*
-json_object_get_string_alias(JsonObject* object,
+json_object_get_string_alias(const JsonObject* object,
                              const gchar* kebab_member,
                              const gchar* camel_member,
                              const gchar* fallback)
@@ -871,7 +907,7 @@ json_object_get_string_alias(JsonObject* object,
 }
 
 static gint
-json_object_get_int_alias(JsonObject* object,
+json_object_get_int_alias(const JsonObject* object,
                           const gchar* kebab_member,
                           const gchar* camel_member,
                           gint         fallback,
@@ -2787,6 +2823,151 @@ send_control_error(Client* client,
     return send_control_json(client, VIVID_DISPLAY_CONTROL_ERROR, json, request_id);
 }
 
+typedef enum
+{
+    PRODUCER_RENDERER_STARTUP_READY,
+    PRODUCER_RENDERER_STARTUP_PENDING,
+    PRODUCER_RENDERER_STARTUP_FAILED,
+} ProducerRendererStartupState;
+
+static ProducerRendererStartupState
+producer_renderer_startup_state(Producer* producer, gchar** out_error)
+{
+    gboolean pending = FALSE;
+    if (out_error)
+        *out_error = NULL;
+
+    for (guint i = 0; producer && producer->routes && i < producer->routes->len; i++) {
+        RenderRoute* route = g_ptr_array_index(producer->routes, i);
+        if (!route || !route->renderer ||
+            route_link_count_for_route(&producer->route_table, route) == 0 ||
+            !vivid_producer_renderer_requires_worker(route->renderer)) {
+            continue;
+        }
+
+        const gchar* startup_error =
+            vivid_producer_renderer_startup_error(route->renderer);
+        if (startup_error) {
+            if (out_error) {
+                *out_error = g_strdup_printf("renderer route %u failed to start: %s",
+                                             route->route_id,
+                                             startup_error);
+            }
+            return PRODUCER_RENDERER_STARTUP_FAILED;
+        }
+        if (!vivid_producer_renderer_worker_is_active(route->renderer))
+            pending = TRUE;
+    }
+
+    return pending
+        ? PRODUCER_RENDERER_STARTUP_PENDING
+        : PRODUCER_RENDERER_STARTUP_READY;
+}
+
+static void
+producer_cancel_pending_control_acks(Producer* producer, const gchar* message)
+{
+    while (producer && !g_queue_is_empty(&producer->pending_control_acks)) {
+        PendingControlAck* pending =
+            g_queue_pop_head(&producer->pending_control_acks);
+        if (pending->client && pending->client->fd >= 0) {
+            send_control_error(pending->client,
+                               pending->request_opcode,
+                               VIVID_DISPLAY_ERR_CONTROL_SUPERSEDED,
+                               pending->request_id,
+                               message ? message
+                                       : "renderer startup was superseded by a newer control request");
+        }
+        g_free(pending);
+    }
+}
+
+static void
+producer_clear_renderer_startup_errors(Producer* producer)
+{
+    if (!producer)
+        return;
+    vivid_producer_renderer_clear_startup_error(producer->renderer);
+    for (guint i = 0; producer->routes && i < producer->routes->len; i++) {
+        RenderRoute* route = g_ptr_array_index(producer->routes, i);
+        if (route && route->renderer != producer->renderer)
+            vivid_producer_renderer_clear_startup_error(route->renderer);
+    }
+}
+
+static void
+producer_evaluate_pending_control_acks(Producer* producer)
+{
+    if (!producer || g_queue_is_empty(&producer->pending_control_acks))
+        return;
+
+    g_autofree gchar* startup_error = NULL;
+    const ProducerRendererStartupState state =
+        producer_renderer_startup_state(producer, &startup_error);
+    if (state == PRODUCER_RENDERER_STARTUP_PENDING)
+        return;
+
+    while (!g_queue_is_empty(&producer->pending_control_acks)) {
+        PendingControlAck* pending =
+            g_queue_pop_head(&producer->pending_control_acks);
+        Client* client = pending->client;
+        const gboolean disconnect_displays =
+            pending->disconnect_display_clients;
+
+        if (client && client->fd >= 0) {
+            if (state == PRODUCER_RENDERER_STARTUP_FAILED) {
+                g_warning("VividProducer: control request=%" G_GUINT64_FORMAT
+                          " renderer startup failed: %s",
+                          pending->request_id,
+                          startup_error ? startup_error : "unknown renderer startup error");
+                send_control_error(client,
+                                   pending->request_opcode,
+                                   VIVID_DISPLAY_ERR_CONTROL_RENDERER_START_FAILED,
+                                   pending->request_id,
+                                   startup_error
+                                       ? startup_error
+                                       : "renderer worker failed before its first frame");
+            } else {
+                g_message("VividProducer: control request=%" G_GUINT64_FORMAT
+                          " completed after all required renderer workers became ACTIVE",
+                          pending->request_id);
+                send_control_ack(client,
+                                 pending->request_opcode,
+                                 pending->config_saved,
+                                 pending->request_id);
+            }
+        }
+        g_free(pending);
+
+        if (state == PRODUCER_RENDERER_STARTUP_READY && disconnect_displays) {
+            /*
+             * Disconnecting display clients can remove their own pending ACK
+             * records. End this evaluation pass immediately so no iterator or
+             * client pointer survives those lifecycle callbacks.
+             */
+            producer_disconnect_display_clients(producer, client);
+            return;
+        }
+    }
+}
+
+static void
+producer_queue_renderer_control_ack(Client* client,
+                                    guint16 request_opcode,
+                                    guint64 request_id,
+                                    gboolean config_saved,
+                                    gboolean disconnect_display_clients)
+{
+    PendingControlAck* pending = g_new0(PendingControlAck, 1);
+    pending->client = client;
+    pending->request_opcode = request_opcode;
+    pending->request_id = request_id;
+    pending->config_saved = config_saved;
+    pending->disconnect_display_clients = disconnect_display_clients;
+    g_queue_push_tail(&client->producer->pending_control_acks, pending);
+    producer_evaluate_pending_control_acks(client->producer);
+}
+
 static gboolean
 send_display_error(Client* client, guint code, gboolean fatal, const gchar* format, ...)
 {
@@ -3347,7 +3528,9 @@ release_group_new(Producer*    producer,
                   guint32      buffer_index,
                   guint64      sequence,
                   guint        expected,
-                  guint64      aggregate_point)
+                  guint64      aggregate_point,
+                  guint64      renderer_instance_id,
+                  guint64      renderer_release_point)
 {
     ReleaseGroup* group = g_new0(ReleaseGroup, 1);
     group->producer = producer;
@@ -3355,6 +3538,11 @@ release_group_new(Producer*    producer,
     group->buffer_index = buffer_index;
     group->sequence = sequence;
     group->aggregate_point = aggregate_point;
+    group->renderer = route && renderer_release_point != 0
+        ? vivid_producer_renderer_ref(route->renderer)
+        : NULL;
+    group->renderer_instance_id = renderer_instance_id;
+    group->renderer_release_point = renderer_release_point;
     group->expected = MAX(expected, 1u);
     group->ref_count = 1;
     g_mutex_init(&group->lock);
@@ -3385,6 +3573,7 @@ release_group_unref(ReleaseGroup* group)
     g_mutex_unlock(&group->lock);
 
     if (free_group) {
+        vivid_producer_renderer_free(group->renderer);
         g_mutex_clear(&group->lock);
         g_free(group);
     }
@@ -3429,7 +3618,22 @@ release_group_complete(ReleaseGroup* group, const gchar* reason)
                   group->expected,
                   reason ? reason : "consumer-release",
                   g_strerror(drm_call_error(result)));
-        return;
+    }
+    if (group->renderer && group->renderer_release_point != 0) {
+        g_autoptr(GError) error = NULL;
+        if (!vivid_producer_renderer_complete_frame_release(
+                group->renderer,
+                group->renderer_instance_id,
+                group->renderer_release_point,
+                &error)) {
+            g_warning("VividProducer: worker release signal failed route=%u "
+                      "instance=%" G_GUINT64_FORMAT " point=%" G_GUINT64_FORMAT
+                      ": %s",
+                      group->route_id,
+                      group->renderer_instance_id,
+                      group->renderer_release_point,
+                      error ? error->message : "unknown release error");
+        }
     }
 }
 
@@ -3492,6 +3696,22 @@ producer_release_reaper_process(Producer* producer, ReleaseReaperRecord* record)
                                               handle,
                                               record->release_point,
                                               stopping ? "reaper-stop" : "consumer-release");
+        if (record->renderer && record->renderer_release_point != 0) {
+            g_autoptr(GError) error = NULL;
+            if (!vivid_producer_renderer_complete_frame_release(
+                    record->renderer,
+                    record->renderer_instance_id,
+                    record->renderer_release_point,
+                    &error)) {
+                g_warning("VividProducer: worker release signal failed output=%u "
+                          "instance=%" G_GUINT64_FORMAT " point=%"
+                          G_GUINT64_FORMAT ": %s",
+                          record->output_id,
+                          record->renderer_instance_id,
+                          record->renderer_release_point,
+                          error ? error->message : "unknown release error");
+            }
+        }
     }
     producer_release_destroy_syncobj(producer, handle, "release-binary");
     record->binary_handle = 0;
@@ -3515,6 +3735,7 @@ producer_release_reaper_thread(gpointer user_data)
 
         producer_release_reaper_process(producer, record);
         release_group_unref(record->release_group);
+        vivid_producer_renderer_free(record->renderer);
         g_free(record);
     }
 
@@ -3591,6 +3812,7 @@ producer_release_coordinator_stop(Producer* producer)
                                                  record->binary_handle,
                                                  "release-binary-drain");
             release_group_unref(record->release_group);
+            vivid_producer_renderer_free(record->renderer);
             g_free(record);
         }
         g_async_queue_unref(producer->release_queue);
@@ -3842,6 +4064,17 @@ output_prepare_renderer_buffers(Producer* producer, Output* output, GError** err
     if (!vivid_producer_renderer_prefers_dmabuf_buffers(output_renderer(output))) {
         set_buffer_error(error, "current renderer does not export DMA-BUF buffers");
         return VIVID_PRODUCER_RENDERER_DMABUF_PREPARE_UNSUPPORTED;
+    }
+
+    vivid_producer_renderer_set_target_extent(output_renderer(output),
+                                              output->width,
+                                              output->height,
+                                              output_render_scale(output));
+    if (!vivid_producer_renderer_is_ready_for_dmabuf_negotiation(
+            output_renderer(output))) {
+        set_buffer_error(error,
+                         "renderer worker is still completing its lifecycle transaction");
+        return VIVID_PRODUCER_RENDERER_DMABUF_PREPARE_NOT_READY;
     }
 
     for (guint retry = 0; retry <= VIVID_DMABUF_NEGOTIATION_MAX_BLACKLIST; retry++) {
@@ -4322,12 +4555,70 @@ producer_set_renderer_rebind_barrier(Producer* producer, const Output* output)
 }
 
 static void
+producer_resume_outputs_blocked_by_rebind_barrier(Producer* producer,
+                                                  guint32   cleared_output_id)
+{
+    if (!producer || !producer->routes || !producer->route_table.links)
+        return;
+
+    /*
+     * The process-wide Vulkan initialization barrier can suppress a worker edge
+     * from another independent route. For example, route B may publish FORMAT_CAPS
+     * while route A still owns the barrier; route B's one-shot progress source then
+     * observes the barrier, performs no negotiation, and goes idle. Clearing route
+     * A's barrier must therefore create a fresh edge for every still-pending route.
+     * Scheduling an idle instead of re-entering the rebind transaction keeps the
+     * current output's BIND/UNBIND commit atomic and preserves route-local ordering.
+     */
+    for (guint route_index = 0; route_index < producer->routes->len; route_index++) {
+        RenderRoute* route = g_ptr_array_index(producer->routes, route_index);
+        gboolean route_needs_progress = FALSE;
+        if (!route)
+            continue;
+
+        const guint64 renderer_generation =
+            vivid_producer_renderer_generation(route->renderer);
+        for (guint link_index = 0;
+             link_index < producer->route_table.links->len;
+             link_index++) {
+            RouteLink* link = g_ptr_array_index(producer->route_table.links,
+                                                link_index);
+            Output* pending_output = link ? link->output : NULL;
+            if (!link || !link->enabled || link->route != route ||
+                !pending_output || !pending_output->active ||
+                pending_output->output_id == cleared_output_id) {
+                continue;
+            }
+            if (!pending_output->needs_renderer_rebind &&
+                pending_output->renderer_generation == renderer_generation) {
+                continue;
+            }
+
+            pending_output->next_renderer_retry_time_usec = 0;
+            route_needs_progress = TRUE;
+        }
+
+        if (route_needs_progress)
+            route_schedule_worker_progress(route);
+    }
+}
+
+static void
 producer_clear_renderer_rebind_barrier(Producer* producer, const Output* output)
 {
     if (!producer)
         return;
-    if (!output || producer->renderer_rebind_barrier_output_id == output->output_id)
+
+    if (!output) {
         producer->renderer_rebind_barrier_output_id = 0;
+        return;
+    }
+    if (producer->renderer_rebind_barrier_output_id != output->output_id)
+        return;
+
+    producer->renderer_rebind_barrier_output_id = 0;
+    producer_resume_outputs_blocked_by_rebind_barrier(producer,
+                                                      output->output_id);
 }
 
 static gboolean
@@ -4503,6 +4794,10 @@ producer_relayout_outputs(Producer* producer, gboolean mark_rebind)
         route->width = route_size.width;
         route->height = route_size.height;
         route->scale = primary->scale;
+        vivid_producer_renderer_set_target_extent(route->renderer,
+                                                  route->width,
+                                                  route->height,
+                                                  route->scale);
 
         for (guint client_index = 0; client_index < producer->clients->len; client_index++) {
             Client* client = g_ptr_array_index(producer->clients, client_index);
@@ -4570,6 +4865,10 @@ producer_relayout_outputs(Producer* producer, gboolean mark_rebind)
             route->width = output->target_width;
             route->height = output->target_height;
             route->scale = output->scale;
+            vivid_producer_renderer_set_target_extent(route->renderer,
+                                                      route->width,
+                                                      route->height,
+                                                      route->scale);
             RouteLink* link = route_link_for_output(&producer->route_table, output);
             const OutputLayoutParams layout =
                 producer_output_layout_params(producer, output);
@@ -5132,13 +5431,12 @@ client_wait_unbind_ack(Client* client,
                                           now_usec);
     g_warning("VividProducer: UNBIND_DONE barrier timed out outputId=%u "
               "generation=%" G_GUINT64_FORMAT " age=%" G_GINT64_FORMAT
-              "ms remaining=%u; continuing teardown",
+              "ms remaining=%u; retaining the old generation",
               output_id,
               generation,
               age_usec >= 0 ? age_usec / 1000 : -1,
               vivid_unbind_ack_tracker_count(&client->unbind_acks));
-    vivid_unbind_ack_tracker_forget(&client->unbind_acks, output_id, generation);
-    return TRUE;
+    return FALSE;
 }
 
 static gboolean
@@ -5167,6 +5465,31 @@ output_memory_kind_name(OutputMemoryKind kind)
     return kind == OUTPUT_MEMORY_RENDERER_DMABUF ? "renderer" : "gbm";
 }
 
+static void
+complete_unsent_worker_frame(Output* output,
+                             guint64 renderer_instance_id,
+                             guint64 renderer_release_point,
+                             const gchar* reason)
+{
+    if (!output || renderer_release_point == 0)
+        return;
+    g_autoptr(GError) error = NULL;
+    if (!vivid_producer_renderer_complete_frame_release(
+            output_renderer(output),
+            renderer_instance_id,
+            renderer_release_point,
+            &error)) {
+        g_warning("VividProducer: unsent worker frame release failed output=%u "
+                  "instance=%" G_GUINT64_FORMAT " point=%" G_GUINT64_FORMAT
+                  " reason=%s: %s",
+                  output->output_id,
+                  renderer_instance_id,
+                  renderer_release_point,
+                  reason,
+                  error ? error->message : "unknown release error");
+    }
+}
+
 static gboolean
 send_frame_ready_event(Client* client,
                        Output* output,
@@ -5174,7 +5497,9 @@ send_frame_ready_event(Client* client,
                        guint64 sequence,
                        guint64 target_time_usec,
                        gint    acquire_sync_fd,
-                       ReleaseGroup* release_group)
+                       ReleaseGroup* release_group,
+                       guint64 renderer_instance_id,
+                       guint64 renderer_release_point)
 {
     OutputBuffer* buffer = output_find_buffer(output, buffer_index);
     if (!buffer) {
@@ -5187,6 +5512,11 @@ send_frame_ready_event(Client* client,
             close(acquire_sync_fd);
         if (release_group)
             release_group_complete(release_group, "unknown-buffer");
+        else
+            complete_unsent_worker_frame(output,
+                                         renderer_instance_id,
+                                         renderer_release_point,
+                                         "unknown-buffer");
         return FALSE;
     }
 
@@ -5195,6 +5525,11 @@ send_frame_ready_event(Client* client,
             close(acquire_sync_fd);
         if (release_group)
             release_group_complete(release_group, "socket-ordering-blocked");
+        else
+            complete_unsent_worker_frame(output,
+                                         renderer_instance_id,
+                                         renderer_release_point,
+                                         "socket-ordering-blocked");
         return FALSE;
     }
 
@@ -5203,6 +5538,11 @@ send_frame_ready_event(Client* client,
         if (!producer_create_signaled_sync_file(client->producer, &acquire_fd)) {
             if (release_group)
                 release_group_complete(release_group, "acquire-create-failed");
+            else
+                complete_unsent_worker_frame(output,
+                                             renderer_instance_id,
+                                             renderer_release_point,
+                                             "acquire-create-failed");
             return FALSE;
         }
     }
@@ -5213,6 +5553,11 @@ send_frame_ready_event(Client* client,
         close(acquire_fd);
         if (release_group)
             release_group_complete(release_group, "release-create-failed");
+        else
+            complete_unsent_worker_frame(output,
+                                         renderer_instance_id,
+                                         renderer_release_point,
+                                         "release-create-failed");
         return FALSE;
     }
     const guint64 release_point = release_group
@@ -5226,6 +5571,11 @@ send_frame_ready_event(Client* client,
                                          "release-binary");
         if (release_group)
             release_group_complete(release_group, "release-point-failed");
+        else
+            complete_unsent_worker_frame(output,
+                                         renderer_instance_id,
+                                         renderer_release_point,
+                                         "release-point-failed");
         return FALSE;
     }
 
@@ -5255,6 +5605,11 @@ send_frame_ready_event(Client* client,
                                          "release-binary-send-failed");
         if (release_group)
             release_group_complete(release_group, "send-failed");
+        else
+            complete_unsent_worker_frame(output,
+                                         renderer_instance_id,
+                                         renderer_release_point,
+                                         "send-failed");
         return FALSE;
     }
 
@@ -5284,6 +5639,11 @@ send_frame_ready_event(Client* client,
     record->release_point = release_point;
     record->created_usec = buffer->release_created_usec;
     record->release_group = release_group_ref(release_group);
+    if (!release_group && renderer_release_point != 0) {
+        record->renderer = vivid_producer_renderer_ref(output_renderer(output));
+        record->renderer_instance_id = renderer_instance_id;
+        record->renderer_release_point = renderer_release_point;
+    }
     if (!producer_release_coordinator_enqueue(client->producer, record)) {
         producer_release_signal_syncobj(client->producer,
                                         release_handle,
@@ -5295,11 +5655,28 @@ send_frame_ready_event(Client* client,
                                                   release_handle,
                                                   release_point,
                                                   "enqueue-failed");
+            if (record->renderer && record->renderer_release_point != 0) {
+                g_autoptr(GError) release_error = NULL;
+                if (!vivid_producer_renderer_complete_frame_release(
+                        record->renderer,
+                        record->renderer_instance_id,
+                        record->renderer_release_point,
+                        &release_error)) {
+                    g_warning("VividProducer: immediate worker release signal failed "
+                              "instance=%" G_GUINT64_FORMAT " point=%"
+                              G_GUINT64_FORMAT ": %s",
+                              record->renderer_instance_id,
+                              record->renderer_release_point,
+                              release_error ? release_error->message
+                                            : "unknown release error");
+                }
+            }
         }
         producer_release_destroy_syncobj(client->producer,
                                          release_handle,
                                          "release-binary-enqueue-failed");
         release_group_unref(record->release_group);
+        vivid_producer_renderer_free(record->renderer);
         g_free(record);
     }
     return result == 0;
@@ -5458,6 +5835,59 @@ client_prepare_rebind_candidate(Client*                     client,
 static OutputRebindResult
 client_rebind_output(Client* client, Output* output)
 {
+    if (output && output->route &&
+        vivid_producer_renderer_is_waiting_for_unbind(output->route->renderer)) {
+        RenderRoute* route = output->route;
+        Producer* producer = client->producer;
+        for (guint i = 0; producer->route_table.links &&
+             i < producer->route_table.links->len; i++) {
+            RouteLink* link = g_ptr_array_index(producer->route_table.links, i);
+            Output* route_output = link ? link->output : NULL;
+            if (!link || link->route != route || !route_output)
+                continue;
+            if (route_output->n_buffers > 0) {
+                if (!send_unbind(route_output->client,
+                                 route_output,
+                                 route_output->generation)) {
+                    g_warning("VividProducer: route=%u could not send UNBIND "
+                              "for output=%u generation=%" G_GUINT64_FORMAT,
+                              route->route_id,
+                              route_output->output_id,
+                              route_output->generation);
+                    return OUTPUT_REBIND_RESULT_FAILED;
+                }
+                if (!client_wait_unbind_ack(route_output->client,
+                                            route_output->output_id,
+                                            route_output->generation,
+                                            UNBIND_ACK_TIMEOUT_MSEC)) {
+                    g_warning("VividProducer: route=%u is still waiting for "
+                              "UNBIND_DONE output=%u generation=%"
+                              G_GUINT64_FORMAT,
+                              route->route_id,
+                              route_output->output_id,
+                              route_output->generation);
+                    return OUTPUT_REBIND_RESULT_NOT_READY;
+                }
+            }
+            output_release_buffers(route_output);
+            route_output->needs_renderer_rebind = TRUE;
+            route_output->needs_renderer_first_frame = FALSE;
+            route_output->next_renderer_retry_time_usec = 0;
+        }
+        g_autoptr(GError) stop_error = NULL;
+        if (!vivid_producer_renderer_complete_unbind(route->renderer,
+                                                     &stop_error)) {
+            g_warning("VividProducer: route=%u could not finish renderer unbind: %s",
+                      route->route_id,
+                      stop_error->message);
+            return OUTPUT_REBIND_RESULT_FAILED;
+        }
+        g_message("VividProducer: route=%u completed consumer UNBIND barrier; "
+                  "waiting for worker reap before next spawn",
+                  route->route_id);
+        return OUTPUT_REBIND_RESULT_NOT_READY;
+    }
+
     Output candidate = {0};
     /*
      * File descriptors are the one field where a zeroed C struct is not a
@@ -5492,6 +5922,10 @@ client_rebind_output(Client* client, Output* output)
             close(first_frame.acquire_sync_fd);
             first_frame.acquire_sync_fd = -1;
         }
+        complete_unsent_worker_frame(output,
+                                     first_frame.renderer_instance_id,
+                                     first_frame.release_point,
+                                     "rebind-prepare-failed");
         output_release_buffers(&candidate);
         g_clear_error(&error);
         return prepare_state == OUTPUT_REBIND_PREPARE_NOT_READY
@@ -5522,6 +5956,10 @@ client_rebind_output(Client* client, Output* output)
             close(first_frame.acquire_sync_fd);
             first_frame.acquire_sync_fd = -1;
         }
+        complete_unsent_worker_frame(output,
+                                     first_frame.renderer_instance_id,
+                                     first_frame.release_point,
+                                     "bind-config-send-failed");
         output_release_buffers(&candidate);
         return OUTPUT_REBIND_RESULT_FAILED;
     }
@@ -5553,6 +5991,10 @@ client_rebind_output(Client* client, Output* output)
             close(first_frame.acquire_sync_fd);
             first_frame.acquire_sync_fd = -1;
         }
+        complete_unsent_worker_frame(output,
+                                     first_frame.renderer_instance_id,
+                                     first_frame.release_point,
+                                     "cold-bind-defers-first-frame");
 
         output_release_buffers(output);
         *output = candidate;
@@ -5578,7 +6020,9 @@ client_rebind_output(Client* client, Output* output)
                                 first_frame.sequence,
                                 first_frame.target_time_usec,
                                 first_frame_acquire_fd,
-                                NULL)) {
+                                NULL,
+                                first_frame.renderer_instance_id,
+                                first_frame.release_point)) {
         output->needs_renderer_rebind = TRUE;
         if (send_unbind(client, &candidate, candidate.generation))
             client_wait_unbind_ack(client,
@@ -5857,7 +6301,9 @@ send_frame_ready(Client* client, Output* output)
                                                      sequence,
                                                      target_time_usec,
                                                      frame.acquire_sync_fd,
-                                                     NULL);
+                                                     NULL,
+                                                     frame.renderer_instance_id,
+                                                     frame.release_point);
         return sent;
     } else {
         if (!output->bo)
@@ -5885,7 +6331,9 @@ send_frame_ready(Client* client, Output* output)
                                                  sequence,
                                                  target_time_usec,
                                                  -1,
-                                                 NULL);
+                                                 NULL,
+                                                 0,
+                                                 0);
     return sent;
 }
 
@@ -5980,6 +6428,10 @@ route_send_frame(RenderRoute* route)
         if (!output_has_buffer_index(output, frame.buffer_index)) {
             if (frame.acquire_sync_fd >= 0)
                 close(frame.acquire_sync_fd);
+            complete_unsent_worker_frame(output,
+                                         frame.renderer_instance_id,
+                                         frame.release_point,
+                                         "route-buffer-mismatch");
             return FALSE;
         }
     }
@@ -5989,6 +6441,11 @@ route_send_frame(RenderRoute* route)
     if (aggregate_point == 0) {
         if (frame.acquire_sync_fd >= 0)
             close(frame.acquire_sync_fd);
+        Output* first_output = g_ptr_array_index(outputs, 0);
+        complete_unsent_worker_frame(first_output,
+                                     frame.renderer_instance_id,
+                                     frame.release_point,
+                                     "aggregate-point-allocation-failed");
         return FALSE;
     }
 
@@ -5997,7 +6454,9 @@ route_send_frame(RenderRoute* route)
                                             frame.buffer_index,
                                             frame.sequence,
                                             outputs->len,
-                                            aggregate_point);
+                                            aggregate_point,
+                                            frame.renderer_instance_id,
+                                            frame.release_point);
     render_route_release_note_buffer_point(route,
                                            frame.buffer_index,
                                            aggregate_point);
@@ -6026,7 +6485,9 @@ route_send_frame(RenderRoute* route)
                                     frame.sequence,
                                     frame.target_time_usec,
                                     acquire_fd,
-                                    group)) {
+                                    group,
+                                    0,
+                                    0)) {
             ok = FALSE;
         }
     }
@@ -6132,6 +6593,7 @@ route_stop_frame_source(RenderRoute* route)
         return;
     g_source_remove(route->frame_source_id);
     route->frame_source_id = 0;
+    route->frame_source_is_worker_event = FALSE;
 }
 
 void
@@ -6190,6 +6652,20 @@ route_orphan_reap_timeout(gpointer user_data)
     if (route_link_count_for_route(&route->producer->route_table, route) > 0)
         return G_SOURCE_REMOVE;
 
+    /*
+     * Route ownership must outlive the complete worker stop transaction. In
+     * particular, Web shutdown can legitimately spend longer than the route
+     * grace period draining CEF callbacks and helper processes. Re-arm the
+     * route timer until pidfd/group reaping has completed so destroying the
+     * route never turns a graceful shutdown into an owner-triggered SIGKILL.
+     */
+    if (vivid_producer_renderer_has_live_worker(route->renderer)) {
+        g_message("VividProducer: retaining orphan render route=%u until worker reap",
+                  route->route_id);
+        route_schedule_orphan_reap(route);
+        return G_SOURCE_REMOVE;
+    }
+
     g_message("VividProducer: reaping orphan render route=%u clone=%s",
               route->route_id,
               route->clone_route ? "true" : "false");
@@ -6210,6 +6686,7 @@ route_schedule_orphan_reap(RenderRoute* route)
 }
 
 static gboolean route_frame_tick(gpointer user_data);
+static void route_schedule_worker_progress(RenderRoute* route);
 
 static guint
 route_add_frame_source(RenderRoute* route)
@@ -6236,9 +6713,28 @@ route_add_frame_source(RenderRoute* route)
 static void
 route_ensure_frame_source(RenderRoute* route)
 {
-    if (!route || route->frame_source_id != 0)
+    if (!route)
         return;
-    if (route_link_count_for_route(&route->producer->route_table, route) == 0)
+    if (route_link_count_for_route(&route->producer->route_table, route) == 0) {
+        route_stop_frame_source(route);
+        return;
+    }
+
+    if (vivid_producer_renderer_prefers_dmabuf_buffers(route->renderer)) {
+        if (route->frame_source_id != 0 &&
+            !route->frame_source_is_worker_event) {
+            route_stop_frame_source(route);
+        }
+        if (route->frame_source_id == 0 &&
+            vivid_producer_renderer_pending_dmabuf_frame_count(route->renderer) != 0) {
+            route_schedule_worker_progress(route);
+        }
+        return;
+    }
+
+    if (route->frame_source_id != 0 && route->frame_source_is_worker_event)
+        route_stop_frame_source(route);
+    if (route->frame_source_id != 0)
         return;
     route->frame_source_id = route_add_frame_source(route);
 }
@@ -6317,6 +6813,118 @@ route_frame_tick(gpointer user_data)
     return G_SOURCE_CONTINUE;
 }
 
+static gboolean
+route_worker_progress_dispatch(gpointer user_data)
+{
+    RenderRoute* route = user_data;
+    if (!route)
+        return G_SOURCE_REMOVE;
+    route->frame_source_id = 0;
+    route->frame_source_is_worker_event = FALSE;
+
+    /*
+     * The retry timestamp only throttles repeated attempts made without new
+     * information. A validated worker edge is new information by definition:
+     * INIT may have published caps, negotiation may have published a pool, or
+     * the first frame may now be queued. Clear the per-output time gate so an
+     * edge that arrives just before the old deadline cannot be lost forever in
+     * an otherwise timer-free renderer route.
+     */
+    g_autoptr(GPtrArray) progress_outputs =
+        route_collect_outputs(route, route->producer);
+    for (guint i = 0; i < progress_outputs->len; i++) {
+        Output* output = g_ptr_array_index(progress_outputs, i);
+        if (output_needs_renderer_rebind(
+                output,
+                vivid_producer_renderer_generation(route->renderer))) {
+            output->next_renderer_retry_time_usec = 0;
+        }
+    }
+
+    /*
+     * A worker edge can make progress before a frame exists: FORMAT_CAPS lets
+     * the producer negotiate, and BIND_BUFFERS lets it bind the consumer. Run
+     * one unconditional transaction pass, then drain any queued frame ring
+     * only while route_frame_tick demonstrably consumes entries. Since every
+     * subsequent attempt is caused by a validated worker edge, lifecycle and
+     * UNBIND barriers cannot turn this idle source into a polling loop.
+     */
+    if (route_frame_tick(route) == G_SOURCE_REMOVE)
+        return G_SOURCE_REMOVE;
+
+    guint no_progress_passes = 0;
+    for (guint attempt = 0;
+         attempt <= VIVID_PRODUCER_RENDERER_MAX_BUFFERS;
+         attempt++) {
+        const guint before =
+            vivid_producer_renderer_pending_dmabuf_frame_count(route->renderer);
+        if (before == 0)
+            break;
+        if (route_frame_tick(route) == G_SOURCE_REMOVE)
+            break;
+        const guint after =
+            vivid_producer_renderer_pending_dmabuf_frame_count(route->renderer);
+        if (after < before) {
+            no_progress_passes = 0;
+            continue;
+        }
+        no_progress_passes++;
+        if (no_progress_passes >= 2)
+            break;
+    }
+    return G_SOURCE_REMOVE;
+}
+
+static void
+route_schedule_worker_progress(RenderRoute* route)
+{
+    if (!route || route->frame_source_id != 0)
+        return;
+    GSource* source = g_idle_source_new();
+    g_source_set_priority(source, G_PRIORITY_HIGH);
+    g_source_set_callback(source, route_worker_progress_dispatch, route, NULL);
+    g_source_set_name(source, "vivid-producer-worker-progress-event");
+    route->frame_source_id = g_source_attach(source, NULL);
+    route->frame_source_is_worker_event = TRUE;
+    g_source_unref(source);
+}
+
+static void
+route_renderer_progress(VividProducerRenderer* renderer, gpointer user_data)
+{
+    RenderRoute* route = user_data;
+    if (!route || route->renderer != renderer || !route->producer)
+        return;
+    if (route_link_count_for_route(&route->producer->route_table, route) == 0) {
+        /*
+         * An orphan route has no consumer that can answer UNBIND. Once the
+         * worker reports QUIESCED, complete the empty barrier immediately and
+         * signal every accepted release point before requesting SHUTDOWN.
+         */
+        if (vivid_producer_renderer_is_waiting_for_unbind(renderer)) {
+            g_autoptr(GError) error = NULL;
+            if (!vivid_producer_renderer_complete_unbind(renderer, &error)) {
+                g_warning("VividProducer: orphan route=%u renderer UNBIND completion failed: %s",
+                          route->route_id,
+                          error ? error->message : "unknown error");
+            } else {
+                g_message("VividProducer: orphan route=%u completed empty UNBIND barrier",
+                          route->route_id);
+            }
+        }
+        producer_maybe_finish_shutdown(route->producer);
+        return;
+    }
+    g_debug("VividProducer: worker progress edge route=%u pending-frames=%u",
+            route->route_id,
+            vivid_producer_renderer_pending_dmabuf_frame_count(renderer));
+    if (route->frame_source_id != 0 && !route->frame_source_is_worker_event)
+        route_stop_frame_source(route);
+    route_schedule_worker_progress(route);
+    producer_evaluate_pending_control_acks(route->producer);
+    producer_maybe_finish_shutdown(route->producer);
+}
+
 static void
 producer_restart_frame_sources(Producer* producer)
 {
@@ -6355,7 +6963,7 @@ json_object_get_uint_default(JsonObject* object,
                              const char* member,
                              guint32     fallback)
 {
-    if (!object || !json_object_has_member(object, member))
+    if (!object || !json_object_has_member((JsonObject*)object, member))
         return fallback;
     return (guint32)MAX(0, json_object_get_int_member(object, member));
 }
@@ -6365,7 +6973,7 @@ json_object_get_int_default(JsonObject* object,
                             const char* member,
                             gint32      fallback)
 {
-    if (!object || !json_object_has_member(object, member))
+    if (!object || !json_object_has_member((JsonObject*)object, member))
         return fallback;
     return (gint32)json_object_get_int_member(object, member);
 }
@@ -6449,13 +7057,13 @@ client_build_output_index_entries(Client* client, guint* n_entries_out)
 }
 
 static gboolean
-json_object_get_boolean_default(JsonObject* object,
+json_object_get_boolean_default(const JsonObject* object,
                                 const gchar* member,
                                 gboolean     fallback)
 {
-    if (!object || !json_object_has_member(object, member))
+    if (!object || !json_object_has_member((JsonObject*)object, member))
         return fallback;
-    return json_object_get_boolean_member(object, member);
+    return json_object_get_boolean_member((JsonObject*)object, member);
 }
 
 static void
@@ -6949,7 +7557,8 @@ producer_apply_playback_policy(Producer* producer)
         !render_route_is_used(producer, clone_route);
 
     vivid_producer_renderer_set_playback_stopped(producer->renderer,
-                                                 producer->policy_stopped);
+                                                 producer->policy_stopped ||
+                                                     clone_renderer_idle);
     vivid_producer_renderer_set_playback_paused(
         producer->renderer,
         clone_renderer_idle || producer->policy_paused ||
@@ -6958,11 +7567,13 @@ producer_apply_playback_policy(Producer* producer)
         RenderRoute* route = g_ptr_array_index(producer->routes, i);
         if (!route || !route->owns_renderer || !route->renderer)
             continue;
+        const gboolean route_idle = !render_route_is_used(producer, route);
         vivid_producer_renderer_set_playback_stopped(route->renderer,
-                                                     producer->policy_stopped);
+                                                     producer->policy_stopped ||
+                                                         route_idle);
         vivid_producer_renderer_set_playback_paused(
             route->renderer,
-            !render_route_is_used(producer, route) ||
+            route_idle ||
             producer->policy_paused || route->policy_paused ||
             producer->policy_stopped || !producer->user_playing);
     }
@@ -7145,7 +7756,10 @@ producer_apply_config_to_routes(Producer* producer)
             continue;
         producer_render_route_apply_config(route);
         vivid_producer_renderer_set_playback_stopped(route->renderer,
-                                                     producer->policy_stopped);
+                                                     producer->policy_stopped ||
+                                                         !render_route_is_used(
+                                                             producer,
+                                                             route));
         vivid_producer_renderer_set_playback_paused(
             route->renderer,
             producer->policy_paused || route->policy_paused ||
@@ -7404,6 +8018,13 @@ handle_control(Client* client, const guint8* body, gsize body_len)
     }
     g_clear_error(&apply_error);
 
+    if (header.opcode == VIVID_DISPLAY_CONTROL_SET_STATE) {
+        producer_cancel_pending_control_acks(
+            client->producer,
+            "renderer startup was superseded by a newer SET_STATE request");
+        producer_clear_renderer_startup_errors(client->producer);
+    }
+
     vivid_producer_config_schedule_save(&client->producer->config);
     producer_relayout_outputs(client->producer, TRUE);
     producer_apply_config_to_renderers(client->producer);
@@ -7428,9 +8049,22 @@ handle_control(Client* client, const guint8* body, gsize body_len)
               header.opcode,
               changed ? "true" : "false");
 
-    send_control_ack(client, header.opcode, TRUE, request_id);
-    if (render_device_changed) {
-        producer_disconnect_display_clients(client->producer, client);
+    if (header.opcode == VIVID_DISPLAY_CONTROL_SET_STATE) {
+        /*
+         * SET_STATE can replace the renderer process identity. A successful
+         * config parse only records intent; the operation is complete after
+         * every required route has accepted a first frame and entered ACTIVE.
+         * Startup failures are reported through the same pending transaction.
+         */
+        producer_queue_renderer_control_ack(client,
+                                            header.opcode,
+                                            request_id,
+                                            TRUE,
+                                            render_device_changed);
+    } else {
+        send_control_ack(client, header.opcode, TRUE, request_id);
+        if (render_device_changed)
+            producer_disconnect_display_clients(client->producer, client);
     }
     vivid_producer_config_free_display_prefs_snapshot(previous_display_prefs);
     g_object_unref(parser);
@@ -8232,6 +8866,11 @@ handle_unbind_done(Client* client, const guint8* body, gsize body_len)
     guint64 generation = 0;
     json_value_to_uint64(json_object_get_member(object, VIVID_JSON_UNBIND_DONE_GENERATION), &generation);
     const guint32 output_id = json_object_get_uint_default(object, VIVID_JSON_UNBIND_DONE_OUTPUT_ID, 0);
+    const gint64 ack_age_usec =
+        vivid_unbind_ack_tracker_age_usec(&client->unbind_acks,
+                                          output_id,
+                                          generation,
+                                          g_get_monotonic_time());
     const VividUnbindAckResult ack_result =
         vivid_unbind_ack_tracker_ack(&client->unbind_acks, output_id, generation);
     if (ack_result == VIVID_UNBIND_ACK_RESULT_MATCHED) {
@@ -8240,6 +8879,40 @@ handle_unbind_done(Client* client, const guint8* body, gsize body_len)
                   output_id,
                   generation,
                   vivid_unbind_ack_tracker_count(&client->unbind_acks));
+
+        for (guint i = 0;
+             ack_age_usec >= (gint64)UNBIND_ACK_TIMEOUT_MSEC * 1000 &&
+             i < client->outputs->len;
+             i++) {
+            Output* output = g_ptr_array_index(client->outputs, i);
+            if (!output || output->output_id != output_id ||
+                output->generation != generation || !output->route ||
+                !vivid_producer_renderer_is_waiting_for_unbind(
+                    output->route->renderer)) {
+                continue;
+            }
+
+            /*
+             * A synchronous UNBIND barrier may time out just before the ACK is
+             * dispatched by the normal client socket source. The renderer has
+             * already entered UNBINDING at that point, so no worker edge will
+             * arrive to retry the route. Retire the acknowledged generation
+             * immediately and enqueue one route transaction. Clearing the
+             * buffers here also prevents that transaction from sending a
+             * duplicate UNBIND and registering the same barrier again.
+             */
+            output_release_buffers(output);
+            output->needs_renderer_rebind = TRUE;
+            output->needs_renderer_first_frame = FALSE;
+            output->next_renderer_retry_time_usec = 0;
+            g_message("VividProducer: late UNBIND_DONE resumes route=%u "
+                      "output=%u generation=%" G_GUINT64_FORMAT,
+                      output->route->route_id,
+                      output_id,
+                      generation);
+            route_schedule_worker_progress(output->route);
+            break;
+        }
     } else {
         g_message("VividProducer: consumer UNBIND_DONE stale/unknown output=%u "
                   "generation=%" G_GUINT64_FORMAT " pending=%u",
@@ -8383,6 +9056,16 @@ client_free(Client* client)
 
     Producer* producer = client->producer;
     if (producer) {
+        GList* link = producer->pending_control_acks.head;
+        while (link) {
+            GList* next = link->next;
+            PendingControlAck* pending = link->data;
+            if (pending && pending->client == client) {
+                g_queue_delete_link(&producer->pending_control_acks, link);
+                g_free(pending);
+            }
+            link = next;
+        }
         for (guint i = 0; i < producer->clients->len; i++) {
             if (g_ptr_array_index(producer->clients, i) == client) {
                 g_ptr_array_remove_index_fast(producer->clients, i);
@@ -8410,6 +9093,7 @@ client_free(Client* client)
     }
     g_ptr_array_unref(client->outputs);
     if (producer) {
+        producer_apply_playback_policy(producer);
         producer_prune_unused_routes(producer);
         producer_sync_route_frame_sources(producer);
     }
@@ -8518,11 +9202,8 @@ producer_start(Producer* producer)
 }
 
 static void
-producer_stop(Producer* producer)
+producer_stop_accepting(Producer* producer)
 {
-    while (producer->clients->len > 0)
-        client_free(g_ptr_array_index(producer->clients, 0));
-
     if (producer->accept_source_id != 0) {
         g_source_remove(producer->accept_source_id);
         producer->accept_source_id = 0;
@@ -8537,6 +9218,73 @@ producer_stop(Producer* producer)
         unlink(producer->socket_path);
         producer->socket_bound = FALSE;
     }
+}
+
+static gboolean
+producer_has_live_renderer_workers(Producer* producer)
+{
+    if (!producer)
+        return FALSE;
+    if (vivid_producer_renderer_has_live_worker(producer->renderer))
+        return TRUE;
+
+    for (guint i = 0; producer->routes && i < producer->routes->len; i++) {
+        RenderRoute* route = g_ptr_array_index(producer->routes, i);
+        if (route && route->owns_renderer &&
+            vivid_producer_renderer_has_live_worker(route->renderer)) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static void
+producer_maybe_finish_shutdown(Producer* producer)
+{
+    if (!producer || !producer->shutdown_requested ||
+        producer_has_live_renderer_workers(producer)) {
+        return;
+    }
+
+    const gdouble elapsed_ms = producer->shutdown_started_usec > 0
+        ? (gdouble)(g_get_monotonic_time() - producer->shutdown_started_usec) / 1000.0
+        : 0.0;
+    g_message("VividProducer: all renderer workers reaped; daemon shutdown transaction "
+              "complete elapsed-ms=%.3f",
+              elapsed_ms);
+    g_main_loop_quit(producer->loop);
+}
+
+static void
+producer_begin_shutdown(Producer* producer)
+{
+    if (!producer || producer->shutdown_requested)
+        return;
+
+    producer->shutdown_requested = TRUE;
+    producer->shutdown_started_usec = g_get_monotonic_time();
+    g_message("VividProducer: daemon shutdown requested; draining clients and renderer workers");
+
+    /*
+     * Keep the singleton lock until every supervised process has been reaped,
+     * but stop accepting display traffic before detaching current outputs.
+     * client_free() then drives each now-unused route through the same policy,
+     * QUIESCE, empty UNBIND barrier, SHUTDOWN, and pidfd path used at runtime.
+     */
+    producer_stop_accepting(producer);
+    while (producer->clients->len > 0)
+        client_free(g_ptr_array_index(producer->clients, 0));
+    vivid_producer_config_flush_save(&producer->config);
+    producer_maybe_finish_shutdown(producer);
+}
+
+static void
+producer_stop(Producer* producer)
+{
+    while (producer->clients->len > 0)
+        client_free(g_ptr_array_index(producer->clients, 0));
+
+    producer_stop_accepting(producer);
 
     if (producer->lock_fd >= 0) {
         flock(producer->lock_fd, LOCK_UN);
@@ -8552,7 +9300,7 @@ static gboolean
 quit_on_signal(gpointer user_data)
 {
     Producer* producer = user_data;
-    g_main_loop_quit(producer->loop);
+    producer_begin_shutdown(producer);
     return G_SOURCE_REMOVE;
 }
 
@@ -8560,12 +9308,9 @@ int
 main(int argc, char** argv)
 {
     /*
-     * Renderer modules run in-process and may use libraries whose internal
-     * wakeup channels are ordinary Unix pipes. PulseAudio's mainloop can
-     * briefly write to such a pipe while another thread is tearing it down;
-     * EPIPE is recoverable, but the default SIGPIPE disposition would kill
-     * the entire producer and disconnect every display. Socket sends still
-     * use MSG_NOSIGNAL so their normal error handling remains unchanged.
+     * Renderer and display transports are independently supervised sockets.
+     * Ignoring SIGPIPE keeps a peer exit inside the explicit GLib lifecycle
+     * transaction where pidfd/socket errors can be logged with route identity.
      */
     struct sigaction ignore_sigpipe = { .sa_handler = SIG_IGN };
     sigemptyset(&ignore_sigpipe.sa_mask);
@@ -8590,6 +9335,7 @@ main(int argc, char** argv)
     vivid_route_table_init(&producer.route_table);
     g_mutex_init(&producer.release_lock);
     gchar* config_path = NULL;
+    gchar* renderer_registry_root = NULL;
     gint cli_fps = 0;
 
     GOptionEntry entries[] = {
@@ -8599,6 +9345,9 @@ main(int argc, char** argv)
          "Producer JSON config path", "PATH"},
         {"fps", 0, 0, G_OPTION_ARG_INT, &cli_fps,
          "Frame-ready notification rate", "FPS"},
+        {"renderer-registry", 0, 0, G_OPTION_ARG_FILENAME,
+         &renderer_registry_root,
+         "Renderer manifest root", "PATH"},
         {NULL},
     };
 
@@ -8615,6 +9364,7 @@ main(int argc, char** argv)
         g_ptr_array_unref(producer.release_gate_contexts);
         g_mutex_clear(&producer.release_lock);
         g_free(producer.socket_path);
+        g_free(renderer_registry_root);
         return 1;
     }
     g_option_context_free(context);
@@ -8630,9 +9380,41 @@ main(int argc, char** argv)
         producer_sync_frame_rate_from_config(&producer, "config");
     g_message("VividProducer: config path %s", producer.config.config_path);
 
-    producer.renderer = vivid_producer_renderer_new();
-    producer_apply_config_to_global_renderer(&producer);
+    if (!renderer_registry_root || !*renderer_registry_root) {
+        g_printerr("VividProducer: --renderer-registry is required\n");
+        vivid_route_table_clear(&producer.route_table);
+        g_ptr_array_unref(producer.routes);
+        g_ptr_array_unref(producer.clients);
+        g_ptr_array_unref(producer.release_gate_contexts);
+        g_mutex_clear(&producer.release_lock);
+        vivid_producer_config_clear(&producer.config);
+        g_free(producer.socket_path);
+        g_free(renderer_registry_root);
+        return 1;
+    }
+    producer.renderer_registry = vivid_renderer_registry_load(
+        renderer_registry_root,
+        &error);
+    if (!producer.renderer_registry) {
+        g_printerr("VividProducer: renderer registry load failed: %s\n",
+                   error->message);
+        g_clear_error(&error);
+        vivid_route_table_clear(&producer.route_table);
+        g_ptr_array_unref(producer.routes);
+        g_ptr_array_unref(producer.clients);
+        g_ptr_array_unref(producer.release_gate_contexts);
+        g_mutex_clear(&producer.release_lock);
+        vivid_producer_config_clear(&producer.config);
+        g_free(producer.socket_path);
+        g_free(renderer_registry_root);
+        return 1;
+    }
+    g_free(renderer_registry_root);
+    producer.renderer = vivid_producer_renderer_new(producer.renderer_registry,
+                                                    "root");
+    /* Keep a configured project dormant until at least one route is attached. */
     producer_apply_playback_policy(&producer);
+    producer_apply_config_to_global_renderer(&producer);
 
     producer.loop = g_main_loop_new(NULL, FALSE);
 
@@ -8640,6 +9422,7 @@ main(int argc, char** argv)
         vivid_route_table_clear(&producer.route_table);
         g_ptr_array_unref(producer.routes);
         vivid_producer_renderer_free(producer.renderer);
+        vivid_renderer_registry_free(producer.renderer_registry);
         g_ptr_array_unref(producer.release_gate_contexts);
         g_main_loop_unref(producer.loop);
         g_ptr_array_unref(producer.clients);
@@ -8654,6 +9437,7 @@ main(int argc, char** argv)
         g_ptr_array_unref(producer.routes);
         producer_close_dmabuf_allocator(&producer);
         vivid_producer_renderer_free(producer.renderer);
+        vivid_renderer_registry_free(producer.renderer_registry);
         g_ptr_array_unref(producer.release_gate_contexts);
         g_main_loop_unref(producer.loop);
         g_ptr_array_unref(producer.clients);
@@ -8670,6 +9454,7 @@ main(int argc, char** argv)
         producer_release_coordinator_stop(&producer);
         producer_close_dmabuf_allocator(&producer);
         vivid_producer_renderer_free(producer.renderer);
+        vivid_renderer_registry_free(producer.renderer_registry);
         g_ptr_array_unref(producer.release_gate_contexts);
         g_main_loop_unref(producer.loop);
         g_ptr_array_unref(producer.clients);
@@ -8690,6 +9475,7 @@ main(int argc, char** argv)
     producer_release_coordinator_stop(&producer);
     producer_close_dmabuf_allocator(&producer);
     vivid_producer_renderer_free(producer.renderer);
+    vivid_renderer_registry_free(producer.renderer_registry);
     g_clear_pointer(&producer.release_gate_contexts, g_ptr_array_unref);
     g_main_loop_unref(producer.loop);
     g_clear_pointer(&producer.clients, g_ptr_array_unref);

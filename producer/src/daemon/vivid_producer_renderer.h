@@ -9,6 +9,7 @@
 #define VIVID_PRODUCER_RENDERER_H
 
 #include "vivid_producer_config.h"
+#include "vivid_renderer_registry.h"
 #include "../graphics/vivid_gpu_devices.h"
 #include "../renderer_api/vivid_renderer_release_gate.h"
 
@@ -20,6 +21,10 @@
 #define VIVID_PRODUCER_RENDERER_DMABUF_MAX_CAPS 64u
 
 typedef struct _VividProducerRenderer VividProducerRenderer;
+
+typedef void (*VividProducerRendererProgressFunc)(
+    VividProducerRenderer* renderer,
+    gpointer user_data);
 
 typedef enum
 {
@@ -101,6 +106,9 @@ typedef struct
      * before returning the frame.
      */
     gint    acquire_sync_fd;
+    /* Worker timeline point that becomes reusable after all consumers release. */
+    guint64 release_point;
+    guint64 renderer_instance_id;
 } VividProducerRendererFrame;
 
 typedef enum
@@ -110,10 +118,15 @@ typedef enum
     VIVID_PRODUCER_RENDERER_DMABUF_PREPARE_UNSUPPORTED = 2,
 } VividProducerRendererDmaBufPrepareStatus;
 
-VividProducerRenderer* vivid_producer_renderer_new(void);
+VividProducerRenderer* vivid_producer_renderer_new(
+    const VividRendererRegistry* registry,
+    const gchar* route_id);
 VividProducerRenderer* vivid_producer_renderer_new_from_gpu_devices(
+    const VividRendererRegistry* registry,
+    const gchar* route_id,
     const VividGpuDeviceList* gpu_devices);
 void                    vivid_producer_renderer_free(VividProducerRenderer* renderer);
+VividProducerRenderer* vivid_producer_renderer_ref(VividProducerRenderer* renderer);
 
 void vivid_producer_renderer_apply_config(VividProducerRenderer*     renderer,
                                            const VividProducerConfig* config,
@@ -130,6 +143,19 @@ void vivid_producer_renderer_set_audio_samples(VividProducerRenderer* renderer,
 guint64 vivid_producer_renderer_generation(VividProducerRenderer* renderer);
 const gchar* vivid_producer_renderer_project_path(VividProducerRenderer* renderer);
 const gchar* vivid_producer_renderer_user_properties_json(VividProducerRenderer* renderer);
+void vivid_producer_renderer_set_target_extent(VividProducerRenderer* renderer,
+                                                guint32 width,
+                                                guint32 height,
+                                                gdouble scale);
+gboolean vivid_producer_renderer_is_waiting_for_unbind(
+    VividProducerRenderer* renderer);
+gboolean vivid_producer_renderer_complete_unbind(VividProducerRenderer* renderer,
+                                                  GError** error);
+gboolean vivid_producer_renderer_complete_frame_release(
+    VividProducerRenderer* renderer,
+    guint64 renderer_instance_id,
+    guint64 release_point,
+    GError** error);
 
 /*
  * GPU device facts for the control plane: the cached enumeration result and
@@ -151,6 +177,8 @@ gboolean vivid_producer_renderer_write_frame(VividProducerRenderer* renderer,
                                               guint64                 sequence);
 
 gboolean vivid_producer_renderer_prefers_dmabuf_buffers(VividProducerRenderer* renderer);
+gboolean vivid_producer_renderer_is_ready_for_dmabuf_negotiation(
+    VividProducerRenderer* renderer);
 gboolean vivid_producer_renderer_query_dmabuf_caps(
     VividProducerRenderer*             renderer,
     VividProducerRendererDmaBufCaps*   out_caps);
@@ -171,6 +199,28 @@ vivid_producer_renderer_prepare_dmabuf_buffers_ex(
     VividProducerRendererBufferSet* out_set);
 gboolean vivid_producer_renderer_next_dmabuf_frame(VividProducerRenderer*      renderer,
                                                     VividProducerRendererFrame* out_frame);
+guint vivid_producer_renderer_pending_dmabuf_frame_count(
+    VividProducerRenderer* renderer);
+/*
+ * Called after a validated worker state transition or protocol packet changes
+ * what the producer can do next.  The callback is deliberately edge-driven:
+ * the daemon uses it to advance negotiation, bind, first-frame, and shutdown
+ * transactions without polling a renderer process from a frame clock.
+ */
+void vivid_producer_renderer_set_progress_callback(
+    VividProducerRenderer* renderer,
+    VividProducerRendererProgressFunc callback,
+    gpointer user_data);
+gboolean vivid_producer_renderer_requires_worker(
+    VividProducerRenderer* renderer);
+gboolean vivid_producer_renderer_worker_is_active(
+    VividProducerRenderer* renderer);
+gboolean vivid_producer_renderer_has_live_worker(
+    VividProducerRenderer* renderer);
+const gchar* vivid_producer_renderer_startup_error(
+    VividProducerRenderer* renderer);
+void vivid_producer_renderer_clear_startup_error(
+    VividProducerRenderer* renderer);
 gboolean vivid_producer_renderer_request_dmabuf_frame(VividProducerRenderer* renderer,
                                                        const gchar*            reason);
 void vivid_producer_renderer_buffer_set_clear(VividProducerRendererBufferSet* set);

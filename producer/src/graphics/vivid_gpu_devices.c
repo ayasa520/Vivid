@@ -461,6 +461,19 @@ vivid_gpu_devices_enumerate(VividGpuDeviceList* out_list)
                   device.vendor_id,
                   device.is_discrete ? "true" : "false",
                   device.scene_dmabuf_n_caps);
+        for (guint32 cap_index = 0;
+             cap_index < device.scene_dmabuf_n_caps;
+             cap_index++) {
+            const VividGpuDmaBufFormatCap* cap =
+                &device.scene_dmabuf_caps[cap_index];
+            g_debug("VividGpuDevices: device[%u] dmabuf-cap[%u] fourcc=0x%08x "
+                    "modifier=0x%016" G_GINT64_MODIFIER "x planes=%u",
+                    out_list->n_devices - 1,
+                    cap_index,
+                    cap->fourcc,
+                    cap->modifier,
+                    cap->plane_count);
+        }
     }
 
     g_free(gpus);

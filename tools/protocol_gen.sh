@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Single entry point for vivid_display_v1.toml codegen and drift checks.
+# Single entry point for public display and private renderer protocol codegen.
 
 set -euo pipefail
 
@@ -9,9 +9,13 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PROTO_DIR="${REPO_ROOT}/producer/src/protocol"
 PROTO_GEN="${PROTO_DIR}/protocol_gen.py"
 PROTO_SPEC="${PROTO_DIR}/vivid_display_v1.toml"
+RENDERER_PROTO_SPEC="${PROTO_DIR}/vivid_renderer_v1.toml"
 
 exec python3 "${PROTO_GEN}" \
   --spec "${PROTO_SPEC}" \
+  --renderer-spec "${RENDERER_PROTO_SPEC}" \
+  --renderer-c-out "${PROTO_DIR}/vivid_renderer_protocol.h" \
+  --renderer-docs-out "${REPO_ROOT}/docs/renderer-protocol-reference.md" \
   --c-ids-out "${PROTO_DIR}/vivid_display_protocol_ids.h" \
   --gnome-ids-out "${REPO_ROOT}/consumer/gnome/src/protocol/vivid_display_protocol_ids.h" \
   --gnome-out "${REPO_ROOT}/consumer/gnome/extension/shell/helper/protocol-constants.js" \

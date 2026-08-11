@@ -15,6 +15,8 @@ ERROR_NAMES = {
     204: "UPDATE_OUTPUT_INVALID",
     300: "CONTROL_MALFORMED",
     301: "CONTROL_INVALID",
+    302: "CONTROL_RENDERER_START_FAILED",
+    303: "CONTROL_SUPERSEDED",
 }
 
 ERROR_DOMAINS = {
@@ -32,6 +34,8 @@ ERROR_DOMAINS = {
     204: "output",
     300: "control",
     301: "control",
+    302: "control",
+    303: "control",
 }
 
 ERROR_TERMINAL = {
@@ -49,6 +53,8 @@ ERROR_TERMINAL = {
     204: False,
     300: False,
     301: False,
+    302: False,
+    303: False,
 }
 
 BIND_FAILED_REASON_NAMES = {

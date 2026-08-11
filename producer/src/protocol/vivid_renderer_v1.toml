@@ -1,0 +1,474 @@
+# Vivid renderer-v1 internal protocol specification — sole handwritten source of truth.
+# Regenerate bindings with: tools/vivid.sh protocol regen
+
+[protocol]
+name = "vivid-renderer-v1"
+version = 1
+spawn-version = 1
+magic = 0x31525656 # "VVR1" when serialized as little-endian bytes.
+byte-order = "little"
+
+[constants]
+MAX_PACKET_BYTES = 262144
+MAX_PAYLOAD_BYTES = 262116
+MAX_FDS_PER_MESSAGE = 32
+MAX_RENDERER_ID_BYTES = 128
+MAX_PROJECT_PATH_BYTES = 4096
+MAX_RENDER_NODE_BYTES = 256
+MAX_SETTINGS_JSON_BYTES = 65536
+MAX_PROPERTIES_JSON_BYTES = 65536
+MAX_MEDIA_STATE_JSON_BYTES = 65536
+MAX_STATE_JSON_BYTES = 65536
+MAX_DIAGNOSTIC_BYTES = 4096
+MAX_FORMAT_CAPS = 128
+MAX_POOL_BUFFERS = 8
+MAX_PLANES = 4
+MAX_AUDIO_SAMPLES = 128
+UUID_BYTES = 16
+LIFECYCLE_HELLO_TIMEOUT_MS = 5000
+LIFECYCLE_INIT_TIMEOUT_MS = 60000
+LIFECYCLE_QUIESCE_TIMEOUT_MS = 5000
+LIFECYCLE_SHUTDOWN_TIMEOUT_MS = 10000
+LIFECYCLE_TERM_TIMEOUT_MS = 3000
+BACKEND_READY_POLL_INTERVAL_MS = 5
+
+[header]
+fields = [
+  { name = "magic", type = "u32" },
+  { name = "version", type = "u16" },
+  { name = "opcode", type = "u16" },
+  { name = "payload_length", type = "u32" },
+  { name = "request_id", type = "u64" },
+  { name = "renderer_instance_id", type = "u64" },
+]
+
+[enums.renderer-kind]
+c-name = "VividRendererKind"
+prefix = "VIVID_RENDERER_KIND_"
+members = [
+  { name = "SCENE", value = 1 },
+  { name = "WEB", value = 2 },
+  { name = "VIDEO", value = 3 },
+]
+
+[enums.memory-source]
+c-name = "VividRendererMemorySource"
+prefix = "VIVID_RENDERER_MEMORY_SOURCE_"
+members = [
+  { name = "GPU_NATIVE", value = 0 },
+  { name = "GPU_LINEAR", value = 1 },
+  { name = "DMABUF_HEAP_RESERVED", value = 2 },
+]
+
+[enums.sync-cap]
+c-name = "VividRendererSyncCap"
+prefix = "VIVID_RENDERER_SYNC_CAP_"
+members = [
+  { name = "IMPLICIT", value = 1 },
+  { name = "SYNCOBJ_BINARY", value = 2 },
+  { name = "SYNCOBJ_TIMELINE", value = 4 },
+]
+
+[enums.memory-hint]
+c-name = "VividRendererMemoryHint"
+prefix = "VIVID_RENDERER_MEMORY_HINT_"
+members = [
+  { name = "DEVICE_LOCAL", value = 1 },
+  { name = "HOST_VISIBLE", value = 2 },
+  { name = "SCANOUT_CAPABLE", value = 4 },
+  { name = "PROTECTED", value = 8 },
+  { name = "LINEAR_ONLY_RESERVED", value = 16 },
+]
+
+[enums.color-cap]
+c-name = "VividRendererColorCap"
+prefix = "VIVID_RENDERER_COLOR_CAP_"
+members = [
+  { name = "SRGB", value = 1 },
+  { name = "LINEAR", value = 2 },
+  { name = "BT601", value = 4 },
+  { name = "BT709", value = 8 },
+  { name = "BT2020", value = 16 },
+  { name = "RANGE_FULL", value = 32 },
+  { name = "RANGE_LIMITED", value = 64 },
+  { name = "ALPHA_PREMULTIPLIED", value = 128 },
+  { name = "ALPHA_STRAIGHT", value = 256 },
+]
+
+[enums.relay-mode]
+c-name = "VividRendererRelayMode"
+prefix = "VIVID_RENDERER_RELAY_MODE_"
+members = [
+  { name = "SHADOW_COPY", value = 1 },
+]
+
+[enums.buffer-flag]
+c-name = "VividRendererBufferFlag"
+prefix = "VIVID_RENDERER_BUFFER_FLAG_"
+members = [
+  { name = "PREMULTIPLIED", value = 1 },
+]
+
+[enums.playback-flag]
+c-name = "VividRendererPlaybackFlag"
+prefix = "VIVID_RENDERER_PLAYBACK_FLAG_"
+members = [
+  { name = "PLAYING", value = 1 },
+  { name = "MUTED", value = 2 },
+]
+
+[enums.lifecycle-stage]
+c-name = "VividRendererLifecycleStage"
+prefix = "VIVID_RENDERER_STAGE_"
+members = [
+  { name = "BOOT", value = 1 },
+  { name = "HANDSHAKE", value = 2 },
+  { name = "BACKEND_INIT", value = 3 },
+  { name = "NEGOTIATION", value = 4 },
+  { name = "RUNNING", value = 5 },
+  { name = "QUIESCE", value = 6 },
+  { name = "SHUTDOWN", value = 7 },
+]
+
+[enums.error-code]
+c-name = "VividRendererErrorCode"
+prefix = "VIVID_RENDERER_ERROR_"
+members = [
+  { name = "PROTOCOL", value = 1 },
+  { name = "SPAWN_VERSION", value = 2 },
+  { name = "IDENTITY_MISMATCH", value = 3 },
+  { name = "BACKEND_INIT", value = 100 },
+  { name = "FORMAT_NEGOTIATION", value = 200 },
+  { name = "BUFFER_ALLOCATION", value = 201 },
+  { name = "FRAME_PRODUCTION", value = 300 },
+  { name = "QUIESCE", value = 400 },
+  { name = "SHUTDOWN", value = 500 },
+]
+
+[records.format-capability]
+fields = [
+  { name = "fourcc", type = "u32" },
+  { name = "plane_count", type = "u32" },
+  { name = "modifier", type = "u64" },
+]
+
+[records.buffer-plane]
+fields = [
+  { name = "stride", type = "u32" },
+  { name = "offset", type = "u32" },
+  { name = "size", type = "u64" },
+]
+
+[messages.init]
+name = "INIT"
+opcode = 1
+direction = "daemon-to-worker"
+request-id = "required"
+fds = { rule = "exact", count = 0 }
+fields = [
+  { name = "renderer_kind", type = "u32" },
+  { name = "width", type = "u32" },
+  { name = "height", type = "u32" },
+  { name = "scale", type = "f32" },
+  { name = "fps", type = "f32" },
+  { name = "playback_flags", type = "u32" },
+  { name = "volume", type = "f32" },
+  { name = "expected_device_uuid", type = "uuid" },
+  { name = "renderer_id_length", type = "u32" },
+  { name = "project_path_length", type = "u32" },
+  { name = "render_node_length", type = "u32" },
+  { name = "settings_json_length", type = "u32" },
+  { name = "properties_json_length", type = "u32" },
+]
+tail = [
+  { name = "renderer_id", type = "utf8", length-field = "renderer_id_length", min = 1, max = "MAX_RENDERER_ID_BYTES" },
+  { name = "project_path", type = "utf8", length-field = "project_path_length", min = 1, max = "MAX_PROJECT_PATH_BYTES" },
+  { name = "render_node", type = "utf8", length-field = "render_node_length", min = 1, max = "MAX_RENDER_NODE_BYTES" },
+  { name = "settings_json", type = "utf8", length-field = "settings_json_length", max = "MAX_SETTINGS_JSON_BYTES" },
+  { name = "properties_json", type = "utf8", length-field = "properties_json_length", max = "MAX_PROPERTIES_JSON_BYTES" },
+]
+
+[messages.negotiate-buffers]
+name = "NEGOTIATE_BUFFERS"
+opcode = 2
+direction = "daemon-to-worker"
+request-id = "required"
+fds = { rule = "exact", count = 0 }
+fields = [
+  { name = "fourcc", type = "u32" },
+  { name = "width", type = "u32" },
+  { name = "height", type = "u32" },
+  { name = "plane_count", type = "u32" },
+  { name = "pool_size", type = "u32" },
+  { name = "memory_source", type = "u32" },
+  { name = "sync_mode", type = "u32" },
+  { name = "modifier", type = "u64" },
+]
+
+[messages.set-runtime]
+name = "SET_RUNTIME"
+opcode = 3
+direction = "daemon-to-worker"
+request-id = "required"
+fds = { rule = "exact", count = 0 }
+fields = [
+  { name = "settings_json_length", type = "u32" },
+]
+tail = [
+  { name = "settings_json", type = "utf8", length-field = "settings_json_length", max = "MAX_SETTINGS_JSON_BYTES" },
+]
+
+[messages.set-playback]
+name = "SET_PLAYBACK"
+opcode = 4
+direction = "daemon-to-worker"
+request-id = "required"
+fds = { rule = "exact", count = 0 }
+fields = [
+  { name = "playing", type = "u32" },
+  { name = "muted", type = "u32" },
+  { name = "volume", type = "f32" },
+]
+
+[messages.set-media-state]
+name = "SET_MEDIA_STATE"
+opcode = 5
+direction = "daemon-to-worker"
+request-id = "required"
+fds = { rule = "exact", count = 0 }
+fields = [
+  { name = "media_state_json_length", type = "u32" },
+]
+tail = [
+  { name = "media_state_json", type = "utf8", length-field = "media_state_json_length", max = "MAX_MEDIA_STATE_JSON_BYTES" },
+]
+
+[messages.set-audio-samples]
+name = "SET_AUDIO_SAMPLES"
+opcode = 6
+direction = "daemon-to-worker"
+request-id = "zero"
+fds = { rule = "exact", count = 0 }
+fields = [
+  { name = "count", type = "u32" },
+  { name = "time_usec", type = "u64" },
+]
+tail = [
+  { name = "samples", type = "f32[]", count-fields = ["count"], min = 1, max = "MAX_AUDIO_SAMPLES" },
+]
+
+[messages.pointer-motion]
+name = "POINTER_MOTION"
+opcode = 7
+direction = "daemon-to-worker"
+request-id = "zero"
+fds = { rule = "exact", count = 0 }
+fields = [
+  { name = "x", type = "f64" },
+  { name = "y", type = "f64" },
+  { name = "time_usec", type = "u64" },
+]
+
+[messages.pointer-button]
+name = "POINTER_BUTTON"
+opcode = 8
+direction = "daemon-to-worker"
+request-id = "zero"
+fds = { rule = "exact", count = 0 }
+fields = [
+  { name = "x", type = "f64" },
+  { name = "y", type = "f64" },
+  { name = "button", type = "u32" },
+  { name = "state", type = "u32" },
+  { name = "time_usec", type = "u64" },
+]
+
+[messages.pointer-axis]
+name = "POINTER_AXIS"
+opcode = 9
+direction = "daemon-to-worker"
+request-id = "zero"
+fds = { rule = "exact", count = 0 }
+fields = [
+  { name = "x", type = "f64" },
+  { name = "y", type = "f64" },
+  { name = "delta_x", type = "f64" },
+  { name = "delta_y", type = "f64" },
+  { name = "source", type = "u32" },
+  { name = "time_usec", type = "u64" },
+]
+
+[messages.quiesce]
+name = "QUIESCE"
+opcode = 10
+direction = "daemon-to-worker"
+request-id = "required"
+fds = { rule = "exact", count = 0 }
+fields = []
+
+[messages.shutdown]
+name = "SHUTDOWN"
+opcode = 11
+direction = "daemon-to-worker"
+request-id = "required"
+fds = { rule = "exact", count = 0 }
+fields = []
+
+[messages.hello]
+name = "HELLO"
+opcode = 0x8001
+direction = "worker-to-daemon"
+request-id = "zero"
+fds = { rule = "exact", count = 0 }
+fields = [
+  { name = "spawn_version", type = "u32" },
+  { name = "renderer_kind", type = "u32" },
+  { name = "pid", type = "u32" },
+  { name = "renderer_id_length", type = "u32" },
+]
+tail = [
+  { name = "renderer_id", type = "utf8", length-field = "renderer_id_length", min = 1, max = "MAX_RENDERER_ID_BYTES" },
+]
+
+[messages.ready]
+name = "READY"
+opcode = 0x8002
+direction = "worker-to-daemon"
+request-id = "required"
+reply-to = "INIT"
+fds = { rule = "exact", count = 0 }
+fields = [
+  { name = "device_uuid", type = "uuid" },
+  { name = "driver_uuid", type = "uuid" },
+  { name = "drm_render_major", type = "u32" },
+  { name = "drm_render_minor", type = "u32" },
+  { name = "render_node_length", type = "u32" },
+]
+tail = [
+  { name = "render_node", type = "utf8", length-field = "render_node_length", min = 1, max = "MAX_RENDER_NODE_BYTES" },
+]
+
+[messages.format-caps]
+name = "FORMAT_CAPS"
+opcode = 0x8003
+direction = "worker-to-daemon"
+request-id = "required"
+reply-to = "INIT"
+fds = { rule = "exact", count = 0 }
+fields = [
+  { name = "memory_hints", type = "u32" },
+  { name = "sync_caps", type = "u32" },
+  { name = "color_caps", type = "u32" },
+  { name = "relay_modes", type = "u32" },
+  { name = "extent_max_width", type = "u32" },
+  { name = "extent_max_height", type = "u32" },
+  { name = "pool_size_min", type = "u32" },
+  { name = "pool_size_max", type = "u32" },
+  { name = "capability_count", type = "u32" },
+]
+tail = [
+  { name = "capabilities", type = "record[]", record = "format-capability", count-fields = ["capability_count"], min = 1, max = "MAX_FORMAT_CAPS" },
+]
+
+[messages.release-timeline]
+name = "RELEASE_TIMELINE"
+opcode = 0x8004
+direction = "worker-to-daemon"
+request-id = "required"
+reply-to = "INIT"
+fds = { rule = "exact", count = 1 }
+fields = []
+
+[messages.bind-buffers]
+name = "BIND_BUFFERS"
+opcode = 0x8005
+direction = "worker-to-daemon"
+request-id = "required"
+reply-to = "NEGOTIATE_BUFFERS"
+fds = { rule = "product", fields = ["buffer_count", "plane_count"], max = "MAX_FDS_PER_MESSAGE" }
+fields = [
+  { name = "pool_generation", type = "u64" },
+  { name = "fourcc", type = "u32" },
+  { name = "width", type = "u32" },
+  { name = "height", type = "u32" },
+  { name = "buffer_count", type = "u32" },
+  { name = "plane_count", type = "u32" },
+  { name = "memory_source", type = "u32" },
+  { name = "flags", type = "u32" },
+  { name = "modifier", type = "u64" },
+]
+tail = [
+  { name = "planes", type = "record[]", record = "buffer-plane", count-fields = ["buffer_count", "plane_count"], min = 1, max = "MAX_FDS_PER_MESSAGE" },
+]
+
+[messages.frame-ready]
+name = "FRAME_READY"
+opcode = 0x8006
+direction = "worker-to-daemon"
+request-id = "zero"
+fds = { rule = "exact", count = 1 }
+fields = [
+  { name = "pool_generation", type = "u64" },
+  { name = "buffer_index", type = "u32" },
+  { name = "flags", type = "u32" },
+  { name = "sequence", type = "u64" },
+  { name = "target_time_usec", type = "u64" },
+  { name = "release_point", type = "u64" },
+]
+
+[messages.state-changed]
+name = "STATE_CHANGED"
+opcode = 0x8007
+direction = "worker-to-daemon"
+request-id = "any"
+fds = { rule = "exact", count = 0 }
+fields = [
+  { name = "clear_red", type = "f32" },
+  { name = "clear_green", type = "f32" },
+  { name = "clear_blue", type = "f32" },
+  { name = "clear_alpha", type = "f32" },
+  { name = "state_json_length", type = "u32" },
+]
+tail = [
+  { name = "state_json", type = "utf8", length-field = "state_json_length", max = "MAX_STATE_JSON_BYTES" },
+]
+
+[messages.bind-failed]
+name = "BIND_FAILED"
+opcode = 0x8008
+direction = "worker-to-daemon"
+request-id = "required"
+reply-to = "NEGOTIATE_BUFFERS"
+fds = { rule = "exact", count = 0 }
+fields = [
+  { name = "error_code", type = "u32" },
+  { name = "stage", type = "u32" },
+  { name = "diagnostic_length", type = "u32" },
+]
+tail = [
+  { name = "diagnostic", type = "utf8", length-field = "diagnostic_length", max = "MAX_DIAGNOSTIC_BYTES" },
+]
+
+[messages.error]
+name = "ERROR"
+opcode = 0x8009
+direction = "worker-to-daemon"
+request-id = "any"
+fds = { rule = "exact", count = 0 }
+fields = [
+  { name = "error_code", type = "u32" },
+  { name = "stage", type = "u32" },
+  { name = "diagnostic_length", type = "u32" },
+]
+tail = [
+  { name = "diagnostic", type = "utf8", length-field = "diagnostic_length", max = "MAX_DIAGNOSTIC_BYTES" },
+]
+
+[messages.quiesced]
+name = "QUIESCED"
+opcode = 0x800a
+direction = "worker-to-daemon"
+request-id = "required"
+reply-to = "QUIESCE"
+fds = { rule = "exact", count = 0 }
+fields = []

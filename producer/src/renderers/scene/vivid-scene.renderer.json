@@ -1,0 +1,24 @@
+{
+  "manifest-version": 1,
+  "id": "vivid.scene",
+  "kind": "scene",
+  "wallpaper-types": ["scene"],
+  "executable": "scene/vivid-scene-renderer",
+  "spawn-version": 1,
+  "setting-defaults": {},
+  "identity-settings": ["render-device", "target-extent"],
+  "runtime-settings": [
+    "content-fit",
+    "fps",
+    "muted",
+    "playing",
+    "user-properties",
+    "volume"
+  ],
+  "events": [
+    "audio-samples",
+    "media-state",
+    "pointer-button",
+    "pointer-motion"
+  ]
+}

@@ -101,6 +101,7 @@ void vivid_video_producer_set_audio_state(VividVideoProducer* self,
                                            gboolean             muted,
                                            gdouble              volume);
 void vivid_video_producer_set_playing(VividVideoProducer* self, gboolean playing);
+void vivid_video_producer_set_looping(VividVideoProducer* self, gboolean looping);
 void vivid_video_producer_set_release_gate(VividVideoProducer*          self,
                                             const VividRendererReleaseGate* gate);
 void vivid_video_producer_request_frame(VividVideoProducer* self,

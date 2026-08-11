@@ -13,11 +13,6 @@ pkg_check_modules(GLIB REQUIRED glib-2.0)
 pkg_check_modules(GIO REQUIRED gio-2.0)
 pkg_check_modules(GIO_UNIX REQUIRED gio-unix-2.0)
 pkg_check_modules(JSON_GLIB REQUIRED json-glib-1.0)
-pkg_check_modules(GSTREAMER REQUIRED gstreamer-1.0)
-pkg_check_modules(GSTREAMER_APP REQUIRED gstreamer-app-1.0)
-pkg_check_modules(GSTREAMER_VIDEO REQUIRED gstreamer-video-1.0)
-pkg_check_modules(GSTREAMER_ALLOCATORS REQUIRED gstreamer-allocators-1.0)
-pkg_check_modules(GSTREAMER_CUDA REQUIRED gstreamer-cuda-1.0)
 
 set(VIVID_PRODUCER_DAEMON_SOURCES
   vivid_producer.c
@@ -28,7 +23,11 @@ set(VIVID_PRODUCER_DAEMON_SOURCES
   vivid_render_layout.c
   vivid_dmabuf_negotiation.c
   vivid_unbind_ack_tracker.c
-  vivid_producer_renderer.c
+  vivid_renderer_registry.c
+  vivid_renderer_process.c
+  vivid_renderer_manager.c
+  vivid_producer_renderer_process.c
+  ../renderer_host/vivid_renderer_transport.c
   ../graphics/vivid_gpu_devices.c
   ../protocol/vivid_display_codec.c
 )
@@ -38,9 +37,7 @@ set(VIVID_PRODUCER_DAEMON_INCLUDE_DIRS
   ${CMAKE_CURRENT_SOURCE_DIR}/../graphics
   ${CMAKE_CURRENT_SOURCE_DIR}/../protocol
   ${CMAKE_CURRENT_SOURCE_DIR}/../renderer_api
-  ${CMAKE_CURRENT_SOURCE_DIR}/../renderers/scene
-  ${CMAKE_CURRENT_SOURCE_DIR}/../renderers/video
-  ${CMAKE_CURRENT_SOURCE_DIR}/../renderers/web
+  ${CMAKE_CURRENT_SOURCE_DIR}/../renderer_host
 )
 
 set(VIVID_PRODUCER_DAEMON_PKG_INCLUDE_DIRS
@@ -52,11 +49,6 @@ set(VIVID_PRODUCER_DAEMON_PKG_INCLUDE_DIRS
   ${GIO_INCLUDE_DIRS}
   ${GIO_UNIX_INCLUDE_DIRS}
   ${JSON_GLIB_INCLUDE_DIRS}
-  ${GSTREAMER_INCLUDE_DIRS}
-  ${GSTREAMER_APP_INCLUDE_DIRS}
-  ${GSTREAMER_VIDEO_INCLUDE_DIRS}
-  ${GSTREAMER_ALLOCATORS_INCLUDE_DIRS}
-  ${GSTREAMER_CUDA_INCLUDE_DIRS}
 )
 
 set(VIVID_PRODUCER_DAEMON_CFLAGS
@@ -68,11 +60,6 @@ set(VIVID_PRODUCER_DAEMON_CFLAGS
   ${GIO_CFLAGS_OTHER}
   ${GIO_UNIX_CFLAGS_OTHER}
   ${JSON_GLIB_CFLAGS_OTHER}
-  ${GSTREAMER_CFLAGS_OTHER}
-  ${GSTREAMER_APP_CFLAGS_OTHER}
-  ${GSTREAMER_VIDEO_CFLAGS_OTHER}
-  ${GSTREAMER_ALLOCATORS_CFLAGS_OTHER}
-  ${GSTREAMER_CUDA_CFLAGS_OTHER}
 )
 
 set(VIVID_PRODUCER_DAEMON_LIBS
@@ -84,12 +71,6 @@ set(VIVID_PRODUCER_DAEMON_LIBS
   ${GIO_LIBRARIES}
   ${GIO_UNIX_LIBRARIES}
   ${JSON_GLIB_LIBRARIES}
-  ${GSTREAMER_LIBRARIES}
-  ${GSTREAMER_APP_LIBRARIES}
-  ${GSTREAMER_VIDEO_LIBRARIES}
-  ${GSTREAMER_ALLOCATORS_LIBRARIES}
-  ${GSTREAMER_CUDA_LIBRARIES}
-  ${CMAKE_DL_LIBS}
   m
 )
 
@@ -103,8 +84,10 @@ target_link_libraries(vivid-producer PRIVATE ${VIVID_PRODUCER_DAEMON_LIBS})
 
 set(VIVID_REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
 set(VIVID_PROTOCOL_GEN ${VIVID_REPO_ROOT}/tools/protocol_gen.sh)
-set(VIVID_PROTOCOL_SPEC ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/vivid_display_v1.toml)
+set(VIVID_DISPLAY_PROTOCOL_SPEC ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/vivid_display_v1.toml)
+set(VIVID_RENDERER_PROTOCOL_SPEC ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/vivid_renderer_v1.toml)
 set(VIVID_PROTOCOL_GEN_PY ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/protocol_gen.py)
+set(VIVID_RENDERER_PROTOCOL_GEN_PY ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/renderer_protocol_codegen.py)
 set(VIVID_PROTOCOL_CHECK_STAMP ${CMAKE_CURRENT_BINARY_DIR}/vivid_protocol_check.stamp)
 set(VIVID_PROTOCOL_GENERATED
   ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/vivid_display_protocol_ids.h
@@ -128,8 +111,10 @@ set(VIVID_PROTOCOL_GENERATED
   ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/vivid_display_protocol.h
   ${VIVID_REPO_ROOT}/consumer/gnome/src/protocol/vivid_display_protocol.h
   ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/vivid_display_codec.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/vivid_renderer_protocol.h
   ${VIVID_REPO_ROOT}/consumer/gnome/src/protocol/vivid_display_codec.c
   ${VIVID_REPO_ROOT}/docs/protocols-reference.md
+  ${VIVID_REPO_ROOT}/docs/renderer-protocol-reference.md
 )
 
 add_custom_command(
@@ -137,8 +122,10 @@ add_custom_command(
   COMMAND ${VIVID_PROTOCOL_GEN} --check
   COMMAND ${CMAKE_COMMAND} -E touch ${VIVID_PROTOCOL_CHECK_STAMP}
   DEPENDS
-    ${VIVID_PROTOCOL_SPEC}
+    ${VIVID_DISPLAY_PROTOCOL_SPEC}
+    ${VIVID_RENDERER_PROTOCOL_SPEC}
     ${VIVID_PROTOCOL_GEN_PY}
+    ${VIVID_RENDERER_PROTOCOL_GEN_PY}
     ${VIVID_PROTOCOL_GEN}
     ${VIVID_PROTOCOL_GENERATED}
   COMMENT "Checking generated protocol bindings are in sync"

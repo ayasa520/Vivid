@@ -62,6 +62,7 @@ typedef struct
     guint32   fourcc;
     guint64   modifier;
     gchar*    render_node;
+    guint8    consumer_device_uuid[VK_UUID_SIZE];
     gboolean  premultiplied;
     GPtrArray* buffers;
 } VividDmaBufGeneration;
@@ -103,6 +104,7 @@ struct _VividDisplayConsumerBufferPaintable
     ww_vk_owned_t   vk_owned;
     ww_vk_blitter_t vk_blitter;
     gboolean        vk_relay_ready;
+    guint8          vk_device_uuid[VK_UUID_SIZE];
 };
 
 static void vivid_display_consumer_buffer_paintable_iface_init(
@@ -115,6 +117,7 @@ static gboolean signal_release_syncobj_fd(const gchar* render_node,
                                           guint32      buffer_index,
                                           const gchar* context);
 static gboolean ensure_vulkan_relay(VividDisplayConsumerBufferPaintable* self,
+                                     const guint8 expected_device_uuid[VK_UUID_SIZE],
                                      GError**                             error);
 static gboolean import_shadow_buffer(VividDisplayConsumerBufferPaintable* self,
                                      VividDmaBufGeneration*               generation,
@@ -136,6 +139,44 @@ static GQuark
 vivid_display_consumer_buffer_paintable_error_quark(void)
 {
     return g_quark_from_static_string("vivid_display_consumer_buffer_paintable-error");
+}
+
+static gboolean
+hex_uuid_to_bytes(const gchar* text,
+                  guint8       out_uuid[VK_UUID_SIZE])
+{
+    if (!text || !*text || !out_uuid)
+        return FALSE;
+
+    gchar compact[(VK_UUID_SIZE * 2) + 1] = {0};
+    guint cursor = 0;
+    for (const gchar* p = text; *p; p++) {
+        if (*p == '-')
+            continue;
+        if (!g_ascii_isxdigit(*p) || cursor >= sizeof(compact) - 1)
+            return FALSE;
+        compact[cursor++] = *p;
+    }
+    if (cursor != VK_UUID_SIZE * 2)
+        return FALSE;
+
+    for (guint i = 0; i < VK_UUID_SIZE; i++) {
+        gchar byte_text[3] = {compact[i * 2], compact[i * 2 + 1], '\0'};
+        gchar* end = NULL;
+        const guint64 value = g_ascii_strtoull(byte_text, &end, 16);
+        if (!end || *end != '\0' || value > 0xff)
+            return FALSE;
+        out_uuid[i] = (guint8)value;
+    }
+    return TRUE;
+}
+
+static void
+uuid_bytes_to_hex(const guint8 uuid[VK_UUID_SIZE],
+                  gchar        out_text[(VK_UUID_SIZE * 2) + 1])
+{
+    for (guint i = 0; i < VK_UUID_SIZE; i++)
+        g_snprintf(out_text + (i * 2), 3, "%02x", uuid[i]);
 }
 
 static void
@@ -372,17 +413,38 @@ remove_generation(VividDisplayConsumerBufferPaintable* self,
 
 static gboolean
 ensure_vulkan_relay(VividDisplayConsumerBufferPaintable* self,
+                    const guint8 expected_device_uuid[VK_UUID_SIZE],
                     GError**                             error)
 {
-    if (self->vk_relay_ready)
+    if (self->vk_relay_ready) {
+        if (memcmp(self->vk_device_uuid, expected_device_uuid, VK_UUID_SIZE) != 0) {
+            g_set_error_literal(error,
+                                VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR,
+                                VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR_PROTOCOL,
+                                "consumer deviceUUID changed within one GNOME paintable lifetime");
+            return FALSE;
+        }
         return TRUE;
+    }
 
-    int rc = ww_vk_create_owned(&self->vk_owned);
+    /*
+     * Capability discovery and buffer import happen at different times in the
+     * GNOME helper. Selecting an arbitrary physical device here can therefore
+     * advertise modifiers from the preferred GPU but import them on another
+     * GPU. BIND_BUFFERS carries the exact deviceUUID accepted by negotiation;
+     * make that identity the creation constraint so preference, modifier
+     * support, and the live Vulkan relay remain one atomic device contract.
+     */
+    int rc = ww_vk_create_owned_for_device_uuid(&self->vk_owned,
+                                                expected_device_uuid);
     if (rc != 0) {
+        gchar uuid_text[(VK_UUID_SIZE * 2) + 1] = {0};
+        uuid_bytes_to_hex(expected_device_uuid, uuid_text);
         g_set_error(error,
                     VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR,
                     VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR_DMABUF,
-                    "failed to create Vulkan relay device rc=%d",
+                    "failed to create Vulkan relay device for consumer deviceUUID=%s rc=%d",
+                    uuid_text,
                     rc);
         return FALSE;
     }
@@ -404,7 +466,12 @@ ensure_vulkan_relay(VividDisplayConsumerBufferPaintable* self,
         return FALSE;
     }
 
+    memcpy(self->vk_device_uuid, expected_device_uuid, VK_UUID_SIZE);
     self->vk_relay_ready = TRUE;
+    gchar uuid_text[(VK_UUID_SIZE * 2) + 1] = {0};
+    uuid_bytes_to_hex(expected_device_uuid, uuid_text);
+    g_message("VividDisplayConsumer: Vulkan relay pinned to consumer deviceUUID=%s",
+              uuid_text);
     return TRUE;
 }
 
@@ -449,7 +516,7 @@ import_shadow_buffer(VividDisplayConsumerBufferPaintable* self,
                      VividDmaBufBuffer*                   buffer,
                      GError**                             error)
 {
-    if (!ensure_vulkan_relay(self, error))
+    if (!ensure_vulkan_relay(self, generation->consumer_device_uuid, error))
         return FALSE;
 
     ww_vk_dmabuf_import_t import = {
@@ -609,6 +676,12 @@ append_generation_from_json(VividDisplayConsumerBufferPaintable* self,
     guint32 height = 0;
     guint32 fourcc = 0;
     guint64 modifier = 0;
+    guint8 consumer_device_uuid[VK_UUID_SIZE] = {0};
+    const gchar* consumer_device_uuid_text =
+        json_object_get_string_member_default(
+            object,
+            VIVID_JSON_BIND_BUFFERS_CONSUMER_DEVICE_UUID,
+            "");
     if (!json_member_get_uint64(object, "generation", 0, &generation_id) ||
         generation_id == 0 ||
         !json_member_get_uint32(object, "width", 0, &width) ||
@@ -617,11 +690,12 @@ append_generation_from_json(VividDisplayConsumerBufferPaintable* self,
         height == 0 ||
         !json_member_get_uint32(object, "fourcc", 0, &fourcc) ||
         fourcc == 0 ||
-        !json_member_get_uint64(object, "modifier", 0, &modifier)) {
+        !json_member_get_uint64(object, "modifier", 0, &modifier) ||
+        !hex_uuid_to_bytes(consumer_device_uuid_text, consumer_device_uuid)) {
         g_set_error_literal(error,
                             VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR,
                             VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR_PROTOCOL,
-                            "BIND_BUFFERS JSON is missing generation/size/fourcc/modifier");
+                            "BIND_BUFFERS JSON is missing generation/size/fourcc/modifier/consumerDeviceUuid");
         return FALSE;
     }
 
@@ -661,11 +735,14 @@ append_generation_from_json(VividDisplayConsumerBufferPaintable* self,
             object,
             VIVID_JSON_BIND_BUFFERS_RENDER_NODE,
             ""));
+    memcpy(generation->consumer_device_uuid,
+           consumer_device_uuid,
+           VK_UUID_SIZE);
     generation->premultiplied =
         json_member_get_boolean_default(object, "premultiplied", FALSE);
     generation->buffers = g_ptr_array_new_with_free_func(buffer_free);
 
-    if (!ensure_vulkan_relay(self, error) ||
+    if (!ensure_vulkan_relay(self, generation->consumer_device_uuid, error) ||
         !ensure_shadow_export(self, generation, error)) {
         generation_free(generation);
         return FALSE;

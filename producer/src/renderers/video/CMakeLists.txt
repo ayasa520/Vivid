@@ -18,20 +18,28 @@ pkg_check_modules(LIBDRM REQUIRED libdrm)
 pkg_check_modules(LIBVA REQUIRED libva libva-drm)
 pkg_check_modules(VULKAN REQUIRED vulkan)
 
-add_library(VividVideo SHARED
+pkg_check_modules(JSON_GLIB REQUIRED json-glib-1.0)
+
+add_executable(vivid-video-renderer
   ../../graphics/vivid_gpu_devices.c
+  ../../renderer_host/vivid_renderer_host.c
+  ../../renderer_host/vivid_renderer_release_timeline.c
+  ../../renderer_host/vivid_renderer_transport.c
+  ../../renderer_host/vivid_renderer_worker_common.c
+  vivid_video_renderer_main.cpp
   vivid_video_producer.cpp
   vivid_video_vulkan_backend.cpp
 )
 
-target_include_directories(VividVideo
-  PUBLIC
+target_include_directories(vivid-video-renderer PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-  PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../graphics
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../protocol
     ${CMAKE_CURRENT_SOURCE_DIR}/../../renderer_api
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../renderer_host
     ${GLIB_INCLUDE_DIRS}
     ${GIO_INCLUDE_DIRS}
+    ${JSON_GLIB_INCLUDE_DIRS}
     ${GSTREAMER_INCLUDE_DIRS}
     ${GSTREAMER_ALLOCATORS_INCLUDE_DIRS}
     ${GSTREAMER_APP_INCLUDE_DIRS}
@@ -43,9 +51,10 @@ target_include_directories(VividVideo
     ${VULKAN_INCLUDE_DIRS}
 )
 
-target_compile_options(VividVideo PRIVATE
+target_compile_options(vivid-video-renderer PRIVATE
   ${GLIB_CFLAGS_OTHER}
   ${GIO_CFLAGS_OTHER}
+  ${JSON_GLIB_CFLAGS_OTHER}
   ${GSTREAMER_CFLAGS_OTHER}
   ${GSTREAMER_ALLOCATORS_CFLAGS_OTHER}
   ${GSTREAMER_APP_CFLAGS_OTHER}
@@ -57,13 +66,14 @@ target_compile_options(VividVideo PRIVATE
   ${VULKAN_CFLAGS_OTHER}
 )
 
-target_compile_definitions(VividVideo PRIVATE
+target_compile_definitions(vivid-video-renderer PRIVATE
   GST_USE_UNSTABLE_API
 )
 
-target_link_libraries(VividVideo PRIVATE
+target_link_libraries(vivid-video-renderer PRIVATE
   ${GLIB_LIBRARIES}
   ${GIO_LIBRARIES}
+  ${JSON_GLIB_LIBRARIES}
   ${GSTREAMER_LIBRARIES}
   ${GSTREAMER_ALLOCATORS_LIBRARIES}
   ${GSTREAMER_APP_LIBRARIES}
@@ -75,7 +85,8 @@ target_link_libraries(VividVideo PRIVATE
   ${VULKAN_LIBRARIES}
 )
 
-set_target_properties(VividVideo PROPERTIES
-  OUTPUT_NAME VividVideo
-  LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/out
+set_target_properties(vivid-video-renderer PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/out
+  INSTALL_RPATH "$ORIGIN"
+  BUILD_WITH_INSTALL_RPATH TRUE
 )

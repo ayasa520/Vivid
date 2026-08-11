@@ -795,6 +795,8 @@ validate_set_state_payload(JsonObject* payload, GError** error)
     GList* members = json_object_get_members(payload);
     for (GList* iter = members; iter; iter = iter->next) {
         const gchar* member = iter->data;
+        if (g_strcmp0(member, "requestId") == 0)
+            continue;
         const VividConfigSchemaEntry* entry = schema_entry_for_member(member);
         JsonNode* node = json_object_get_member(payload, member);
         if (!entry) {

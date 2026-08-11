@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate protocol bindings from vivid_display_v1.toml."""
+"""Generate bindings for Vivid's public display and private renderer protocols."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from renderer_protocol_codegen import build_renderer_outputs
 
 SPEC = Path(__file__).with_name("vivid_display_v1.toml")
 PROTO_DIR = Path(__file__).parent
@@ -1955,6 +1957,21 @@ def main() -> int:
         default=REPO_ROOT / "docs/protocols-reference.md",
     )
     parser.add_argument("--check", action="store_true")
+    parser.add_argument(
+        "--renderer-spec",
+        type=Path,
+        default=PROTO_DIR / "vivid_renderer_v1.toml",
+    )
+    parser.add_argument(
+        "--renderer-c-out",
+        type=Path,
+        default=PROTO_DIR / "vivid_renderer_protocol.h",
+    )
+    parser.add_argument(
+        "--renderer-docs-out",
+        type=Path,
+        default=REPO_ROOT / "docs/renderer-protocol-reference.md",
+    )
     args = parser.parse_args()
 
     spec = load_spec(args.spec)
@@ -1988,6 +2005,14 @@ def main() -> int:
             spec, layouts, json_groups, config_members
         ),
     }
+    renderer_spec = load_spec(args.renderer_spec)
+    outputs.update(
+        build_renderer_outputs(
+            renderer_spec,
+            args.renderer_c_out,
+            args.renderer_docs_out,
+        )
+    )
 
     stale = False
     for path, content in outputs.items():

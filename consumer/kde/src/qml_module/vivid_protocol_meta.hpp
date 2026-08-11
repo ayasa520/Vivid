@@ -25,6 +25,8 @@ inline constexpr std::string_view error_name(int code) noexcept
     case VIVID_DISPLAY_ERR_UPDATE_OUTPUT_INVALID: return "UPDATE_OUTPUT_INVALID";
     case VIVID_DISPLAY_ERR_CONTROL_MALFORMED: return "CONTROL_MALFORMED";
     case VIVID_DISPLAY_ERR_CONTROL_INVALID: return "CONTROL_INVALID";
+    case VIVID_DISPLAY_ERR_CONTROL_RENDERER_START_FAILED: return "CONTROL_RENDERER_START_FAILED";
+    case VIVID_DISPLAY_ERR_CONTROL_SUPERSEDED: return "CONTROL_SUPERSEDED";
     default: return "UNKNOWN";
     }
 }
@@ -57,6 +59,8 @@ inline constexpr std::string_view error_domain(int code) noexcept
     case VIVID_DISPLAY_ERR_UPDATE_OUTPUT_INVALID: return "output";
     case VIVID_DISPLAY_ERR_CONTROL_MALFORMED: return "control";
     case VIVID_DISPLAY_ERR_CONTROL_INVALID: return "control";
+    case VIVID_DISPLAY_ERR_CONTROL_RENDERER_START_FAILED: return "control";
+    case VIVID_DISPLAY_ERR_CONTROL_SUPERSEDED: return "control";
     default: return "unknown";
     }
 }

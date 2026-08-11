@@ -74,6 +74,8 @@ typedef enum
     /* 300-399 control, non-terminal */
     VIVID_DISPLAY_ERR_CONTROL_MALFORMED = 300,
     VIVID_DISPLAY_ERR_CONTROL_INVALID = 301,
+    VIVID_DISPLAY_ERR_CONTROL_RENDERER_START_FAILED = 302,
+    VIVID_DISPLAY_ERR_CONTROL_SUPERSEDED = 303,
 } VividDisplayErrorCode;
 
 typedef enum
@@ -420,6 +422,8 @@ static inline const char* vivid_display_error_name(int code)
     case VIVID_DISPLAY_ERR_UPDATE_OUTPUT_INVALID: return "UPDATE_OUTPUT_INVALID";
     case VIVID_DISPLAY_ERR_CONTROL_MALFORMED: return "CONTROL_MALFORMED";
     case VIVID_DISPLAY_ERR_CONTROL_INVALID: return "CONTROL_INVALID";
+    case VIVID_DISPLAY_ERR_CONTROL_RENDERER_START_FAILED: return "CONTROL_RENDERER_START_FAILED";
+    case VIVID_DISPLAY_ERR_CONTROL_SUPERSEDED: return "CONTROL_SUPERSEDED";
     default: return NULL;
     }
 }
@@ -452,6 +456,8 @@ static inline const char* vivid_display_error_domain(int code)
     case VIVID_DISPLAY_ERR_UPDATE_OUTPUT_INVALID: return "output";
     case VIVID_DISPLAY_ERR_CONTROL_MALFORMED: return "control";
     case VIVID_DISPLAY_ERR_CONTROL_INVALID: return "control";
+    case VIVID_DISPLAY_ERR_CONTROL_RENDERER_START_FAILED: return "control";
+    case VIVID_DISPLAY_ERR_CONTROL_SUPERSEDED: return "control";
     default: return "unknown";
     }
 }

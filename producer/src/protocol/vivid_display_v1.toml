@@ -154,6 +154,8 @@ members = [
   { name = "UPDATE_OUTPUT_INVALID", value = 204 },
   { name = "CONTROL_MALFORMED", value = 300 },
   { name = "CONTROL_INVALID", value = 301 },
+  { name = "CONTROL_RENDERER_START_FAILED", value = 302 },
+  { name = "CONTROL_SUPERSEDED", value = 303 },
 ]
 
 [errors]

@@ -16,6 +16,7 @@ CEF_ARCHIVE="${VIVID_CEF_ARCHIVE}"
 PRODUCER_BIN="${VIVID_DIRECT_RUN_PRODUCER_BIN}"
 GBM_SHIM_BUILD_DIR="${VIVID_DIRECT_RUN_GBM_SHIM_BUILD_DIR}"
 GBM_SHIM_LIBRARY="${VIVID_DIRECT_RUN_GBM_USAGE_SHIM}"
+RENDERER_ROOT="${VIVID_DIRECT_RUN_RENDERER_ROOT}"
 JOBS="${VIVID_BUILD_JOBS:-${JOBS:-$(nproc)}}"
 CMAKE_BIN="${CMAKE:-cmake}"
 CC_BIN="${CC:-cc}"
@@ -23,13 +24,13 @@ PKG_CONFIG_BIN="${PKG_CONFIG:-pkg-config}"
 
 mkdir -p "${BUILD_DIR}"
 
-echo "==> Building scene renderer module for direct-run"
+echo "==> Building Scene renderer worker for direct-run"
 "${CMAKE_BIN}" -S "${VIVID_SCENE_SOURCE_DIR}" \
   -B "${SCENE_BUILD_DIR}" \
   -DCMAKE_BUILD_TYPE="${VIVID_CMAKE_BUILD_TYPE}"
 "${CMAKE_BIN}" --build "${SCENE_BUILD_DIR}" --target "${VIVID_SCENE_TARGET}" --parallel "${JOBS}" --verbose
 
-echo "==> Building video renderer module for direct-run"
+echo "==> Building Video renderer worker for direct-run"
 "${CMAKE_BIN}" -S "${VIVID_VIDEO_SOURCE_DIR}" \
   -B "${VIDEO_BUILD_DIR}" \
   -DCMAKE_BUILD_TYPE="${VIVID_CMAKE_BUILD_TYPE}"
@@ -52,12 +53,39 @@ else
   echo "    CEF already extracted at ${CEF_DIR}"
 fi
 
-echo "==> Building web renderer module for direct-run"
+echo "==> Building Web renderer worker for direct-run"
 "${CMAKE_BIN}" -S "${VIVID_WEB_SOURCE_DIR}" \
   -B "${WEB_BUILD_DIR}" \
   -DCMAKE_BUILD_TYPE="${VIVID_CMAKE_BUILD_TYPE}" \
   -DCEF_ROOT="${CEF_DIR}"
 "${CMAKE_BIN}" --build "${WEB_BUILD_DIR}" --target "${VIVID_WEB_TARGET}" --target "${VIVID_WEB_HELPER_TARGET}" --parallel "${JOBS}" --verbose
+
+echo "==> Staging renderer registry at ${RENDERER_ROOT}"
+mkdir -p \
+  "${VIVID_DIRECT_RUN_SCENE_DIR}" \
+  "${VIVID_DIRECT_RUN_VIDEO_DIR}" \
+  "${VIVID_DIRECT_RUN_WEB_DIR}"
+"${CMAKE_BIN}" -E copy_if_different \
+  "${VIVID_DIRECT_RUN_SCENE_BUILD_EXECUTABLE}" \
+  "${VIVID_DIRECT_RUN_SCENE_EXECUTABLE}"
+"${CMAKE_BIN}" -E copy_if_different \
+  "${VIVID_DIRECT_RUN_DXCOMPILER_LIBRARY}" \
+  "${VIVID_DIRECT_RUN_SCENE_DIR}/${VIVID_DXCOMPILER_LIBRARY_NAME}"
+"${CMAKE_BIN}" -E copy_if_different \
+  "${VIVID_DIRECT_RUN_VIDEO_BUILD_EXECUTABLE}" \
+  "${VIVID_DIRECT_RUN_VIDEO_EXECUTABLE}"
+"${CMAKE_BIN}" -E copy_directory \
+  "${VIVID_DIRECT_RUN_WEB_OUT_DIR}" \
+  "${VIVID_DIRECT_RUN_WEB_DIR}"
+"${CMAKE_BIN}" -E copy_if_different \
+  "${VIVID_SCENE_SOURCE_DIR}/${VIVID_SCENE_MANIFEST_NAME}" \
+  "${VIVID_DIRECT_RUN_SCENE_MANIFEST}"
+"${CMAKE_BIN}" -E copy_if_different \
+  "${VIVID_VIDEO_SOURCE_DIR}/${VIVID_VIDEO_MANIFEST_NAME}" \
+  "${VIVID_DIRECT_RUN_VIDEO_MANIFEST}"
+"${CMAKE_BIN}" -E copy_if_different \
+  "${VIVID_WEB_SOURCE_DIR}/${VIVID_WEB_MANIFEST_NAME}" \
+  "${VIVID_DIRECT_RUN_WEB_MANIFEST}"
 
 echo "==> Building GBM usage shim for NVIDIA shared textures"
 mkdir -p "${GBM_SHIM_BUILD_DIR}"
@@ -65,6 +93,9 @@ mkdir -p "${GBM_SHIM_BUILD_DIR}"
   "${VIVID_GBM_USAGE_SHIM_SOURCE}" \
   $("${PKG_CONFIG_BIN}" --cflags --libs gbm) \
   -ldl
+"${CMAKE_BIN}" -E copy_if_different \
+  "${GBM_SHIM_LIBRARY}" \
+  "${VIVID_DIRECT_RUN_WEB_DIR}/libvivid-gbm-usage-shim.so"
 
 echo "==> Building ${PRODUCER_BIN}"
 "${CMAKE_BIN}" -S "${VIVID_PRODUCER_DAEMON_DIR}" \
@@ -75,8 +106,8 @@ echo "==> Building ${PRODUCER_BIN}"
 
 echo "==> Direct-run build complete"
 echo "    producer: ${PRODUCER_BIN}"
-echo "    scene:    ${VIVID_DIRECT_RUN_SCENE_LIBRARY}"
-echo "    video:    ${VIVID_DIRECT_RUN_VIDEO_LIBRARY}"
-echo "    web:      ${VIVID_DIRECT_RUN_WEB_LIBRARY}"
-echo "    cef:      ${VIVID_DIRECT_RUN_WEB_OUT_DIR}"
+echo "    registry: ${RENDERER_ROOT}"
+echo "    scene:    ${VIVID_DIRECT_RUN_SCENE_EXECUTABLE}"
+echo "    video:    ${VIVID_DIRECT_RUN_VIDEO_EXECUTABLE}"
+echo "    web:      ${VIVID_DIRECT_RUN_WEB_EXECUTABLE}"
 echo "    gbm-shim: ${GBM_SHIM_LIBRARY}"

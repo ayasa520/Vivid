@@ -850,7 +850,8 @@ static bool ext_present(const VkExtensionProperties* props, uint32_t count, cons
     return false;
 }
 
-int ww_vk_create_owned(ww_vk_owned_t* out) {
+static int ww_vk_create_owned_internal(ww_vk_owned_t* out,
+                                       const uint8_t expected_device_uuid[VK_UUID_SIZE]) {
     if (! out) return -EINVAL;
     memset(out, 0, sizeof(*out));
 
@@ -918,12 +919,16 @@ int ww_vk_create_owned(ww_vk_owned_t* out) {
     PFN_vkGetPhysicalDeviceQueueFamilyProperties vkGetPhysicalDeviceQueueFamilyProperties =
         (PFN_vkGetPhysicalDeviceQueueFamilyProperties)gipa(
             out->instance, "vkGetPhysicalDeviceQueueFamilyProperties");
+    PFN_vkGetPhysicalDeviceProperties2 vkGetPhysicalDeviceProperties2 =
+        (PFN_vkGetPhysicalDeviceProperties2)gipa(out->instance,
+                                                 "vkGetPhysicalDeviceProperties2");
     PFN_vkCreateDevice   vkCreateDevice = (PFN_vkCreateDevice)gipa(out->instance, "vkCreateDevice");
     PFN_vkGetDeviceQueue vkGetDeviceQueue =
         (PFN_vkGetDeviceQueue)gipa(out->instance, "vkGetDeviceQueue");
     if (! out->vkDestroyInstance || ! out->vkDestroyDevice || ! vkEnumeratePhysicalDevices ||
         ! vkEnumerateDeviceExtensionProperties || ! vkGetPhysicalDeviceQueueFamilyProperties ||
-        ! vkCreateDevice || ! vkGetDeviceQueue) {
+        ! vkCreateDevice || ! vkGetDeviceQueue ||
+        (expected_device_uuid && ! vkGetPhysicalDeviceProperties2)) {
         ww_log(WAYWALLEN_LOG_ERROR, "vk owned: missing instance fn");
         ww_vk_destroy_owned(out);
         return -ENOSYS;
@@ -952,9 +957,23 @@ int ww_vk_create_owned(ww_vk_owned_t* out) {
     };
     const uint32_t want_n = (uint32_t)(sizeof(want) / sizeof(want[0]));
 
-    int      picked_pd  = -1;
-    uint32_t picked_qfi = 0;
+    int      picked_pd             = -1;
+    uint32_t picked_qfi            = 0;
+    bool     expected_uuid_matched = false;
     for (uint32_t i = 0; i < pd_count; i++) {
+        if (expected_device_uuid) {
+            VkPhysicalDeviceIDProperties id = {
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
+            };
+            VkPhysicalDeviceProperties2 props = {
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                .pNext = &id,
+            };
+            vkGetPhysicalDeviceProperties2(pds[i], &props);
+            if (memcmp(id.deviceUUID, expected_device_uuid, VK_UUID_SIZE) != 0) continue;
+            expected_uuid_matched = true;
+        }
+
         uint32_t ec = 0;
         vkEnumerateDeviceExtensionProperties(pds[i], NULL, &ec, NULL);
         if (ec == 0) continue;
@@ -996,6 +1015,13 @@ int ww_vk_create_owned(ww_vk_owned_t* out) {
     }
 
     if (picked_pd < 0) {
+        if (expected_device_uuid && ! expected_uuid_matched) {
+            ww_log(WAYWALLEN_LOG_ERROR,
+                   "vk owned: requested consumer deviceUUID was not enumerated");
+            free(pds);
+            ww_vk_destroy_owned(out);
+            return -ENODEV;
+        }
         ww_log(WAYWALLEN_LOG_ERROR,
                "vk owned: no GPU with required extensions+queue family "
                "(VK_EXT_external_memory_dma_buf + "
@@ -1042,6 +1068,14 @@ int ww_vk_create_owned(ww_vk_owned_t* out) {
            (void*)out->device,
            picked_qfi);
     return 0;
+}
+
+int ww_vk_create_owned(ww_vk_owned_t* out) { return ww_vk_create_owned_internal(out, NULL); }
+
+int ww_vk_create_owned_for_device_uuid(ww_vk_owned_t* out,
+                                       const uint8_t expected_device_uuid[VK_UUID_SIZE]) {
+    if (! expected_device_uuid) return -EINVAL;
+    return ww_vk_create_owned_internal(out, expected_device_uuid);
 }
 
 void ww_vk_destroy_owned(ww_vk_owned_t* o) {

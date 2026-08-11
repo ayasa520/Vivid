@@ -9,6 +9,7 @@
 #include <gio/gunixfdlist.h>
 #include <glib-unix.h>
 #include <string.h>
+#include <unistd.h>
 
 struct _VividDisplayConsumerReceiver {
     GObject parent_instance;
@@ -90,6 +91,18 @@ build_fd_list_from_recv_state(VividDisplayRecvState* state,
 }
 
 static void
+close_emitted_fd_list_contents(GUnixFDList* fd_list)
+{
+    gint n_fds = 0;
+    g_autofree gint* fds = g_unix_fd_list_steal_fds(fd_list, &n_fds);
+
+    for (gint i = 0; i < n_fds; i++) {
+        if (fds[i] >= 0)
+            close(fds[i]);
+    }
+}
+
+static void
 emit_complete_frame(VividDisplayConsumerReceiver* self)
 {
     GError* error = NULL;
@@ -118,6 +131,14 @@ emit_complete_frame(VividDisplayConsumerReceiver* self)
                   body,
                   fd_list);
 
+    /*
+     * GObject signals run synchronously, and every consumer that needs an fd
+     * obtains its own descriptor with g_unix_fd_list_get() before returning.
+     * GJS may nevertheless retain the signal argument wrapper until a later GC
+     * cycle. Explicitly empty the transport list here so that wrapper lifetime
+     * never controls the lifetime of per-frame sync_file/syncobj descriptors.
+     */
+    close_emitted_fd_list_contents(fd_list);
     g_object_unref(fd_list);
     g_bytes_unref(body);
 }

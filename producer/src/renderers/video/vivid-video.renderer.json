@@ -1,0 +1,22 @@
+{
+  "manifest-version": 1,
+  "id": "vivid.video",
+  "kind": "video",
+  "wallpaper-types": ["video"],
+  "executable": "video/vivid-video-renderer",
+  "spawn-version": 1,
+  "setting-defaults": {
+    "hardware-decoder": "auto",
+    "loop": true
+  },
+  "identity-settings": ["hardware-decoder", "render-device", "target-extent"],
+  "runtime-settings": [
+    "content-fit",
+    "fps",
+    "loop",
+    "muted",
+    "playing",
+    "volume"
+  ],
+  "events": []
+}

@@ -11,13 +11,36 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
+#include <cerrno>
 #include <unistd.h>
 
 #include "vivid_web_bridge_js.h"
+#include "vivid_renderer_process_group.h"
 
 namespace
 {
+
+bool
+join_renderer_process_group()
+{
+    const char* value = std::getenv(VIVID_RENDERER_PROCESS_GROUP_ENV);
+    if (!value || !*value) {
+        errno = EINVAL;
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    if (errno != 0 || !end || *end != '\0' || parsed <= 0) {
+        if (errno == 0)
+            errno = EINVAL;
+        return false;
+    }
+    const pid_t renderer_group = static_cast<pid_t>(parsed);
+    return setpgid(0, renderer_group) == 0 && getpgrp() == renderer_group;
+}
 
 enum ProcessType
 {
@@ -165,6 +188,13 @@ private:
 int
 main(int argc, char* argv[])
 {
+    if (!join_renderer_process_group()) {
+        std::fprintf(stderr,
+                     "VividWebHelper: pid=%ld failed to join renderer process group: %s\n",
+                     (long)getpid(),
+                     std::strerror(errno));
+        return 2;
+    }
     CefMainArgs args(argc, argv);
     CefRefPtr<CefCommandLine> command_line = command_line_from_args(args);
     const ProcessType process_type = get_process_type(command_line);

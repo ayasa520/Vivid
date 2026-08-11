@@ -36,7 +36,9 @@ report_cache_state() {
 
 mkdir -p \
     "${VIVID_INSTALL_LIB_DIR}" \
-    "${VIVID_INSTALL_WEB_CEF_DIR}" \
+    "${VIVID_INSTALL_SCENE_RENDERER_DIR}" \
+    "${VIVID_INSTALL_VIDEO_RENDERER_DIR}" \
+    "${VIVID_INSTALL_WEB_RENDERER_DIR}" \
     "${VIVID_FLATPAK_RENDERER_BUILD_ROOT}"
 
 # Flatpak extracts the CEF archive through the manifest before this command
@@ -58,10 +60,12 @@ echo "==> Building ${VIVID_SCENE_TARGET} in ${VIVID_FLATPAK_SCENE_BUILD_DIR}"
     --parallel "${BUILD_JOBS}" \
     --verbose \
     --target "${VIVID_SCENE_TARGET}"
-install -Dm755 "${VIVID_FLATPAK_SCENE_LIBRARY}" \
-    "${VIVID_INSTALL_LIB_DIR}/${VIVID_SCENE_LIBRARY_NAME}"
+install -Dm755 "${VIVID_FLATPAK_SCENE_EXECUTABLE}" \
+    "${VIVID_INSTALL_SCENE_RENDERER_DIR}/${VIVID_SCENE_EXECUTABLE_NAME}"
 install -Dm755 "${VIVID_FLATPAK_DXCOMPILER_LIBRARY}" \
-    "${VIVID_INSTALL_LIB_DIR}/${VIVID_DXCOMPILER_LIBRARY_NAME}"
+    "${VIVID_INSTALL_SCENE_RENDERER_DIR}/${VIVID_DXCOMPILER_LIBRARY_NAME}"
+install -Dm644 "${VIVID_SCENE_SOURCE_DIR}/${VIVID_SCENE_MANIFEST_NAME}" \
+    "${VIVID_INSTALL_RENDERER_ROOT}/${VIVID_SCENE_MANIFEST_NAME}"
 
 echo "==> Building ${VIVID_VIDEO_TARGET} in ${VIVID_FLATPAK_VIDEO_BUILD_DIR}"
 "${CMAKE_BIN}" -S "${VIVID_VIDEO_SOURCE_DIR}" \
@@ -71,8 +75,10 @@ echo "==> Building ${VIVID_VIDEO_TARGET} in ${VIVID_FLATPAK_VIDEO_BUILD_DIR}"
     --parallel "${BUILD_JOBS}" \
     --verbose \
     --target "${VIVID_VIDEO_TARGET}"
-install -Dm755 "${VIVID_FLATPAK_VIDEO_LIBRARY}" \
-    "${VIVID_INSTALL_LIB_DIR}/${VIVID_VIDEO_LIBRARY_NAME}"
+install -Dm755 "${VIVID_FLATPAK_VIDEO_EXECUTABLE}" \
+    "${VIVID_INSTALL_VIDEO_RENDERER_DIR}/${VIVID_VIDEO_EXECUTABLE_NAME}"
+install -Dm644 "${VIVID_VIDEO_SOURCE_DIR}/${VIVID_VIDEO_MANIFEST_NAME}" \
+    "${VIVID_INSTALL_RENDERER_ROOT}/${VIVID_VIDEO_MANIFEST_NAME}"
 
 if [ ! -d "${VIVID_FLATPAK_CEF_ROOT}/cmake" ]; then
     echo "CEF root is not an extracted CEF binary distribution: ${VIVID_FLATPAK_CEF_ROOT}" >&2
@@ -92,10 +98,11 @@ echo "==> Building ${VIVID_WEB_TARGET} and ${VIVID_WEB_HELPER_TARGET} in ${VIVID
     --target "${VIVID_WEB_TARGET}" \
     --target "${VIVID_WEB_HELPER_TARGET}"
 
-# libVividWeb.so uses $ORIGIN to find libcef.so, and CEF itself needs its
-# resource files plus locales beside the helper executable. Copying the CMake
-# out/ directory as one runtime bundle keeps that contract intact in /app.
-cp -a "${VIVID_FLATPAK_WEB_OUT_DIR}/." "${VIVID_INSTALL_WEB_CEF_DIR}/"
+# The worker and helper both use $ORIGIN for libcef.so. Copying the CMake out/
+# directory as one runtime bundle preserves CEF's executable/resource contract.
+cp -a "${VIVID_FLATPAK_WEB_OUT_DIR}/." "${VIVID_INSTALL_WEB_RENDERER_DIR}/"
+install -Dm644 "${VIVID_WEB_SOURCE_DIR}/${VIVID_WEB_MANIFEST_NAME}" \
+    "${VIVID_INSTALL_RENDERER_ROOT}/${VIVID_WEB_MANIFEST_NAME}"
 
 echo "==> Building Vivid GBM usage shim for NVIDIA shared textures"
 mkdir -p "${VIVID_FLATPAK_GBM_SHIM_BUILD_DIR}"
