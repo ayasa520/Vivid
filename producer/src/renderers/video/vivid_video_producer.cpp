@@ -558,6 +558,43 @@ set_plugin_decoder_ranks(const char* plugin_name, guint rank, bool use_stateless
     gst_plugin_feature_list_free(features);
 }
 
+bool
+load_decoder_plugin_factories(const char* plugin_name)
+{
+    /*
+     * Hardware decoder factories are created by the plugin's process-local
+     * driver probe. Registry metadata can identify the plugin without exposing
+     * the VA or CUDA elements available to this renderer process, so ranking
+     * those factories before loading the selected plugin can incorrectly make
+     * a working GPU decoder appear unavailable. Loading here performs the
+     * probe before rank selection without scanning directories or changing GPU
+     * policy; the selected VA render node or CUDA device is still verified by
+     * the existing decoder checks below.
+     */
+    GstPlugin* plugin = gst_plugin_load_by_name(plugin_name);
+    if (!plugin) {
+        g_warning("VividVideoProducer: failed to load GStreamer plugin %s",
+                  plugin_name);
+        return false;
+    }
+
+    GstRegistry* registry = gst_registry_get();
+    GList* features = registry
+        ? gst_registry_get_feature_list_by_plugin(registry, plugin_name)
+        : nullptr;
+    const guint feature_count = g_list_length(features);
+    g_message("VividVideoProducer: loaded decoder plugin=%s version=%s "
+              "filename=%s features=%u",
+              gst_plugin_get_name(plugin),
+              gst_plugin_get_version(plugin),
+              gst_plugin_get_filename(plugin) ? gst_plugin_get_filename(plugin)
+                                              : "(unknown)",
+              feature_count);
+    gst_plugin_feature_list_free(features);
+    gst_object_unref(plugin);
+    return true;
+}
+
 std::string
 va_element_factory_name(const char* render_node, const char* element_suffix)
 {
@@ -846,6 +883,7 @@ configure_decoder_ranks(VividGpuDecoderRoute route)
     constexpr guint preferred_rank = GST_RANK_PRIMARY + 4;
 
     if (route == VIVID_GPU_DECODER_ROUTE_VA) {
+        load_decoder_plugin_factories("va");
         set_plugin_decoder_ranks("va", preferred_rank, false);
         set_plugin_decoder_ranks("nvcodec", GST_RANK_NONE, false);
         set_plugin_decoder_ranks("nvcodec", GST_RANK_NONE, true);
@@ -858,6 +896,7 @@ configure_decoder_ranks(VividGpuDecoderRoute route)
      * same selected CUDA device when the stateful element is missing from this
      * nvcodec build.
      */
+    load_decoder_plugin_factories("nvcodec");
     set_plugin_decoder_ranks("va", GST_RANK_NONE, false);
     set_plugin_decoder_ranks("nvcodec", preferred_rank + 1, false);
     set_plugin_decoder_ranks("nvcodec", preferred_rank, true);
