@@ -6915,9 +6915,6 @@ route_renderer_progress(VividProducerRenderer* renderer, gpointer user_data)
         producer_maybe_finish_shutdown(route->producer);
         return;
     }
-    g_debug("VividProducer: worker progress edge route=%u pending-frames=%u",
-            route->route_id,
-            vivid_producer_renderer_pending_dmabuf_frame_count(renderer));
     if (route->frame_source_id != 0 && !route->frame_source_is_worker_event)
         route_stop_frame_source(route);
     route_schedule_worker_progress(route);
