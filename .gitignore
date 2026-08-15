@@ -39,3 +39,4 @@ AGENTS.md
 __pycache__/
 .playwright-cli
 .vscode/
+.cursor
