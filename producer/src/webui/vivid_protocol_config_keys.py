@@ -46,6 +46,9 @@ CONTENT_FIT_CAMEL = "contentFit"
 SCENE_FPS = "scene-fps"
 SCENE_FPS_CAMEL = "sceneFps"
 
+GFX_REFLECTIONS = "gfx-reflections"
+GFX_REFLECTIONS_CAMEL = "gfxReflections"
+
 STARTUP_DELAY = "startup-delay"
 STARTUP_DELAY_CAMEL = "startupDelay"
 

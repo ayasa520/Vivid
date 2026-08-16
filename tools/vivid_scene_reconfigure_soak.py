@@ -167,6 +167,7 @@ def load_scene_library(path: pathlib.Path) -> ctypes.CDLL:
         ctypes.c_double,
         ctypes.c_int,
         ctypes.c_int,
+        ctypes.c_int,
         ctypes.c_char_p,
         ctypes.POINTER(GpuDevice),
     ]
@@ -271,6 +272,7 @@ def main() -> int:
             0.0,
             1,
             30,
+            1,
             bytes(device.render_node).split(b"\0", 1)[0],
             ctypes.byref(device),
         ):

@@ -532,6 +532,11 @@ camel = "sceneFps"
 type = "int"
 
 [[config-keys.members]]
+kebab = "gfx-reflections"
+camel = "gfxReflections"
+type = "bool"
+
+[[config-keys.members]]
 kebab = "startup-delay"
 camel = "startupDelay"
 type = "int"

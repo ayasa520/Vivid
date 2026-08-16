@@ -102,6 +102,7 @@ gboolean vivid_scene_producer_configure(VividSceneProducer* self,
                                          gdouble              volume,
                                          gint                 fill_mode,
                                          gint                 fps,
+                                         gboolean             reflections,
                                          const gchar*         render_device,
                                          const VividGpuDevice* resolved_gpu);
 

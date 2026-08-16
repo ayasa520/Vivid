@@ -521,6 +521,7 @@ Variable-length binary body.
 | `render-device` | `renderDevice` | string |
 | `content-fit` | `contentFit` | int |
 | `scene-fps` | `sceneFps` | int |
+| `gfx-reflections` | `gfxReflections` | bool |
 | `startup-delay` | `startupDelay` | int |
 | `show-panel-menu` | `showPanelMenu` | bool |
 | `project-browser-filter-state` | `projectBrowserFilterState` | string |

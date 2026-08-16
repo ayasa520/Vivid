@@ -879,7 +879,8 @@ inline void configure_scene_wallpaper(wallpaper::SceneWallpaper& scene,
                                       double volume,
                                       gboolean muted,
                                       int fill_mode,
-                                      int fps) {
+                                      int fps,
+                                      bool reflections = true) {
     // Match the KDE backend's long-lived SceneViewer model: update the reusable
     // SceneWallpaper with the next project's state, then let the source property
     // be the single operation that asks the renderer looper to parse a new scene.
@@ -896,6 +897,7 @@ inline void configure_scene_wallpaper(wallpaper::SceneWallpaper& scene,
         wallpaper::PROPERTY_FILLMODE,
         static_cast<int32_t>(to_wallpaper_fill_mode(fill_mode)));
     scene.setPropertyInt32(wallpaper::PROPERTY_FPS, fps);
+    scene.setPropertyBool(wallpaper::PROPERTY_REFLECTIONS, reflections);
     scene.setPropertyString(wallpaper::PROPERTY_ASSETS, project.assets_path);
     scene.setPropertyString(wallpaper::PROPERTY_SOURCE, project.scene_path);
 }

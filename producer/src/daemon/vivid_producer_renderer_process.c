@@ -49,6 +49,7 @@ struct _VividProducerRenderer
     gint volume;
     gint content_fit;
     gint fps;
+    gboolean gfx_reflections;
     gboolean playback_paused;
     gboolean playback_stopped;
     guint32 target_width;
@@ -302,6 +303,11 @@ settings_json(VividProducerRenderer* renderer,
     if (vivid_renderer_descriptor_has_runtime_setting(renderer->descriptor, "fps")) {
         json_builder_set_member_name(builder, "fps");
         json_builder_add_int_value(builder, renderer->fps);
+    }
+    if (vivid_renderer_descriptor_has_runtime_setting(renderer->descriptor,
+                                                       "gfx-reflections")) {
+        json_builder_set_member_name(builder, "gfx-reflections");
+        json_builder_add_boolean_value(builder, renderer->gfx_reflections);
     }
     if (include_properties &&
         vivid_renderer_descriptor_has_runtime_setting(renderer->descriptor,
@@ -671,6 +677,7 @@ renderer_new_internal(const VividRendererRegistry* registry,
     renderer->volume = 50;
     renderer->content_fit = 1;
     renderer->fps = 30;
+    renderer->gfx_reflections = TRUE;
     renderer->target_scale = 1.0;
     renderer->generation = 1;
     renderer->completed_release_points =
@@ -773,6 +780,7 @@ vivid_producer_renderer_apply_config(VividProducerRenderer* renderer,
     renderer->volume = CLAMP(config->volume, 0, 100);
     renderer->content_fit = CLAMP(config->content_fit, 1, 3);
     renderer->fps = CLAMP(config->scene_fps, 5, 240);
+    renderer->gfx_reflections = config->gfx_reflections;
     g_free(renderer->user_properties_json);
     renderer->user_properties_json = g_strdup(next_properties);
     if (identity_input_changed) {

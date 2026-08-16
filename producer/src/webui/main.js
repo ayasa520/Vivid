@@ -159,6 +159,7 @@ const TRANSLATIONS = {
     'setting.primary-display-key.name': 'Primary Display',
     'setting.primary-display-key.note': 'Clone mode renders this display first, then crops that image for the others',
     'setting.render-device.name': 'Rendering GPU',
+    'setting.gfx-reflections.name': 'Reflections',
     'setting.scene-fps.name': 'Frame Rate',
     'setting.scene-fps.note': 'Applies to scene, web, and video wallpapers',
     'setting.show-panel-menu.name': 'Show Panel Menu',
@@ -308,6 +309,7 @@ const TRANSLATIONS = {
     'setting.primary-display-key.name': '主显示器',
     'setting.primary-display-key.note': '复制模式先渲染这块屏，再把这个画面裁剪给其他屏',
     'setting.render-device.name': '渲染 GPU',
+    'setting.gfx-reflections.name': '反射',
     'setting.scene-fps.name': '帧率',
     'setting.scene-fps.note': '作用于场景、网页和视频壁纸',
     'setting.show-panel-menu.name': '显示面板菜单',
@@ -646,6 +648,13 @@ const SETTINGS = [
     max: 240,
     step: 1,
     debounce: 250,
+  },
+  {
+    section: 'scene',
+    key: 'gfx-reflections',
+    name: 'Reflections',
+    type: 'boolean',
+    defaultValue: true,
   },
   {
     section: 'playback',
@@ -1416,7 +1425,9 @@ function applySettingControlValue(definition, value) {
   const {control, output} = entry;
   switch (definition.type) {
   case 'boolean':
-    control.checked = Boolean(value);
+    control.checked = value === undefined && definition.defaultValue !== undefined
+      ? Boolean(definition.defaultValue)
+      : Boolean(value);
     break;
   case 'select':
     rebuildSelectOptions(definition, control, value);

@@ -38,6 +38,7 @@ static const VividConfigSchemaEntry vivid_set_state_schema[] = {
     {"render-device", "renderDevice", VIVID_CONFIG_SCHEMA_STRING},
     {"content-fit", "contentFit", VIVID_CONFIG_SCHEMA_INT},
     {"scene-fps", "sceneFps", VIVID_CONFIG_SCHEMA_INT},
+    {"gfx-reflections", "gfxReflections", VIVID_CONFIG_SCHEMA_BOOL},
     {"startup-delay", "startupDelay", VIVID_CONFIG_SCHEMA_INT},
     {"show-panel-menu", "showPanelMenu", VIVID_CONFIG_SCHEMA_BOOL},
     {"project-browser-filter-state", "projectBrowserFilterState", VIVID_CONFIG_SCHEMA_STRING},

@@ -881,6 +881,7 @@ vivid_producer_config_reset_defaults(VividProducerConfig* config)
     replace_string(&config->render_device, "auto");
     config->content_fit = 1;
     config->scene_fps = 30;
+    config->gfx_reflections = TRUE;
     config->startup_delay = 1000;
     config->show_panel_menu = TRUE;
     replace_string(&config->project_browser_filter_state, "");
@@ -1121,6 +1122,7 @@ vivid_producer_config_load(VividProducerConfig* config)
     load_string_member(global, "render-device", &config->render_device);
     config->content_fit = json_get_int_clamped(global, "content-fit", config->content_fit, 1, 3);
     config->scene_fps = json_get_int_clamped(global, "scene-fps", config->scene_fps, 5, 240);
+    config->gfx_reflections = json_get_boolean(global, "gfx-reflections", config->gfx_reflections);
     config->startup_delay = json_get_int_clamped(global, "startup-delay", config->startup_delay, 0, 10000);
     config->show_panel_menu = json_get_boolean(global, "show-panel-menu", config->show_panel_menu);
     load_string_member(global, "project-browser-filter-state", &config->project_browser_filter_state);
@@ -1220,6 +1222,7 @@ builder_add_config_global(JsonBuilder* builder, const VividProducerConfig* confi
     ADD_STRING("render-device", config->render_device);
     ADD_INT("content-fit", config->content_fit);
     ADD_INT("scene-fps", config->scene_fps);
+    ADD_BOOL("gfx-reflections", config->gfx_reflections);
     ADD_INT("startup-delay", config->startup_delay);
     ADD_BOOL("show-panel-menu", config->show_panel_menu);
     ADD_STRING("project-browser-filter-state", config->project_browser_filter_state);
@@ -1324,6 +1327,7 @@ apply_set_state_payload(VividProducerConfig* config, JsonObject* payload)
     load_string_member(payload, "render-device", &config->render_device);
     config->content_fit = json_get_int_clamped(payload, "content-fit", config->content_fit, 1, 3);
     config->scene_fps = json_get_int_clamped(payload, "scene-fps", config->scene_fps, 5, 240);
+    config->gfx_reflections = json_get_boolean(payload, "gfx-reflections", config->gfx_reflections);
     config->startup_delay = json_get_int_clamped(payload, "startup-delay", config->startup_delay, 0, 10000);
     config->show_panel_menu = json_get_boolean(payload, "show-panel-menu", config->show_panel_menu);
     load_string_member(payload, "project-browser-filter-state", &config->project_browser_filter_state);
