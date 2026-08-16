@@ -49,6 +49,12 @@ SCENE_FPS_CAMEL = "sceneFps"
 GFX_REFLECTIONS = "gfx-reflections"
 GFX_REFLECTIONS_CAMEL = "gfxReflections"
 
+GFX_VOLUMETRICS = "gfx-volumetrics"
+GFX_VOLUMETRICS_CAMEL = "gfxVolumetrics"
+
+GFX_SHADOWS = "gfx-shadows"
+GFX_SHADOWS_CAMEL = "gfxShadows"
+
 STARTUP_DELAY = "startup-delay"
 STARTUP_DELAY_CAMEL = "startupDelay"
 

@@ -29,6 +29,8 @@ struct SceneWorker {
     int content_fit { 1 };
     int fps { 30 };
     bool gfx_reflections { true };
+    int gfx_volumetrics { 2 };
+    int gfx_shadows { 2 };
 };
 
 bool json_int_member(JsonObject* object, const char* name, int& value)
@@ -79,20 +81,28 @@ bool apply_settings_json(SceneWorker* worker,
     int fps = worker->fps;
     int content_fit = worker->content_fit;
     bool gfx_reflections = worker->gfx_reflections;
+    int gfx_volumetrics = worker->gfx_volumetrics;
+    int gfx_shadows = worker->gfx_shadows;
     if (!json_int_member(object, "fps", fps) ||
         !json_int_member(object, "content-fit", content_fit) ||
         !json_bool_member(object, "gfx-reflections", gfx_reflections) ||
-        fps < 5 || fps > 240 || content_fit < 1 || content_fit > 3) {
+        !json_int_member(object, "gfx-volumetrics", gfx_volumetrics) ||
+        !json_int_member(object, "gfx-shadows", gfx_shadows) ||
+        fps < 5 || fps > 240 || content_fit < 1 || content_fit > 3 ||
+        gfx_volumetrics < 0 || gfx_volumetrics > 4 ||
+        gfx_shadows < 0 || gfx_shadows > 4) {
         g_set_error_literal(error,
                             G_IO_ERROR,
                             G_IO_ERROR_INVALID_DATA,
-                            "scene runtime fps/content-fit/gfx-reflections is invalid");
+                            "scene runtime fps/content-fit/gfx-reflections/gfx-volumetrics/gfx-shadows is invalid");
         return false;
     }
     g_mutex_lock(&worker->state_lock);
     worker->fps = fps;
     worker->content_fit = content_fit;
     worker->gfx_reflections = gfx_reflections;
+    worker->gfx_volumetrics = gfx_volumetrics;
+    worker->gfx_shadows = gfx_shadows;
     g_mutex_unlock(&worker->state_lock);
     if (allow_properties && json_object_has_member(object, "user-properties")) {
         JsonNode* properties = json_object_get_member(object, "user-properties");
@@ -109,6 +119,8 @@ bool configure_scene(SceneWorker* worker, GError** error)
     const int content_fit = worker->content_fit;
     const int fps = worker->fps;
     const bool gfx_reflections = worker->gfx_reflections;
+    const int gfx_volumetrics = worker->gfx_volumetrics;
+    const int gfx_shadows = worker->gfx_shadows;
     g_mutex_unlock(&worker->state_lock);
     g_mutex_lock(&worker->backend_lock);
     const gboolean configured = vivid_scene_producer_configure(
@@ -120,6 +132,8 @@ bool configure_scene(SceneWorker* worker, GError** error)
         content_fit,
         fps,
         gfx_reflections,
+        gfx_volumetrics,
+        gfx_shadows,
         worker->common.render_node,
         &worker->common.gpu);
     if (configured)

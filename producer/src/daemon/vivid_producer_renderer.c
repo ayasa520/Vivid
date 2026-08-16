@@ -129,6 +129,9 @@ typedef struct
                                gdouble              volume,
                                gint                 fill_mode,
                                gint                 fps,
+                               gboolean             reflections,
+                               gint                 volumetrics,
+                               gint                 shadows,
                                const gchar*         render_device,
                                const VividGpuDevice* resolved_gpu);
     void (*set_playing_func)(VividSceneProducer* self, gboolean playing);
@@ -1198,6 +1201,9 @@ vivid_producer_scene_start(VividProducerRenderer* renderer,
                                         volume,
                                         CLAMP(renderer->content_fit, 1, 3),
                                         renderer->scene_fps,
+                                        renderer->gfx_reflections,
+                                        renderer->gfx_volumetrics,
+                                        renderer->gfx_shadows,
                                         renderer_backend_render_device(renderer),
                                         renderer_resolved_gpu_or_null(renderer))) {
         g_warning("VividProducer: scene renderer failed to configure project=%s",
@@ -1237,6 +1243,9 @@ vivid_producer_video_apply_audio_state(VividProducerRenderer* renderer)
                                        volume,
                                        CLAMP(renderer->content_fit, 1, 3),
                                        renderer->scene_fps,
+                                       renderer->gfx_reflections,
+                                       renderer->gfx_volumetrics,
+                                       renderer->gfx_shadows,
                                        renderer_backend_render_device(renderer),
                                        renderer_resolved_gpu_or_null(renderer));
     }
@@ -1580,6 +1589,9 @@ vivid_producer_scene_refresh_config(VividProducerRenderer* renderer)
                                                        volume,
                                                        CLAMP(renderer->content_fit, 1, 3),
                                                        renderer->scene_fps,
+                                                       renderer->gfx_reflections,
+                                                       renderer->gfx_volumetrics,
+                                                       renderer->gfx_shadows,
                                                        renderer_backend_render_device(renderer),
                                                        renderer_resolved_gpu_or_null(renderer));
     if (!ok) {

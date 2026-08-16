@@ -537,6 +537,16 @@ camel = "gfxReflections"
 type = "bool"
 
 [[config-keys.members]]
+kebab = "gfx-volumetrics"
+camel = "gfxVolumetrics"
+type = "int"
+
+[[config-keys.members]]
+kebab = "gfx-shadows"
+camel = "gfxShadows"
+type = "int"
+
+[[config-keys.members]]
 kebab = "startup-delay"
 camel = "startupDelay"
 type = "int"

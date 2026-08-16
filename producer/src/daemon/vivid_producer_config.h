@@ -85,6 +85,8 @@ struct _VividProducerConfig
     gint content_fit;
     gint scene_fps;
     gboolean gfx_reflections;
+    gint gfx_volumetrics;
+    gint gfx_shadows;
     gint startup_delay;
     gboolean show_panel_menu;
     gchar* project_browser_filter_state;

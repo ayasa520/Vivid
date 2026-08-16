@@ -141,6 +141,8 @@ struct _VividSceneProducer
     int fill_mode { 1 };
     int fps { 30 };
     bool reflections { true };
+    int volumetrics { 2 };
+    int shadows { 2 };
     guint32 width { 0 };
     guint32 height { 0 };
     double render_scale { 1.0 };
@@ -276,7 +278,9 @@ void apply_scene_runtime_properties(wallpaper::SceneWallpaper& scene,
                                     gboolean                   muted,
                                     int                        fill_mode,
                                     int                        fps,
-                                    bool                       reflections) {
+                                    bool                       reflections,
+                                    int                        volumetrics,
+                                    int                        shadows) {
     scene.setPropertyFloat(wallpaper::PROPERTY_VOLUME, static_cast<float>(volume));
     scene.setPropertyBool(wallpaper::PROPERTY_MUTED, muted);
     scene.setPropertyInt32(
@@ -284,6 +288,8 @@ void apply_scene_runtime_properties(wallpaper::SceneWallpaper& scene,
         static_cast<int32_t>(to_wallpaper_fill_mode(fill_mode)));
     scene.setPropertyInt32(wallpaper::PROPERTY_FPS, fps);
     scene.setPropertyBool(wallpaper::PROPERTY_REFLECTIONS, reflections);
+    scene.setPropertyInt32(wallpaper::PROPERTY_VOLUMETRICS, volumetrics);
+    scene.setPropertyInt32(wallpaper::PROPERTY_SHADOWS, shadows);
 }
 
 void apply_scene_script_runtime_objects(VividSceneProducer* self) {
@@ -391,6 +397,8 @@ vivid_scene_producer_configure(VividSceneProducer* self,
                                 gint                 fill_mode,
                                 gint                 fps,
                                 gboolean             reflections,
+                                gint                 volumetrics,
+                                gint                 shadows,
                                 const gchar*         render_device,
                                 const VividGpuDevice* resolved_gpu)
 {
@@ -415,6 +423,8 @@ vivid_scene_producer_configure(VividSceneProducer* self,
     const int next_fill_mode = std::clamp(fill_mode, 1, 3);
     const int next_fps = std::clamp(fps, 5, 240);
     const bool next_reflections = !!reflections;
+    const int next_volumetrics = std::clamp(volumetrics, 0, 4);
+    const int next_shadows = std::clamp(shadows, 0, 4);
     const std::string next_render_device =
         render_device && *render_device ? render_device : "auto";
     const bool next_resolved_gpu_valid = resolved_gpu != nullptr;
@@ -427,7 +437,9 @@ vivid_scene_producer_configure(VividSceneProducer* self,
         std::abs(self->volume - next_volume) > 0.0001 ||
         self->fill_mode != next_fill_mode ||
         self->fps != next_fps ||
-        self->reflections != next_reflections;
+        self->reflections != next_reflections ||
+        self->volumetrics != next_volumetrics ||
+        self->shadows != next_shadows;
     const bool render_device_changed =
         self->render_device != next_render_device ||
         self->resolved_gpu_valid != next_resolved_gpu_valid ||
@@ -442,11 +454,13 @@ vivid_scene_producer_configure(VividSceneProducer* self,
     self->fill_mode = next_fill_mode;
     self->fps = next_fps;
     self->reflections = next_reflections;
+    self->volumetrics = next_volumetrics;
+    self->shadows = next_shadows;
     self->render_device = next_render_device;
     self->resolved_gpu = next_resolved_gpu;
     self->resolved_gpu_valid = next_resolved_gpu_valid;
 
-    g_message("VividSceneProducer: configure project=%s project-changed=%s user-properties-changed=%s runtime-properties-changed=%s gpu-changed=%s muted=%s volume=%.3f fill-mode=%d fps=%d reflections=%s render-device=%s",
+    g_message("VividSceneProducer: configure project=%s project-changed=%s user-properties-changed=%s runtime-properties-changed=%s gpu-changed=%s muted=%s volume=%.3f fill-mode=%d fps=%d reflections=%s volumetrics=%d shadows=%d render-device=%s",
               self->project_dir.c_str(),
               bool_to_string(project_changed),
               bool_to_string(user_properties_changed),
@@ -457,6 +471,8 @@ vivid_scene_producer_configure(VividSceneProducer* self,
               self->fill_mode,
               self->fps,
               bool_to_string(self->reflections),
+              self->volumetrics,
+              self->shadows,
               self->render_device.c_str());
 
     if (render_device_changed) {
@@ -487,7 +503,9 @@ vivid_scene_producer_configure(VividSceneProducer* self,
                                   self->muted,
                                   self->fill_mode,
                                   self->fps,
-                                  self->reflections);
+                                  self->reflections,
+                                  self->volumetrics,
+                                  self->shadows);
         self->scene_ready = true;
     } else {
         if (user_properties_changed)
@@ -498,7 +516,9 @@ vivid_scene_producer_configure(VividSceneProducer* self,
                                            self->muted,
                                            self->fill_mode,
                                            self->fps,
-                                           self->reflections);
+                                           self->reflections,
+                                           self->volumetrics,
+                                           self->shadows);
     }
 
     apply_scene_script_runtime_objects(self);
@@ -739,7 +759,9 @@ vivid_scene_producer_prepare_buffers_with_request(
                                   self->muted,
                                   self->fill_mode,
                                   self->fps,
-                                  self->reflections);
+                                  self->reflections,
+                                  self->volumetrics,
+                                  self->shadows);
         self->scene_ready = true;
         apply_scene_script_runtime_objects(self);
     }

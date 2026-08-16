@@ -11,6 +11,8 @@
     "content-fit",
     "fps",
     "gfx-reflections",
+    "gfx-volumetrics",
+    "gfx-shadows",
     "muted",
     "playing",
     "user-properties",

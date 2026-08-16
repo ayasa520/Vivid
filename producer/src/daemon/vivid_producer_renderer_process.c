@@ -50,6 +50,8 @@ struct _VividProducerRenderer
     gint content_fit;
     gint fps;
     gboolean gfx_reflections;
+    gint gfx_volumetrics;
+    gint gfx_shadows;
     gboolean playback_paused;
     gboolean playback_stopped;
     guint32 target_width;
@@ -308,6 +310,16 @@ settings_json(VividProducerRenderer* renderer,
                                                        "gfx-reflections")) {
         json_builder_set_member_name(builder, "gfx-reflections");
         json_builder_add_boolean_value(builder, renderer->gfx_reflections);
+    }
+    if (vivid_renderer_descriptor_has_runtime_setting(renderer->descriptor,
+                                                       "gfx-volumetrics")) {
+        json_builder_set_member_name(builder, "gfx-volumetrics");
+        json_builder_add_int_value(builder, renderer->gfx_volumetrics);
+    }
+    if (vivid_renderer_descriptor_has_runtime_setting(renderer->descriptor,
+                                                       "gfx-shadows")) {
+        json_builder_set_member_name(builder, "gfx-shadows");
+        json_builder_add_int_value(builder, renderer->gfx_shadows);
     }
     if (include_properties &&
         vivid_renderer_descriptor_has_runtime_setting(renderer->descriptor,
@@ -678,6 +690,8 @@ renderer_new_internal(const VividRendererRegistry* registry,
     renderer->content_fit = 1;
     renderer->fps = 30;
     renderer->gfx_reflections = TRUE;
+    renderer->gfx_volumetrics = 2;
+    renderer->gfx_shadows = 2;
     renderer->target_scale = 1.0;
     renderer->generation = 1;
     renderer->completed_release_points =
@@ -781,6 +795,8 @@ vivid_producer_renderer_apply_config(VividProducerRenderer* renderer,
     renderer->content_fit = CLAMP(config->content_fit, 1, 3);
     renderer->fps = CLAMP(config->scene_fps, 5, 240);
     renderer->gfx_reflections = config->gfx_reflections;
+    renderer->gfx_volumetrics = CLAMP(config->gfx_volumetrics, 0, 4);
+    renderer->gfx_shadows = CLAMP(config->gfx_shadows, 0, 4);
     g_free(renderer->user_properties_json);
     renderer->user_properties_json = g_strdup(next_properties);
     if (identity_input_changed) {
