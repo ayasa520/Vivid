@@ -552,6 +552,11 @@ camel = "gfxPostprocessing"
 type = "int"
 
 [[config-keys.members]]
+kebab = "gfx-antialiasing"
+camel = "gfxAntialiasing"
+type = "int"
+
+[[config-keys.members]]
 kebab = "startup-delay"
 camel = "startupDelay"
 type = "int"

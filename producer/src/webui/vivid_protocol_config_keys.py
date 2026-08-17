@@ -58,6 +58,9 @@ GFX_SHADOWS_CAMEL = "gfxShadows"
 GFX_POSTPROCESSING = "gfx-postprocessing"
 GFX_POSTPROCESSING_CAMEL = "gfxPostprocessing"
 
+GFX_ANTIALIASING = "gfx-antialiasing"
+GFX_ANTIALIASING_CAMEL = "gfxAntialiasing"
+
 STARTUP_DELAY = "startup-delay"
 STARTUP_DELAY_CAMEL = "startupDelay"
 

@@ -88,6 +88,7 @@ struct _VividProducerConfig
     gint gfx_volumetrics;
     gint gfx_shadows;
     gint gfx_postprocessing;
+    gint gfx_antialiasing;
     gint startup_delay;
     gboolean show_panel_menu;
     gchar* project_browser_filter_state;

@@ -144,6 +144,7 @@ struct _VividSceneProducer
     int volumetrics { 2 };
     int shadows { 2 };
     int postprocessing { 1 };
+    int antialiasing { 1 };
     guint32 width { 0 };
     guint32 height { 0 };
     double render_scale { 1.0 };
@@ -282,7 +283,8 @@ void apply_scene_runtime_properties(wallpaper::SceneWallpaper& scene,
                                     bool                       reflections,
                                     int                        volumetrics,
                                     int                        shadows,
-                                    int                        postprocessing) {
+                                    int                        postprocessing,
+                                    int                        antialiasing) {
     scene.setPropertyFloat(wallpaper::PROPERTY_VOLUME, static_cast<float>(volume));
     scene.setPropertyBool(wallpaper::PROPERTY_MUTED, muted);
     scene.setPropertyInt32(
@@ -293,6 +295,7 @@ void apply_scene_runtime_properties(wallpaper::SceneWallpaper& scene,
     scene.setPropertyInt32(wallpaper::PROPERTY_VOLUMETRICS, volumetrics);
     scene.setPropertyInt32(wallpaper::PROPERTY_SHADOWS, shadows);
     scene.setPropertyInt32(wallpaper::PROPERTY_POSTPROCESSING, postprocessing);
+    scene.setPropertyInt32(wallpaper::PROPERTY_ANTIALIASING, antialiasing);
 }
 
 void apply_scene_script_runtime_objects(VividSceneProducer* self) {
@@ -403,6 +406,7 @@ vivid_scene_producer_configure(VividSceneProducer* self,
                                 gint                 volumetrics,
                                 gint                 shadows,
                                 gint                 postprocessing,
+                                gint                 antialiasing,
                                 const gchar*         render_device,
                                 const VividGpuDevice* resolved_gpu)
 {
@@ -430,6 +434,7 @@ vivid_scene_producer_configure(VividSceneProducer* self,
     const int next_volumetrics = std::clamp(volumetrics, 0, 4);
     const int next_shadows = std::clamp(shadows, 0, 4);
     const int next_postprocessing = std::clamp(postprocessing, 0, 3);
+    const int next_antialiasing = std::clamp(antialiasing, 0, 3);
     const std::string next_render_device =
         render_device && *render_device ? render_device : "auto";
     const bool next_resolved_gpu_valid = resolved_gpu != nullptr;
@@ -445,7 +450,8 @@ vivid_scene_producer_configure(VividSceneProducer* self,
         self->reflections != next_reflections ||
         self->volumetrics != next_volumetrics ||
         self->shadows != next_shadows ||
-        self->postprocessing != next_postprocessing;
+        self->postprocessing != next_postprocessing ||
+        self->antialiasing != next_antialiasing;
     const bool render_device_changed =
         self->render_device != next_render_device ||
         self->resolved_gpu_valid != next_resolved_gpu_valid ||
@@ -463,11 +469,12 @@ vivid_scene_producer_configure(VividSceneProducer* self,
     self->volumetrics = next_volumetrics;
     self->shadows = next_shadows;
     self->postprocessing = next_postprocessing;
+    self->antialiasing = next_antialiasing;
     self->render_device = next_render_device;
     self->resolved_gpu = next_resolved_gpu;
     self->resolved_gpu_valid = next_resolved_gpu_valid;
 
-    g_message("VividSceneProducer: configure project=%s project-changed=%s user-properties-changed=%s runtime-properties-changed=%s gpu-changed=%s muted=%s volume=%.3f fill-mode=%d fps=%d reflections=%s volumetrics=%d shadows=%d postprocessing=%d render-device=%s",
+    g_message("VividSceneProducer: configure project=%s project-changed=%s user-properties-changed=%s runtime-properties-changed=%s gpu-changed=%s muted=%s volume=%.3f fill-mode=%d fps=%d reflections=%s volumetrics=%d shadows=%d postprocessing=%d antialiasing=%d render-device=%s",
               self->project_dir.c_str(),
               bool_to_string(project_changed),
               bool_to_string(user_properties_changed),
@@ -481,6 +488,7 @@ vivid_scene_producer_configure(VividSceneProducer* self,
               self->volumetrics,
               self->shadows,
               self->postprocessing,
+              self->antialiasing,
               self->render_device.c_str());
 
     if (render_device_changed) {
@@ -514,7 +522,8 @@ vivid_scene_producer_configure(VividSceneProducer* self,
                                   self->reflections,
                                   self->volumetrics,
                                   self->shadows,
-                                  self->postprocessing);
+                                  self->postprocessing,
+                                  self->antialiasing);
         self->scene_ready = true;
     } else {
         if (user_properties_changed)
@@ -528,7 +537,8 @@ vivid_scene_producer_configure(VividSceneProducer* self,
                                            self->reflections,
                                            self->volumetrics,
                                            self->shadows,
-                                           self->postprocessing);
+                                           self->postprocessing,
+                                           self->antialiasing);
     }
 
     apply_scene_script_runtime_objects(self);
@@ -772,7 +782,8 @@ vivid_scene_producer_prepare_buffers_with_request(
                                   self->reflections,
                                   self->volumetrics,
                                   self->shadows,
-                                  self->postprocessing);
+                                  self->postprocessing,
+                                  self->antialiasing);
         self->scene_ready = true;
         apply_scene_script_runtime_objects(self);
     }

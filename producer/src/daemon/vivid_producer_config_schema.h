@@ -42,6 +42,7 @@ static const VividConfigSchemaEntry vivid_set_state_schema[] = {
     {"gfx-volumetrics", "gfxVolumetrics", VIVID_CONFIG_SCHEMA_INT},
     {"gfx-shadows", "gfxShadows", VIVID_CONFIG_SCHEMA_INT},
     {"gfx-postprocessing", "gfxPostprocessing", VIVID_CONFIG_SCHEMA_INT},
+    {"gfx-antialiasing", "gfxAntialiasing", VIVID_CONFIG_SCHEMA_INT},
     {"startup-delay", "startupDelay", VIVID_CONFIG_SCHEMA_INT},
     {"show-panel-menu", "showPanelMenu", VIVID_CONFIG_SCHEMA_BOOL},
     {"project-browser-filter-state", "projectBrowserFilterState", VIVID_CONFIG_SCHEMA_STRING},
