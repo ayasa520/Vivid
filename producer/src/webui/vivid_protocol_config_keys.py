@@ -55,6 +55,9 @@ GFX_VOLUMETRICS_CAMEL = "gfxVolumetrics"
 GFX_SHADOWS = "gfx-shadows"
 GFX_SHADOWS_CAMEL = "gfxShadows"
 
+GFX_POSTPROCESSING = "gfx-postprocessing"
+GFX_POSTPROCESSING_CAMEL = "gfxPostprocessing"
+
 STARTUP_DELAY = "startup-delay"
 STARTUP_DELAY_CAMEL = "startupDelay"
 

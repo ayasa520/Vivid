@@ -105,6 +105,7 @@ gboolean vivid_scene_producer_configure(VividSceneProducer* self,
                                          gboolean             reflections,
                                          gint                 volumetrics,
                                          gint                 shadows,
+                                         gint                 postprocessing,
                                          const gchar*         render_device,
                                          const VividGpuDevice* resolved_gpu);
 

@@ -13,6 +13,7 @@
     "gfx-reflections",
     "gfx-volumetrics",
     "gfx-shadows",
+    "gfx-postprocessing",
     "muted",
     "playing",
     "user-properties",

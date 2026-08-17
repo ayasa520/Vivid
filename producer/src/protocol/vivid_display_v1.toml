@@ -547,6 +547,11 @@ camel = "gfxShadows"
 type = "int"
 
 [[config-keys.members]]
+kebab = "gfx-postprocessing"
+camel = "gfxPostprocessing"
+type = "int"
+
+[[config-keys.members]]
 kebab = "startup-delay"
 camel = "startupDelay"
 type = "int"

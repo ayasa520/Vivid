@@ -52,6 +52,7 @@ struct _VividProducerRenderer
     gboolean gfx_reflections;
     gint gfx_volumetrics;
     gint gfx_shadows;
+    gint gfx_postprocessing;
     gboolean playback_paused;
     gboolean playback_stopped;
     guint32 target_width;
@@ -320,6 +321,11 @@ settings_json(VividProducerRenderer* renderer,
                                                        "gfx-shadows")) {
         json_builder_set_member_name(builder, "gfx-shadows");
         json_builder_add_int_value(builder, renderer->gfx_shadows);
+    }
+    if (vivid_renderer_descriptor_has_runtime_setting(renderer->descriptor,
+                                                       "gfx-postprocessing")) {
+        json_builder_set_member_name(builder, "gfx-postprocessing");
+        json_builder_add_int_value(builder, renderer->gfx_postprocessing);
     }
     if (include_properties &&
         vivid_renderer_descriptor_has_runtime_setting(renderer->descriptor,
@@ -692,6 +698,7 @@ renderer_new_internal(const VividRendererRegistry* registry,
     renderer->gfx_reflections = TRUE;
     renderer->gfx_volumetrics = 2;
     renderer->gfx_shadows = 2;
+    renderer->gfx_postprocessing = 1;
     renderer->target_scale = 1.0;
     renderer->generation = 1;
     renderer->completed_release_points =
@@ -797,6 +804,7 @@ vivid_producer_renderer_apply_config(VividProducerRenderer* renderer,
     renderer->gfx_reflections = config->gfx_reflections;
     renderer->gfx_volumetrics = CLAMP(config->gfx_volumetrics, 0, 4);
     renderer->gfx_shadows = CLAMP(config->gfx_shadows, 0, 4);
+    renderer->gfx_postprocessing = CLAMP(config->gfx_postprocessing, 0, 3);
     g_free(renderer->user_properties_json);
     renderer->user_properties_json = g_strdup(next_properties);
     if (identity_input_changed) {

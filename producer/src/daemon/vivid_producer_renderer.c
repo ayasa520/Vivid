@@ -132,6 +132,7 @@ typedef struct
                                gboolean             reflections,
                                gint                 volumetrics,
                                gint                 shadows,
+                               gint                 postprocessing,
                                const gchar*         render_device,
                                const VividGpuDevice* resolved_gpu);
     void (*set_playing_func)(VividSceneProducer* self, gboolean playing);
@@ -237,6 +238,10 @@ struct _VividProducerRenderer
     gint     volume;
     gint     content_fit;
     gint     scene_fps;
+    gboolean gfx_reflections;
+    gint     gfx_volumetrics;
+    gint     gfx_shadows;
+    gint     gfx_postprocessing;
     gboolean playback_paused;
     gboolean playback_stopped;
     guint64  generation;
@@ -1204,6 +1209,7 @@ vivid_producer_scene_start(VividProducerRenderer* renderer,
                                         renderer->gfx_reflections,
                                         renderer->gfx_volumetrics,
                                         renderer->gfx_shadows,
+                                        renderer->gfx_postprocessing,
                                         renderer_backend_render_device(renderer),
                                         renderer_resolved_gpu_or_null(renderer))) {
         g_warning("VividProducer: scene renderer failed to configure project=%s",
@@ -1246,6 +1252,7 @@ vivid_producer_video_apply_audio_state(VividProducerRenderer* renderer)
                                        renderer->gfx_reflections,
                                        renderer->gfx_volumetrics,
                                        renderer->gfx_shadows,
+                                       renderer->gfx_postprocessing,
                                        renderer_backend_render_device(renderer),
                                        renderer_resolved_gpu_or_null(renderer));
     }
@@ -1592,6 +1599,7 @@ vivid_producer_scene_refresh_config(VividProducerRenderer* renderer)
                                                        renderer->gfx_reflections,
                                                        renderer->gfx_volumetrics,
                                                        renderer->gfx_shadows,
+                                                       renderer->gfx_postprocessing,
                                                        renderer_backend_render_device(renderer),
                                                        renderer_resolved_gpu_or_null(renderer));
     if (!ok) {
@@ -1629,6 +1637,10 @@ vivid_producer_renderer_new_internal(const VividGpuDeviceList* gpu_devices)
     renderer->volume = 50;
     renderer->content_fit = 1;
     renderer->scene_fps = 30;
+    renderer->gfx_reflections = TRUE;
+    renderer->gfx_volumetrics = 2;
+    renderer->gfx_shadows = 2;
+    renderer->gfx_postprocessing = 1;
     renderer->media_state_json = g_strdup(default_scene_media_state_json());
     renderer->audio_samples = new_silent_audio_samples_variant();
     renderer->render_device = g_strdup("auto");
@@ -1686,6 +1698,10 @@ vivid_producer_renderer_apply_config(VividProducerRenderer*     renderer,
     const gint next_volume = CLAMP(config->volume, 0, 100);
     const gint next_content_fit = CLAMP(config->content_fit, 1, 3);
     const gint next_scene_fps = CLAMP(config->scene_fps, 5, 240);
+    const gboolean next_gfx_reflections = config->gfx_reflections;
+    const gint next_gfx_volumetrics = CLAMP(config->gfx_volumetrics, 0, 4);
+    const gint next_gfx_shadows = CLAMP(config->gfx_shadows, 0, 4);
+    const gint next_gfx_postprocessing = CLAMP(config->gfx_postprocessing, 0, 3);
     const gchar* next_project_path = project_path ? project_path : "";
     const gchar* next_user_properties =
         user_properties_json ? user_properties_json : "{}";
@@ -1700,6 +1716,10 @@ vivid_producer_renderer_apply_config(VividProducerRenderer*     renderer,
         renderer->volume != next_volume ||
         renderer->content_fit != next_content_fit ||
         renderer->scene_fps != next_scene_fps ||
+        renderer->gfx_reflections != next_gfx_reflections ||
+        renderer->gfx_volumetrics != next_gfx_volumetrics ||
+        renderer->gfx_shadows != next_gfx_shadows ||
+        renderer->gfx_postprocessing != next_gfx_postprocessing ||
         render_device_changed;
     const gboolean user_properties_changed =
         g_strcmp0(renderer->user_properties_json, next_user_properties) != 0;
@@ -1711,6 +1731,10 @@ vivid_producer_renderer_apply_config(VividProducerRenderer*     renderer,
     renderer->volume = next_volume;
     renderer->content_fit = next_content_fit;
     renderer->scene_fps = next_scene_fps;
+    renderer->gfx_reflections = next_gfx_reflections;
+    renderer->gfx_volumetrics = next_gfx_volumetrics;
+    renderer->gfx_shadows = next_gfx_shadows;
+    renderer->gfx_postprocessing = next_gfx_postprocessing;
     g_free(renderer->user_properties_json);
     renderer->user_properties_json = g_strdup(next_user_properties);
     g_free(renderer->render_device);

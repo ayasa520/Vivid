@@ -143,6 +143,7 @@ struct _VividSceneProducer
     bool reflections { true };
     int volumetrics { 2 };
     int shadows { 2 };
+    int postprocessing { 1 };
     guint32 width { 0 };
     guint32 height { 0 };
     double render_scale { 1.0 };
@@ -280,7 +281,8 @@ void apply_scene_runtime_properties(wallpaper::SceneWallpaper& scene,
                                     int                        fps,
                                     bool                       reflections,
                                     int                        volumetrics,
-                                    int                        shadows) {
+                                    int                        shadows,
+                                    int                        postprocessing) {
     scene.setPropertyFloat(wallpaper::PROPERTY_VOLUME, static_cast<float>(volume));
     scene.setPropertyBool(wallpaper::PROPERTY_MUTED, muted);
     scene.setPropertyInt32(
@@ -290,6 +292,7 @@ void apply_scene_runtime_properties(wallpaper::SceneWallpaper& scene,
     scene.setPropertyBool(wallpaper::PROPERTY_REFLECTIONS, reflections);
     scene.setPropertyInt32(wallpaper::PROPERTY_VOLUMETRICS, volumetrics);
     scene.setPropertyInt32(wallpaper::PROPERTY_SHADOWS, shadows);
+    scene.setPropertyInt32(wallpaper::PROPERTY_POSTPROCESSING, postprocessing);
 }
 
 void apply_scene_script_runtime_objects(VividSceneProducer* self) {
@@ -399,6 +402,7 @@ vivid_scene_producer_configure(VividSceneProducer* self,
                                 gboolean             reflections,
                                 gint                 volumetrics,
                                 gint                 shadows,
+                                gint                 postprocessing,
                                 const gchar*         render_device,
                                 const VividGpuDevice* resolved_gpu)
 {
@@ -425,6 +429,7 @@ vivid_scene_producer_configure(VividSceneProducer* self,
     const bool next_reflections = !!reflections;
     const int next_volumetrics = std::clamp(volumetrics, 0, 4);
     const int next_shadows = std::clamp(shadows, 0, 4);
+    const int next_postprocessing = std::clamp(postprocessing, 0, 3);
     const std::string next_render_device =
         render_device && *render_device ? render_device : "auto";
     const bool next_resolved_gpu_valid = resolved_gpu != nullptr;
@@ -439,7 +444,8 @@ vivid_scene_producer_configure(VividSceneProducer* self,
         self->fps != next_fps ||
         self->reflections != next_reflections ||
         self->volumetrics != next_volumetrics ||
-        self->shadows != next_shadows;
+        self->shadows != next_shadows ||
+        self->postprocessing != next_postprocessing;
     const bool render_device_changed =
         self->render_device != next_render_device ||
         self->resolved_gpu_valid != next_resolved_gpu_valid ||
@@ -456,11 +462,12 @@ vivid_scene_producer_configure(VividSceneProducer* self,
     self->reflections = next_reflections;
     self->volumetrics = next_volumetrics;
     self->shadows = next_shadows;
+    self->postprocessing = next_postprocessing;
     self->render_device = next_render_device;
     self->resolved_gpu = next_resolved_gpu;
     self->resolved_gpu_valid = next_resolved_gpu_valid;
 
-    g_message("VividSceneProducer: configure project=%s project-changed=%s user-properties-changed=%s runtime-properties-changed=%s gpu-changed=%s muted=%s volume=%.3f fill-mode=%d fps=%d reflections=%s volumetrics=%d shadows=%d render-device=%s",
+    g_message("VividSceneProducer: configure project=%s project-changed=%s user-properties-changed=%s runtime-properties-changed=%s gpu-changed=%s muted=%s volume=%.3f fill-mode=%d fps=%d reflections=%s volumetrics=%d shadows=%d postprocessing=%d render-device=%s",
               self->project_dir.c_str(),
               bool_to_string(project_changed),
               bool_to_string(user_properties_changed),
@@ -473,6 +480,7 @@ vivid_scene_producer_configure(VividSceneProducer* self,
               bool_to_string(self->reflections),
               self->volumetrics,
               self->shadows,
+              self->postprocessing,
               self->render_device.c_str());
 
     if (render_device_changed) {
@@ -505,7 +513,8 @@ vivid_scene_producer_configure(VividSceneProducer* self,
                                   self->fps,
                                   self->reflections,
                                   self->volumetrics,
-                                  self->shadows);
+                                  self->shadows,
+                                  self->postprocessing);
         self->scene_ready = true;
     } else {
         if (user_properties_changed)
@@ -518,7 +527,8 @@ vivid_scene_producer_configure(VividSceneProducer* self,
                                            self->fps,
                                            self->reflections,
                                            self->volumetrics,
-                                           self->shadows);
+                                           self->shadows,
+                                           self->postprocessing);
     }
 
     apply_scene_script_runtime_objects(self);
@@ -761,7 +771,8 @@ vivid_scene_producer_prepare_buffers_with_request(
                                   self->fps,
                                   self->reflections,
                                   self->volumetrics,
-                                  self->shadows);
+                                  self->shadows,
+                                  self->postprocessing);
         self->scene_ready = true;
         apply_scene_script_runtime_objects(self);
     }

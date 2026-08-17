@@ -524,6 +524,7 @@ Variable-length binary body.
 | `gfx-reflections` | `gfxReflections` | bool |
 | `gfx-volumetrics` | `gfxVolumetrics` | int |
 | `gfx-shadows` | `gfxShadows` | int |
+| `gfx-postprocessing` | `gfxPostprocessing` | int |
 | `startup-delay` | `startupDelay` | int |
 | `show-panel-menu` | `showPanelMenu` | bool |
 | `project-browser-filter-state` | `projectBrowserFilterState` | string |
