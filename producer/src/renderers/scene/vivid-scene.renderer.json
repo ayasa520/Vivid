@@ -15,6 +15,7 @@
     "gfx-shadows",
     "gfx-postprocessing",
     "gfx-antialiasing",
+    "gfx-texture-resolution",
     "muted",
     "playing",
     "user-properties",

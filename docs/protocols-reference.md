@@ -526,6 +526,7 @@ Variable-length binary body.
 | `gfx-shadows` | `gfxShadows` | int |
 | `gfx-postprocessing` | `gfxPostprocessing` | int |
 | `gfx-antialiasing` | `gfxAntialiasing` | int |
+| `gfx-texture-resolution` | `gfxTextureResolution` | int |
 | `startup-delay` | `startupDelay` | int |
 | `show-panel-menu` | `showPanelMenu` | bool |
 | `project-browser-filter-state` | `projectBrowserFilterState` | string |

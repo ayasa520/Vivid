@@ -33,6 +33,7 @@ struct SceneWorker {
     int gfx_shadows { 2 };
     int gfx_postprocessing { 1 };
     int gfx_antialiasing { 1 };
+    int gfx_texture_resolution { 0 };
 };
 
 bool json_int_member(JsonObject* object, const char* name, int& value)
@@ -87,6 +88,7 @@ bool apply_settings_json(SceneWorker* worker,
     int gfx_shadows = worker->gfx_shadows;
     int gfx_postprocessing = worker->gfx_postprocessing;
     int gfx_antialiasing = worker->gfx_antialiasing;
+    int gfx_texture_resolution = worker->gfx_texture_resolution;
     if (!json_int_member(object, "fps", fps) ||
         !json_int_member(object, "content-fit", content_fit) ||
         !json_bool_member(object, "gfx-reflections", gfx_reflections) ||
@@ -94,15 +96,17 @@ bool apply_settings_json(SceneWorker* worker,
         !json_int_member(object, "gfx-shadows", gfx_shadows) ||
         !json_int_member(object, "gfx-postprocessing", gfx_postprocessing) ||
         !json_int_member(object, "gfx-antialiasing", gfx_antialiasing) ||
+        !json_int_member(object, "gfx-texture-resolution", gfx_texture_resolution) ||
         fps < 5 || fps > 240 || content_fit < 1 || content_fit > 3 ||
         gfx_volumetrics < 0 || gfx_volumetrics > 4 ||
         gfx_shadows < 0 || gfx_shadows > 4 ||
         gfx_postprocessing < 0 || gfx_postprocessing > 3 ||
-        gfx_antialiasing < 0 || gfx_antialiasing > 3) {
+        gfx_antialiasing < 0 || gfx_antialiasing > 3 ||
+        gfx_texture_resolution < 0 || gfx_texture_resolution > 2) {
         g_set_error_literal(error,
                             G_IO_ERROR,
                             G_IO_ERROR_INVALID_DATA,
-                            "scene runtime fps/content-fit/gfx-reflections/gfx-volumetrics/gfx-shadows/gfx-postprocessing/gfx-antialiasing is invalid");
+                            "scene runtime fps/content-fit/gfx-reflections/gfx-volumetrics/gfx-shadows/gfx-postprocessing/gfx-antialiasing/gfx-texture-resolution is invalid");
         return false;
     }
     g_mutex_lock(&worker->state_lock);
@@ -113,6 +117,7 @@ bool apply_settings_json(SceneWorker* worker,
     worker->gfx_shadows = gfx_shadows;
     worker->gfx_postprocessing = gfx_postprocessing;
     worker->gfx_antialiasing = gfx_antialiasing;
+    worker->gfx_texture_resolution = gfx_texture_resolution;
     g_mutex_unlock(&worker->state_lock);
     if (allow_properties && json_object_has_member(object, "user-properties")) {
         JsonNode* properties = json_object_get_member(object, "user-properties");
@@ -133,6 +138,7 @@ bool configure_scene(SceneWorker* worker, GError** error)
     const int gfx_shadows = worker->gfx_shadows;
     const int gfx_postprocessing = worker->gfx_postprocessing;
     const int gfx_antialiasing = worker->gfx_antialiasing;
+    const int gfx_texture_resolution = worker->gfx_texture_resolution;
     g_mutex_unlock(&worker->state_lock);
     g_mutex_lock(&worker->backend_lock);
     const gboolean configured = vivid_scene_producer_configure(
@@ -148,6 +154,7 @@ bool configure_scene(SceneWorker* worker, GError** error)
         gfx_shadows,
         gfx_postprocessing,
         gfx_antialiasing,
+        gfx_texture_resolution,
         worker->common.render_node,
         &worker->common.gpu);
     if (configured)

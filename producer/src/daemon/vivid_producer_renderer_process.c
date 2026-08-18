@@ -54,6 +54,7 @@ struct _VividProducerRenderer
     gint gfx_shadows;
     gint gfx_postprocessing;
     gint gfx_antialiasing;
+    gint gfx_texture_resolution;
     gboolean playback_paused;
     gboolean playback_stopped;
     guint32 target_width;
@@ -332,6 +333,11 @@ settings_json(VividProducerRenderer* renderer,
                                                        "gfx-antialiasing")) {
         json_builder_set_member_name(builder, "gfx-antialiasing");
         json_builder_add_int_value(builder, renderer->gfx_antialiasing);
+    }
+    if (vivid_renderer_descriptor_has_runtime_setting(renderer->descriptor,
+                                                       "gfx-texture-resolution")) {
+        json_builder_set_member_name(builder, "gfx-texture-resolution");
+        json_builder_add_int_value(builder, renderer->gfx_texture_resolution);
     }
     if (include_properties &&
         vivid_renderer_descriptor_has_runtime_setting(renderer->descriptor,
@@ -706,6 +712,7 @@ renderer_new_internal(const VividRendererRegistry* registry,
     renderer->gfx_shadows = 2;
     renderer->gfx_postprocessing = 1;
     renderer->gfx_antialiasing = 1;
+    renderer->gfx_texture_resolution = 0;
     renderer->target_scale = 1.0;
     renderer->generation = 1;
     renderer->completed_release_points =
@@ -813,6 +820,7 @@ vivid_producer_renderer_apply_config(VividProducerRenderer* renderer,
     renderer->gfx_shadows = CLAMP(config->gfx_shadows, 0, 4);
     renderer->gfx_postprocessing = CLAMP(config->gfx_postprocessing, 0, 3);
     renderer->gfx_antialiasing = CLAMP(config->gfx_antialiasing, 0, 3);
+    renderer->gfx_texture_resolution = CLAMP(config->gfx_texture_resolution, 0, 2);
     g_free(renderer->user_properties_json);
     renderer->user_properties_json = g_strdup(next_properties);
     if (identity_input_changed) {

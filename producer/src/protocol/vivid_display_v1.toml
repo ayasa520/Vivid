@@ -557,6 +557,11 @@ camel = "gfxAntialiasing"
 type = "int"
 
 [[config-keys.members]]
+kebab = "gfx-texture-resolution"
+camel = "gfxTextureResolution"
+type = "int"
+
+[[config-keys.members]]
 kebab = "startup-delay"
 camel = "startupDelay"
 type = "int"

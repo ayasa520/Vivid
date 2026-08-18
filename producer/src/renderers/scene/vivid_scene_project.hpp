@@ -884,7 +884,8 @@ inline void configure_scene_wallpaper(wallpaper::SceneWallpaper& scene,
                                       int volumetrics = 2,
                                       int shadows = 2,
                                       int postprocessing = 1,
-                                      int antialiasing = 1) {
+                                      int antialiasing = 1,
+                                      int texture_resolution = 0) {
     // Match the KDE backend's long-lived SceneViewer model: update the reusable
     // SceneWallpaper with the next project's state, then let the source property
     // be the single operation that asks the renderer looper to parse a new scene.
@@ -906,6 +907,7 @@ inline void configure_scene_wallpaper(wallpaper::SceneWallpaper& scene,
     scene.setPropertyInt32(wallpaper::PROPERTY_SHADOWS, shadows);
     scene.setPropertyInt32(wallpaper::PROPERTY_POSTPROCESSING, postprocessing);
     scene.setPropertyInt32(wallpaper::PROPERTY_ANTIALIASING, antialiasing);
+    scene.setPropertyInt32(wallpaper::PROPERTY_TEXTURE_RESOLUTION, texture_resolution);
     scene.setPropertyString(wallpaper::PROPERTY_ASSETS, project.assets_path);
     scene.setPropertyString(wallpaper::PROPERTY_SOURCE, project.scene_path);
 }

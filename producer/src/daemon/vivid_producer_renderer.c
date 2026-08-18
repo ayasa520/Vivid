@@ -134,6 +134,7 @@ typedef struct
                                gint                 shadows,
                                gint                 postprocessing,
                                gint                 antialiasing,
+                               gint                 texture_resolution,
                                const gchar*         render_device,
                                const VividGpuDevice* resolved_gpu);
     void (*set_playing_func)(VividSceneProducer* self, gboolean playing);
@@ -244,6 +245,7 @@ struct _VividProducerRenderer
     gint     gfx_shadows;
     gint     gfx_postprocessing;
     gint     gfx_antialiasing;
+    gint     gfx_texture_resolution;
     gboolean playback_paused;
     gboolean playback_stopped;
     guint64  generation;
@@ -1213,6 +1215,7 @@ vivid_producer_scene_start(VividProducerRenderer* renderer,
                                         renderer->gfx_shadows,
                                         renderer->gfx_postprocessing,
                                         renderer->gfx_antialiasing,
+                                        renderer->gfx_texture_resolution,
                                         renderer_backend_render_device(renderer),
                                         renderer_resolved_gpu_or_null(renderer))) {
         g_warning("VividProducer: scene renderer failed to configure project=%s",
@@ -1257,6 +1260,7 @@ vivid_producer_video_apply_audio_state(VividProducerRenderer* renderer)
                                        renderer->gfx_shadows,
                                        renderer->gfx_postprocessing,
                                        renderer->gfx_antialiasing,
+                                       renderer->gfx_texture_resolution,
                                        renderer_backend_render_device(renderer),
                                        renderer_resolved_gpu_or_null(renderer));
     }
@@ -1605,6 +1609,7 @@ vivid_producer_scene_refresh_config(VividProducerRenderer* renderer)
                                                        renderer->gfx_shadows,
                                                        renderer->gfx_postprocessing,
                                                        renderer->gfx_antialiasing,
+                                                       renderer->gfx_texture_resolution,
                                                        renderer_backend_render_device(renderer),
                                                        renderer_resolved_gpu_or_null(renderer));
     if (!ok) {
@@ -1647,6 +1652,7 @@ vivid_producer_renderer_new_internal(const VividGpuDeviceList* gpu_devices)
     renderer->gfx_shadows = 2;
     renderer->gfx_postprocessing = 1;
     renderer->gfx_antialiasing = 1;
+    renderer->gfx_texture_resolution = 0;
     renderer->media_state_json = g_strdup(default_scene_media_state_json());
     renderer->audio_samples = new_silent_audio_samples_variant();
     renderer->render_device = g_strdup("auto");
@@ -1709,6 +1715,7 @@ vivid_producer_renderer_apply_config(VividProducerRenderer*     renderer,
     const gint next_gfx_shadows = CLAMP(config->gfx_shadows, 0, 4);
     const gint next_gfx_postprocessing = CLAMP(config->gfx_postprocessing, 0, 3);
     const gint next_gfx_antialiasing = CLAMP(config->gfx_antialiasing, 0, 3);
+    const gint next_gfx_texture_resolution = CLAMP(config->gfx_texture_resolution, 0, 2);
     const gchar* next_project_path = project_path ? project_path : "";
     const gchar* next_user_properties =
         user_properties_json ? user_properties_json : "{}";
@@ -1728,6 +1735,7 @@ vivid_producer_renderer_apply_config(VividProducerRenderer*     renderer,
         renderer->gfx_shadows != next_gfx_shadows ||
         renderer->gfx_postprocessing != next_gfx_postprocessing ||
         renderer->gfx_antialiasing != next_gfx_antialiasing ||
+        renderer->gfx_texture_resolution != next_gfx_texture_resolution ||
         render_device_changed;
     const gboolean user_properties_changed =
         g_strcmp0(renderer->user_properties_json, next_user_properties) != 0;
@@ -1744,6 +1752,7 @@ vivid_producer_renderer_apply_config(VividProducerRenderer*     renderer,
     renderer->gfx_shadows = next_gfx_shadows;
     renderer->gfx_postprocessing = next_gfx_postprocessing;
     renderer->gfx_antialiasing = next_gfx_antialiasing;
+    renderer->gfx_texture_resolution = next_gfx_texture_resolution;
     g_free(renderer->user_properties_json);
     renderer->user_properties_json = g_strdup(next_user_properties);
     g_free(renderer->render_device);

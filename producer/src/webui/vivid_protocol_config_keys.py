@@ -61,6 +61,9 @@ GFX_POSTPROCESSING_CAMEL = "gfxPostprocessing"
 GFX_ANTIALIASING = "gfx-antialiasing"
 GFX_ANTIALIASING_CAMEL = "gfxAntialiasing"
 
+GFX_TEXTURE_RESOLUTION = "gfx-texture-resolution"
+GFX_TEXTURE_RESOLUTION_CAMEL = "gfxTextureResolution"
+
 STARTUP_DELAY = "startup-delay"
 STARTUP_DELAY_CAMEL = "startupDelay"
 

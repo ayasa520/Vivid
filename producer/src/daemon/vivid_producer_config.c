@@ -886,6 +886,7 @@ vivid_producer_config_reset_defaults(VividProducerConfig* config)
     config->gfx_shadows = 2;
     config->gfx_postprocessing = 1;
     config->gfx_antialiasing = 1;
+    config->gfx_texture_resolution = 0;
     config->startup_delay = 1000;
     config->show_panel_menu = TRUE;
     replace_string(&config->project_browser_filter_state, "");
@@ -1135,6 +1136,8 @@ vivid_producer_config_load(VividProducerConfig* config)
         json_get_int_clamped(global, "gfx-postprocessing", config->gfx_postprocessing, 0, 3);
     config->gfx_antialiasing =
         json_get_int_clamped(global, "gfx-antialiasing", config->gfx_antialiasing, 0, 3);
+    config->gfx_texture_resolution =
+        json_get_int_clamped(global, "gfx-texture-resolution", config->gfx_texture_resolution, 0, 2);
     config->startup_delay = json_get_int_clamped(global, "startup-delay", config->startup_delay, 0, 10000);
     config->show_panel_menu = json_get_boolean(global, "show-panel-menu", config->show_panel_menu);
     load_string_member(global, "project-browser-filter-state", &config->project_browser_filter_state);
@@ -1239,6 +1242,7 @@ builder_add_config_global(JsonBuilder* builder, const VividProducerConfig* confi
     ADD_INT("gfx-shadows", config->gfx_shadows);
     ADD_INT("gfx-postprocessing", config->gfx_postprocessing);
     ADD_INT("gfx-antialiasing", config->gfx_antialiasing);
+    ADD_INT("gfx-texture-resolution", config->gfx_texture_resolution);
     ADD_INT("startup-delay", config->startup_delay);
     ADD_BOOL("show-panel-menu", config->show_panel_menu);
     ADD_STRING("project-browser-filter-state", config->project_browser_filter_state);
@@ -1352,6 +1356,8 @@ apply_set_state_payload(VividProducerConfig* config, JsonObject* payload)
         json_get_int_clamped(payload, "gfx-postprocessing", config->gfx_postprocessing, 0, 3);
     config->gfx_antialiasing =
         json_get_int_clamped(payload, "gfx-antialiasing", config->gfx_antialiasing, 0, 3);
+    config->gfx_texture_resolution =
+        json_get_int_clamped(payload, "gfx-texture-resolution", config->gfx_texture_resolution, 0, 2);
     config->startup_delay = json_get_int_clamped(payload, "startup-delay", config->startup_delay, 0, 10000);
     config->show_panel_menu = json_get_boolean(payload, "show-panel-menu", config->show_panel_menu);
     load_string_member(payload, "project-browser-filter-state", &config->project_browser_filter_state);
