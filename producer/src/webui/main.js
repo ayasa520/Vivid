@@ -159,6 +159,12 @@ const TRANSLATIONS = {
     'setting.primary-display-key.name': 'Primary Display',
     'setting.primary-display-key.note': 'Clone mode renders this display first, then crops that image for the others',
     'setting.render-device.name': 'Rendering GPU',
+    'setting.gfx-quality.name': 'Quality preset',
+    'settingOption.gfx-quality.low': 'Low',
+    'settingOption.gfx-quality.medium': 'Medium',
+    'settingOption.gfx-quality.high': 'High',
+    'settingOption.gfx-quality.ultra': 'Ultra',
+    'settingOption.gfx-quality.custom': 'Custom',
     'setting.gfx-reflections.name': 'Reflections',
     'setting.gfx-volumetrics.name': 'Volumetric lighting',
     'settingOption.gfx-volumetrics.0': 'Disabled',
@@ -182,7 +188,6 @@ const TRANSLATIONS = {
     'settingOption.gfx-antialiasing.1': 'MSAA x2',
     'settingOption.gfx-antialiasing.2': 'MSAA x4',
     'settingOption.gfx-antialiasing.3': 'MSAA x8',
-    'setting.gfx-antialiasing.note': 'x8 MSAA is only recommended for powerful high-end desktop graphics cards.',
     'setting.gfx-texture-resolution.name': 'Texture resolution',
     'settingOption.gfx-texture-resolution.0': 'High Quality',
     'settingOption.gfx-texture-resolution.1': 'High Performance',
@@ -336,6 +341,12 @@ const TRANSLATIONS = {
     'setting.primary-display-key.name': '主显示器',
     'setting.primary-display-key.note': '复制模式先渲染这块屏，再把这个画面裁剪给其他屏',
     'setting.render-device.name': '渲染 GPU',
+    'setting.gfx-quality.name': '质量预设',
+    'settingOption.gfx-quality.low': '低',
+    'settingOption.gfx-quality.medium': '中',
+    'settingOption.gfx-quality.high': '高',
+    'settingOption.gfx-quality.ultra': '超高',
+    'settingOption.gfx-quality.custom': '自定义',
     'setting.gfx-reflections.name': '反射',
     'setting.gfx-volumetrics.name': '体积照明',
     'settingOption.gfx-volumetrics.0': '禁用',
@@ -359,7 +370,6 @@ const TRANSLATIONS = {
     'settingOption.gfx-antialiasing.1': 'MSAA x2',
     'settingOption.gfx-antialiasing.2': 'MSAA x4',
     'settingOption.gfx-antialiasing.3': 'MSAA x8',
-    'setting.gfx-antialiasing.note': 'x8 MSAA 仅建议在高端桌面显卡上使用。',
     'setting.gfx-texture-resolution.name': '纹理分辨率',
     'settingOption.gfx-texture-resolution.0': '高质量',
     'settingOption.gfx-texture-resolution.1': '高性能',
@@ -607,6 +617,136 @@ function setLocalizedStatus(key, state = 'neutral', replacements = {}) {
   dom.statusText.dataset.state = state;
 }
 
+/*
+ * Official Wallpaper Engine 2.8.42 `getQualityPreset()` writes this gfx bundle
+ * plus fps, texture resolution ("full" on every tier), and a `preset` name.
+ * Official presets always write resolution: "full", so applying Low/Medium/High/Ultra
+ * resets Texture resolution to High Quality (`gfx-texture-resolution` 0). Frame Rate
+ * stays an independent knob; Quality does not write `scene-fps`.
+ * The dropdown is derived from those existing keys; nothing persists `gfx-quality`.
+ */
+const GFX_QUALITY_PRESET_ORDER = ['low', 'medium', 'high', 'ultra'];
+const GFX_QUALITY_PRESET_LABELS = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  ultra: 'Ultra',
+  custom: 'Custom',
+};
+const GFX_QUALITY_BUNDLE_KEYS = [
+  'gfx-reflections',
+  'gfx-volumetrics',
+  'gfx-shadows',
+  'gfx-postprocessing',
+  'gfx-antialiasing',
+  'gfx-texture-resolution',
+];
+const GFX_QUALITY_PRESETS = {
+  low: {
+    'gfx-reflections': false,
+    'gfx-volumetrics': 1,
+    'gfx-shadows': 1,
+    'gfx-postprocessing': 0,
+    'gfx-antialiasing': 0,
+    'gfx-texture-resolution': 0,
+  },
+  medium: {
+    'gfx-reflections': true,
+    'gfx-volumetrics': 2,
+    'gfx-shadows': 2,
+    'gfx-postprocessing': 1,
+    'gfx-antialiasing': 0,
+    'gfx-texture-resolution': 0,
+  },
+  high: {
+    'gfx-reflections': true,
+    'gfx-volumetrics': 3,
+    'gfx-shadows': 3,
+    'gfx-postprocessing': 1,
+    'gfx-antialiasing': 1,
+    'gfx-texture-resolution': 0,
+  },
+  ultra: {
+    'gfx-reflections': true,
+    'gfx-volumetrics': 4,
+    'gfx-shadows': 4,
+    'gfx-postprocessing': 2,
+    'gfx-antialiasing': 1,
+    'gfx-texture-resolution': 0,
+  },
+};
+
+function gfxQualityInt(value, fallback) {
+  const parsed = Number.parseInt(`${value ?? ''}`, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function gfxQualityBundleFromGlobal(global = app.global) {
+  return {
+    'gfx-reflections': Boolean(global?.['gfx-reflections']),
+    'gfx-volumetrics': gfxQualityInt(global?.['gfx-volumetrics'], 2),
+    'gfx-shadows': gfxQualityInt(global?.['gfx-shadows'], 2),
+    'gfx-postprocessing': gfxQualityInt(global?.['gfx-postprocessing'], 1),
+    'gfx-antialiasing': gfxQualityInt(global?.['gfx-antialiasing'], 1),
+    'gfx-texture-resolution': gfxQualityInt(global?.['gfx-texture-resolution'], 0),
+  };
+}
+
+function gfxQualityBundlesEqual(left, right) {
+  return GFX_QUALITY_BUNDLE_KEYS.every(key => left[key] === right[key]);
+}
+
+function detectGfxQuality(global = app.global) {
+  const current = gfxQualityBundleFromGlobal(global);
+  for (const name of GFX_QUALITY_PRESET_ORDER) {
+    if (gfxQualityBundlesEqual(current, GFX_QUALITY_PRESETS[name]))
+      return name;
+  }
+  return 'custom';
+}
+
+function gfxQualitySelectOptions() {
+  const options = GFX_QUALITY_PRESET_ORDER.map(name => [
+    name,
+    tFallback(`settingOption.gfx-quality.${name}`, GFX_QUALITY_PRESET_LABELS[name]),
+  ]);
+  if (detectGfxQuality() === 'custom') {
+    options.push([
+      'custom',
+      tFallback('settingOption.gfx-quality.custom', GFX_QUALITY_PRESET_LABELS.custom),
+    ]);
+  }
+  return options;
+}
+
+function syncGfxQualityControl() {
+  const definition = SETTINGS.find(item => item.key === 'gfx-quality');
+  if (!definition)
+    return;
+  applySettingControlValue(definition, detectGfxQuality());
+}
+
+function applyGfxQualityPreset(name) {
+  const bundle = GFX_QUALITY_PRESETS[name];
+  if (!bundle)
+    return;
+  if (gfxQualityBundlesEqual(gfxQualityBundleFromGlobal(), bundle)) {
+    syncGfxQualityControl();
+    return;
+  }
+
+  app.populatingSettings = true;
+  Object.assign(app.global, bundle);
+  for (const key of GFX_QUALITY_BUNDLE_KEYS) {
+    const definition = SETTINGS.find(item => item.key === key);
+    if (definition)
+      applySettingControlValue(definition, bundle[key]);
+  }
+  syncGfxQualityControl();
+  app.populatingSettings = false;
+  sendConfigPatch(bundle);
+}
+
 const SETTINGS = [
   {
     section: 'general',
@@ -705,6 +845,16 @@ const SETTINGS = [
   },
   {
     section: 'scene',
+    key: 'gfx-quality',
+    name: 'Quality preset',
+    type: 'select',
+    persist: false,
+    currentValue: detectGfxQuality,
+    applyLocal: applyGfxQualityPreset,
+    dynamicOptions: gfxQualitySelectOptions,
+  },
+  {
+    section: 'scene',
     key: 'gfx-reflections',
     name: 'Reflections',
     type: 'boolean',
@@ -761,7 +911,6 @@ const SETTINGS = [
     type: 'select',
     valueType: 'integer',
     defaultValue: 1,
-    note: 'x8 MSAA is only recommended for powerful high-end desktop graphics cards.',
     options: [
       ['0', 'None'],
       ['1', 'MSAA x2'],
@@ -1575,6 +1724,8 @@ function applySettingControlValue(definition, value) {
 
 async function sendConfigPatch(patch, afterSave = null) {
   Object.assign(app.global, patch);
+  if (GFX_QUALITY_BUNDLE_KEYS.some(key => Object.prototype.hasOwnProperty.call(patch, key)))
+    syncGfxQualityControl();
   updateStateOutput();
   setLocalizedStatus('status.saving', 'working');
   try {
@@ -1614,6 +1765,11 @@ async function resetAllDefaults() {
 function scheduleConfigPatch(definition, value) {
   if (app.populatingSettings)
     return;
+
+  if (definition.persist === false) {
+    definition.applyLocal?.(value);
+    return;
+  }
 
   const patch = {[definition.key]: value};
   const delay = definition.debounce ?? (definition.type === 'text' || definition.type === 'list' ? 500 : 0);
@@ -1740,8 +1896,12 @@ function updateSettingTexts() {
 
 function populateSettings() {
   app.populatingSettings = true;
-  for (const definition of SETTINGS)
-    applySettingControlValue(definition, app.global[definition.key]);
+  for (const definition of SETTINGS) {
+    const value = definition.persist === false && typeof definition.currentValue === 'function'
+      ? definition.currentValue()
+      : app.global[definition.key];
+    applySettingControlValue(definition, value);
+  }
   app.populatingSettings = false;
 }
 
