@@ -7,7 +7,6 @@
 
 
 import Gdk from 'gi://Gdk?version=4.0';
-import GIRepository from 'gi://GIRepository';
 import Gio from 'gi://Gio';
 import GioUnix from 'gi://GioUnix?version=2.0';
 import GLib from 'gi://GLib';
@@ -121,18 +120,26 @@ const CONNECT_FAILURE_LOG_INTERVAL_USEC = 30_000_000;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-const giRepository = GIRepository.Repository.dup_default();
 
 const moduleFile = GLib.filename_from_uri(import.meta.url)[0];
 const moduleDir = GLib.path_get_dirname(moduleFile);
 const extensionDir = GLib.path_get_dirname(GLib.path_get_dirname(moduleDir));
 const commonDir = GLib.build_filenamev([extensionDir, 'common']);
-const displayConsumerDir = GLib.build_filenamev([extensionDir, 'display_consumer']);
-const displayConsumerTypelibDir = GLib.build_filenamev([displayConsumerDir, 'girepository-1.0']);
 
 imports.searchPath.unshift(commonDir);
-giRepository.prepend_search_path(displayConsumerTypelibDir);
-giRepository.prepend_library_path(displayConsumerDir);
+
+/*
+ * The display_consumer typelib and shared library are located through
+ * GI_TYPELIB_PATH and LD_LIBRARY_PATH, which the shell-side service already
+ * prepends when it spawns this helper. Do not register those paths through
+ * GIRepository from here. GIRepository exposes two incompatible typelibs:
+ * GIRepository-2.0 (libgirepository-1.0) has Repository.get_default() plus
+ * static path setters, while GIRepository-3.0 (libgirepository-2.0) has
+ * Repository.dup_default() plus instance path setters. Which one an unversioned
+ * import resolves to is decided by the girepository generation the host GJS was
+ * built against, not by anything this extension controls, so calling either API
+ * aborts the helper at module load time on part of the supported shell range.
+ */
 
 let Mpris = null;
 try {
