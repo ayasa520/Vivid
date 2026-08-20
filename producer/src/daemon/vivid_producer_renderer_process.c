@@ -955,6 +955,22 @@ renderer_send_audio(VividProducerRenderer* renderer)
 }
 
 static void
+renderer_send_media_state(VividProducerRenderer* renderer)
+{
+    if (!renderer->process || !renderer->descriptor ||
+        !vivid_renderer_descriptor_supports_event(renderer->descriptor,
+                                                  "media-state"))
+        return;
+
+    renderer_send_json_command(
+        renderer,
+        VIVID_RENDERER_MSG_SET_MEDIA_STATE,
+        renderer->media_state_json,
+        VIVID_RENDERER_SET_MEDIA_STATE_FIXED_BYTES,
+        VIVID_RENDERER_SET_MEDIA_STATE_MEDIA_STATE_JSON_LENGTH_OFFSET);
+}
+
+static void
 renderer_send_runtime_state(VividProducerRenderer* renderer)
 {
     if (!renderer->process)
@@ -972,16 +988,7 @@ renderer_send_runtime_state(VividProducerRenderer* renderer)
                                VIVID_RENDERER_SET_RUNTIME_FIXED_BYTES,
                                VIVID_RENDERER_SET_RUNTIME_SETTINGS_JSON_LENGTH_OFFSET);
     renderer_send_playback(renderer);
-    if (renderer->descriptor &&
-        vivid_renderer_descriptor_supports_event(renderer->descriptor,
-                                                  "media-state")) {
-        renderer_send_json_command(
-            renderer,
-            VIVID_RENDERER_MSG_SET_MEDIA_STATE,
-            renderer->media_state_json,
-            VIVID_RENDERER_SET_MEDIA_STATE_FIXED_BYTES,
-            VIVID_RENDERER_SET_MEDIA_STATE_MEDIA_STATE_JSON_LENGTH_OFFSET);
-    }
+    renderer_send_media_state(renderer);
     renderer_send_audio(renderer);
 }
 
@@ -1015,7 +1022,13 @@ vivid_producer_renderer_set_media_state_json(VividProducerRenderer* renderer,
     renderer->media_state_json = g_strdup(media_state_json
                                               ? media_state_json
                                               : default_media_state_json());
-    renderer_send_runtime_state(renderer);
+    /*
+     * Media is an independent runtime event. Resending SET_RUNTIME and SET_PLAYBACK here makes the
+     * scene worker configure twice with the previously committed media object before it receives
+     * this new payload. Besides unnecessary configuration work, that stale replay can enqueue GPU
+     * uploads for the outgoing cover immediately ahead of the real media transition.
+     */
+    renderer_send_media_state(renderer);
 }
 
 void
