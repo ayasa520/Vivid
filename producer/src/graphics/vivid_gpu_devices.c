@@ -334,6 +334,176 @@ fill_scene_dmabuf_caps_from_physical_device(VkPhysicalDevice gpu,
     g_free(modifiers);
 }
 
+static gboolean
+uuid_is_zero(const guint8* uuid)
+{
+    static const guint8 zeros[VIVID_GPU_DEVICE_UUID_BYTES] = {0};
+    return memcmp(uuid, zeros, VIVID_GPU_DEVICE_UUID_BYTES) == 0;
+}
+
+static gboolean
+uuid_equal(const guint8* left, const guint8* right)
+{
+    return memcmp(left, right, VIVID_GPU_DEVICE_UUID_BYTES) == 0;
+}
+
+static gboolean
+gpu_devices_share_driver(const VividGpuDevice* left,
+                         const VividGpuDevice* right)
+{
+    return !uuid_is_zero(left->uuid) &&
+        uuid_equal(left->uuid, right->uuid) &&
+        uuid_equal(left->driver_uuid, right->driver_uuid);
+}
+
+/*
+ * Prefer the ICD that actually owns DMA-BUF export and the vendor decoder
+ * (NVDEC / VA). NVK is a second NVIDIA ICD for the same render node and
+ * must not win over the proprietary driver.
+ */
+static int
+gpu_driver_rank(guint32 driver_id)
+{
+    switch (driver_id) {
+    case VK_DRIVER_ID_NVIDIA_PROPRIETARY:
+    case VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA:
+    case VK_DRIVER_ID_MESA_RADV:
+        return 3;
+#ifdef VK_DRIVER_ID_MESA_NVK
+    case VK_DRIVER_ID_MESA_NVK:
+        return 1;
+#endif
+    default:
+        return 2;
+    }
+}
+
+static gint
+gpu_devices_find_duplicate(const VividGpuDeviceList* list,
+                           const VividGpuDevice*     device)
+{
+    gint uuid_match = -1;
+    gint node_match = -1;
+
+    for (guint i = 0; i < list->n_devices; i++) {
+        const VividGpuDevice* existing = &list->devices[i];
+        if (!uuid_is_zero(device->uuid) && uuid_equal(existing->uuid, device->uuid))
+            uuid_match = (gint)i;
+        if (device->render_node[0] &&
+            g_strcmp0(existing->render_node, device->render_node) == 0) {
+            node_match = (gint)i;
+        }
+    }
+
+    /*
+     * deviceUUID is the Vulkan physical-device identity. Use it first so a
+     * loader that lists one ICD twice (same UUID, same driver) collapses
+     * even if render-node lookup somehow diverged.
+     */
+    if (uuid_match >= 0)
+        return uuid_match;
+    return node_match;
+}
+
+static void
+gpu_device_merge_caps(VividGpuDevice* dest, const VividGpuDevice* src)
+{
+    for (guint32 i = 0; i < src->scene_dmabuf_n_caps; i++) {
+        dmabuf_caps_append(dest->scene_dmabuf_caps,
+                           &dest->scene_dmabuf_n_caps,
+                           src->scene_dmabuf_caps[i].fourcc,
+                           src->scene_dmabuf_caps[i].modifier,
+                           src->scene_dmabuf_caps[i].plane_count);
+    }
+}
+
+static gboolean
+gpu_device_should_replace(const VividGpuDevice* existing,
+                          const VividGpuDevice* candidate)
+{
+    /*
+     * Same physical device from the same driver is a repeated report. Keep
+     * the first device identity while vivid_gpu_devices_add() unions only the
+     * capability tuples reported by that exact driver.
+     */
+    if (!uuid_is_zero(existing->uuid) &&
+        uuid_equal(existing->uuid, candidate->uuid) &&
+        uuid_equal(existing->driver_uuid, candidate->driver_uuid)) {
+        return FALSE;
+    }
+
+    const int existing_rank = gpu_driver_rank(existing->vulkan_driver_id);
+    const int candidate_rank = gpu_driver_rank(candidate->vulkan_driver_id);
+    if (candidate_rank != existing_rank)
+        return candidate_rank > existing_rank;
+
+    return candidate->scene_dmabuf_n_caps > existing->scene_dmabuf_n_caps;
+}
+
+static void
+gpu_devices_add(VividGpuDeviceList* list, const VividGpuDevice* device)
+{
+    g_return_if_fail(list != NULL);
+    g_return_if_fail(device != NULL);
+
+    const gint existing_index = gpu_devices_find_duplicate(list, device);
+    if (existing_index >= 0) {
+        VividGpuDevice* existing = &list->devices[existing_index];
+        const gboolean replace = gpu_device_should_replace(existing, device);
+        if (gpu_devices_share_driver(existing, device)) {
+            VividGpuDevice merged = replace ? *device : *existing;
+            merged.scene_dmabuf_n_caps = 0;
+            memset(merged.scene_dmabuf_caps, 0, sizeof(merged.scene_dmabuf_caps));
+            gpu_device_merge_caps(&merged, existing);
+            gpu_device_merge_caps(&merged, device);
+            *existing = merged;
+        } else if (replace) {
+            /*
+             * One DRM render node can be exposed by multiple Vulkan ICDs.
+             * Capabilities belong to the selected ICD and must not be unioned:
+             * advertising a modifier reported only by the discarded ICD would
+             * make the renderer negotiate an image contract it cannot create.
+             */
+            *existing = *device;
+        }
+        return;
+    }
+
+    if (list->n_devices >= VIVID_GPU_DEVICES_MAX) {
+        g_warning("VividGpuDevices: ignoring extra GPU '%s' node=%s; list is full",
+                  device->name,
+                  device->render_node);
+        return;
+    }
+
+    list->devices[list->n_devices++] = *device;
+}
+
+static void
+log_gpu_device(guint index, const VividGpuDevice* device)
+{
+    g_message("VividGpuDevices: device[%u] node=%s pci=%s name=%s "
+              "vendor=%s (0x%04x) discrete=%s scene-dmabuf-caps=%u",
+              index,
+              device->render_node,
+              device->pci_address[0] ? device->pci_address : "(unknown)",
+              device->name,
+              vivid_gpu_vendor_name(device->vendor_id),
+              device->vendor_id,
+              device->is_discrete ? "true" : "false",
+              device->scene_dmabuf_n_caps);
+    for (guint32 cap_index = 0; cap_index < device->scene_dmabuf_n_caps; cap_index++) {
+        const VividGpuDmaBufFormatCap* cap = &device->scene_dmabuf_caps[cap_index];
+        g_debug("VividGpuDevices: device[%u] dmabuf-cap[%u] fourcc=0x%08x "
+                "modifier=0x%016" G_GINT64_MODIFIER "x planes=%u",
+                index,
+                cap_index,
+                cap->fourcc,
+                cap->modifier,
+                cap->plane_count);
+    }
+}
+
 gboolean
 vivid_gpu_devices_enumerate(VividGpuDeviceList* out_list)
 {
@@ -381,7 +551,10 @@ vivid_gpu_devices_enumerate(VividGpuDeviceList* out_list)
         return FALSE;
     }
 
-    for (uint32_t i = 0; i < count && out_list->n_devices < VIVID_GPU_DEVICES_MAX; i++) {
+    for (uint32_t i = 0; i < count; i++) {
+        VkPhysicalDeviceDriverProperties driver_props = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
+        };
         VkPhysicalDeviceDrmPropertiesEXT drm_props = {
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT,
         };
@@ -393,10 +566,18 @@ vivid_gpu_devices_enumerate(VividGpuDeviceList* out_list)
             .pNext = &id_props,
         };
 
+        const gboolean has_driver_props =
+            device_has_extension(gpus[i], VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME);
         const gboolean has_drm_props =
             device_has_extension(gpus[i], "VK_EXT_physical_device_drm");
-        if (has_drm_props)
+        if (has_driver_props) {
+            id_props.pNext = &driver_props;
+        }
+        if (has_drm_props && has_driver_props) {
+            driver_props.pNext = &drm_props;
+        } else if (has_drm_props) {
             id_props.pNext = &drm_props;
+        }
 
         vkGetPhysicalDeviceProperties2(gpus[i], &props2);
 
@@ -412,6 +593,9 @@ vivid_gpu_devices_enumerate(VividGpuDeviceList* out_list)
         device.vendor_id = props2.properties.vendorID;
         device.is_discrete =
             props2.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        device.vulkan_driver_id = has_driver_props
+            ? (guint32)driver_props.driverID
+            : 0;
         memcpy(device.uuid, id_props.deviceUUID, VIVID_GPU_DEVICE_UUID_BYTES);
         memcpy(device.driver_uuid,
                id_props.driverUUID,
@@ -448,32 +632,7 @@ vivid_gpu_devices_enumerate(VividGpuDeviceList* out_list)
         }
 
         fill_scene_dmabuf_caps_from_physical_device(gpus[i], &device);
-
-        out_list->devices[out_list->n_devices++] = device;
-
-        g_message("VividGpuDevices: device[%u] node=%s pci=%s name=%s "
-                  "vendor=%s (0x%04x) discrete=%s scene-dmabuf-caps=%u",
-                  out_list->n_devices - 1,
-                  device.render_node,
-                  device.pci_address[0] ? device.pci_address : "(unknown)",
-                  device.name,
-                  vivid_gpu_vendor_name(device.vendor_id),
-                  device.vendor_id,
-                  device.is_discrete ? "true" : "false",
-                  device.scene_dmabuf_n_caps);
-        for (guint32 cap_index = 0;
-             cap_index < device.scene_dmabuf_n_caps;
-             cap_index++) {
-            const VividGpuDmaBufFormatCap* cap =
-                &device.scene_dmabuf_caps[cap_index];
-            g_debug("VividGpuDevices: device[%u] dmabuf-cap[%u] fourcc=0x%08x "
-                    "modifier=0x%016" G_GINT64_MODIFIER "x planes=%u",
-                    out_list->n_devices - 1,
-                    cap_index,
-                    cap->fourcc,
-                    cap->modifier,
-                    cap->plane_count);
-        }
+        gpu_devices_add(out_list, &device);
     }
 
     g_free(gpus);
@@ -483,6 +642,9 @@ vivid_gpu_devices_enumerate(VividGpuDeviceList* out_list)
           out_list->n_devices,
           sizeof(out_list->devices[0]),
           compare_gpu_devices_by_render_node);
+
+    for (guint i = 0; i < out_list->n_devices; i++)
+        log_gpu_device(i, &out_list->devices[i]);
 
     if (out_list->n_devices == 0) {
         g_warning("VividGpuDevices: Vulkan reported devices but none is usable");

@@ -2006,6 +2006,7 @@ public:
     void DoRequestFrame(bool restore_suspended, std::string reason)
     {
         CEF_REQUIRE_UI_THREAD();
+        (void)reason;
         CefRefPtr<CefBrowser> browser = current_browser();
         if (!browser)
             return;
@@ -2033,9 +2034,6 @@ public:
 
         ApplyViewportToBrowser(browser, true, "request-frame");
         host->Invalidate(PET_VIEW);
-        g_message("VividWebProducer: request one DMA-BUF frame suspended=%s reason=%s",
-                  restore_suspended ? "true" : "false",
-                  reason.empty() ? "(none)" : reason.c_str());
     }
 
     void DoMouseMove(int x_view, int y_view, guint32 button_mask)

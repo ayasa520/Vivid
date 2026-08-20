@@ -2711,6 +2711,8 @@ vivid_video_producer_set_looping(VividVideoProducer* self, gboolean looping)
 void
 vivid_video_producer_request_frame(VividVideoProducer* self, const gchar* reason)
 {
+    (void)reason;
+
     if (!self)
         return;
 
@@ -2724,20 +2726,7 @@ vivid_video_producer_request_frame(VividVideoProducer* self, const gchar* reason
     if (!self->playing)
         self->pending_paused_preroll_request = true;
 
-    const GstStateChangeReturn result = request_pipeline_playback_state(self);
-    GstState current = GST_STATE_VOID_PENDING;
-    GstState pending = GST_STATE_VOID_PENDING;
-    if (self->pipeline)
-        (void)gst_element_get_state(self->pipeline, &current, &pending, 0);
-
-    g_message("VividVideoProducer: request one DMA-BUF frame playing=%s "
-              "pipeline=%s set-state=%s current=%s pending=%s reason=%s",
-              self->playing ? "true" : "false",
-              self->pipeline ? "present" : "missing",
-              gst_state_change_name(result),
-              gst_state_name(current),
-              gst_state_name(pending),
-              reason && *reason ? reason : "(none)");
+    (void)request_pipeline_playback_state(self);
 }
 
 void

@@ -330,11 +330,25 @@ vivid_renderer_worker_common_publish_pool(
         return FALSE;
     }
     const guint32 plane_count = pool->buffers[0].n_planes;
-    if (plane_count == 0 || plane_count != negotiation->plane_count)
+    if (plane_count == 0 || plane_count != negotiation->plane_count) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_INVALID_DATA,
+                    "backend pool plane count does not match negotiation pool=%u negotiated=%u",
+                    plane_count,
+                    negotiation->plane_count);
         return FALSE;
+    }
     const gsize flat_count = (gsize)pool->n_buffers * plane_count;
-    if (flat_count > VIVID_RENDERER_MAX_FDS_PER_MESSAGE)
+    if (flat_count > VIVID_RENDERER_MAX_FDS_PER_MESSAGE) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_NO_SPACE,
+                    "backend pool requires %zu DMA-BUF fds but protocol limit is %u",
+                    flat_count,
+                    VIVID_RENDERER_MAX_FDS_PER_MESSAGE);
         return FALSE;
+    }
 
     const gsize payload_length = VIVID_RENDERER_BIND_BUFFERS_FIXED_BYTES +
         flat_count * VIVID_RENDERER_BUFFER_PLANE_BYTES;
@@ -369,12 +383,31 @@ vivid_renderer_worker_common_publish_pool(
     size_t fd_count = 0;
     for (guint32 buffer_i = 0; buffer_i < pool->n_buffers; buffer_i++) {
         const VividRendererWorkerBuffer* buffer = &pool->buffers[buffer_i];
-        if (buffer->index != buffer_i || buffer->n_planes != plane_count)
+        if (buffer->index != buffer_i || buffer->n_planes != plane_count) {
+            g_set_error(error,
+                        G_IO_ERROR,
+                        G_IO_ERROR_INVALID_DATA,
+                        "backend pool buffer=%u metadata mismatch index=%u planes=%u expected-planes=%u",
+                        buffer_i,
+                        buffer->index,
+                        buffer->n_planes,
+                        plane_count);
             return FALSE;
+        }
         for (guint32 plane_i = 0; plane_i < plane_count; plane_i++) {
             const VividRendererWorkerPlane* plane = &buffer->planes[plane_i];
-            if (plane->fd < 0 || plane->stride == 0 || plane->size == 0)
+            if (plane->fd < 0 || plane->stride == 0 || plane->size == 0) {
+                g_set_error(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_INVALID_DATA,
+                            "backend pool buffer=%u plane=%u is invalid fd=%d stride=%u size=%" G_GUINT64_FORMAT,
+                            buffer_i,
+                            plane_i,
+                            plane->fd,
+                            plane->stride,
+                            plane->size);
                 return FALSE;
+            }
             guint8* record = payload + VIVID_RENDERER_BIND_BUFFERS_FIXED_BYTES +
                 fd_count * VIVID_RENDERER_BUFFER_PLANE_BYTES;
             vivid_renderer_wire_write_u32(

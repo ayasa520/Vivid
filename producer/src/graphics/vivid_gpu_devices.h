@@ -66,6 +66,12 @@ typedef struct
     guint8   uuid[VIVID_GPU_DEVICE_UUID_BYTES];
     guint8   driver_uuid[VIVID_GPU_DEVICE_UUID_BYTES];
     gboolean is_discrete;
+    /*
+     * VkDriverId from VkPhysicalDeviceDriverProperties. 0 when the ICD did
+     * not report one. Only used to prefer NVIDIA proprietary over NVK when
+     * two drivers expose the same DRM render node. Not user-facing.
+     */
+    guint32  vulkan_driver_id;
     guint32  scene_dmabuf_n_caps;
     VividGpuDmaBufFormatCap scene_dmabuf_caps[VIVID_GPU_DEVICE_DMABUF_CAPS_MAX];
 } VividGpuDevice;
@@ -78,7 +84,9 @@ typedef struct
 
 /*
  * Enumerate Vulkan physical devices. CPU/software implementations (llvmpipe)
- * are skipped. Returns FALSE when Vulkan is unavailable or no device remains.
+ * are skipped. Loader/ICD duplicates that share a deviceUUID or DRM render
+ * node are collapsed to one entry. Returns FALSE when Vulkan is unavailable
+ * or no device remains.
  */
 gboolean vivid_gpu_devices_enumerate(VividGpuDeviceList* out_list);
 

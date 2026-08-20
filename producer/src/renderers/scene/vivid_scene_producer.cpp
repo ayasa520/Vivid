@@ -581,6 +581,8 @@ vivid_scene_producer_request_frame(VividSceneProducer* self, const gchar* reason
 {
     g_return_if_fail(self != nullptr);
 
+    (void)reason;
+
     if (!self->scene)
         return;
 
@@ -590,9 +592,6 @@ vivid_scene_producer_request_frame(VividSceneProducer* self, const gchar* reason
      * posting a single draw does not change the user's playback state or
      * restart the periodic timer.
      */
-    g_message("VividSceneProducer: request one DMA-BUF frame playing=%s reason=%s",
-              self->playing ? "true" : "false",
-              reason && *reason ? reason : "(none)");
     self->scene->requestFrame();
 }
 
@@ -866,16 +865,10 @@ vivid_scene_producer_prepare_buffers_with_request(
              * both publish into a producer route, while the route owns the
              * exported slots seen by the display protocol. Today the local route
              * still creates renderer-compatible DMA-BUF images through the
-             * renderer Device; the raw Vulkan handles are logged and kept in the
-             * factory contract so a bridge/pool implementation can replace this
-             * local allocator without changing scene producer ownership.
+             * renderer Device. The raw Vulkan handles remain in the factory
+             * contract so a bridge/pool implementation can replace this local
+             * allocator without changing scene producer ownership.
              */
-            g_message("VividSceneProducer: creating common scene export route "
-                      "device=%p physical=%p queue=%p family=%u",
-                      static_cast<void*>(handles.device),
-                      static_cast<void*>(handles.physical_device),
-                      static_cast<void*>(handles.graphics_queue),
-                      handles.graphics_queue_family);
             auto swapchain = wallpaper::vulkan::CreateExSwapchain(
                 *handles.renderer_device,
                 width,
