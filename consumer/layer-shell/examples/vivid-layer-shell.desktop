@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Vivid layer-shell wallpaper
+Comment=Layer-shell wallpaper consumer (start the Vivid producer first)
+Exec=vivid-layer-shell-consumer
+Terminal=false
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+X-KDE-autostart-after=panel
+OnlyShowIn=sway;Hyprland;niri;
+NoDisplay=true

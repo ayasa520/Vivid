@@ -8,8 +8,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 usage() {
     cat <<'EOF'
 Usage:
-  tools/vivid.sh build {direct-run|gnome|kde|flatpak|all}
-  tools/vivid.sh clean {direct-run|gnome|kde|flatpak|producer|consumer|all}
+  tools/vivid.sh build {direct-run|gnome|kde|layer-shell|flatpak|all}
+  tools/vivid.sh clean {direct-run|gnome|kde|layer-shell|flatpak|producer|consumer|all}
   tools/vivid.sh completion bash
 
   tools/vivid.sh direct-run {build|clean}
@@ -19,6 +19,9 @@ Usage:
 
   tools/vivid.sh gnome {build|clean|install|zip|enable|disable|reset|uninstall|log}
   tools/vivid.sh kde {build|clean|install|zip|uninstall|log}
+  tools/vivid.sh layer-shell {build|clean|run}
+  # run forwards the optional --layer override to vivid-layer-shell-consumer.
+  # Compositor snippets: consumer/layer-shell/examples/{hyprland.lua,hyprland.conf,sway.conf,niri.kdl}
 
   tools/vivid.sh flatpak prefetch
   tools/vivid.sh flatpak {build|clean}
@@ -27,8 +30,9 @@ Usage:
   tools/vivid.sh protocol {regen|check}
 
   Aliases:
-  tools/vivid.sh consumer gnome ...
+    tools/vivid.sh consumer gnome ...
   tools/vivid.sh consumer kde ...
+  tools/vivid.sh consumer layer-shell ...
   tools/vivid.sh producer build-direct-run
   tools/vivid.sh producer run-direct-run
   tools/vivid.sh producer prefetch
@@ -50,12 +54,13 @@ _vivid_sh_completion() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     COMPREPLY=()
 
-    local top_commands="build clean direct-run gnome consumer-gnome kde consumer-kde consumer flatpak producer protocol completion help -h --help"
-    local build_targets="direct-run producer gnome consumer-gnome kde consumer-kde flatpak all"
-    local clean_targets="direct-run gnome consumer-gnome kde consumer-kde flatpak producer consumer all"
+    local top_commands="build clean direct-run gnome consumer-gnome kde consumer-kde layer-shell consumer-layer-shell consumer flatpak producer protocol completion help -h --help"
+    local build_targets="direct-run producer gnome consumer-gnome kde consumer-kde layer-shell consumer-layer-shell flatpak all"
+    local clean_targets="direct-run gnome consumer-gnome kde consumer-kde layer-shell consumer-layer-shell flatpak producer consumer all"
     local direct_run_actions="build clean run run-producer run-webui"
     local gnome_actions="build clean install zip enable disable reset uninstall log"
     local kde_actions="build clean install zip uninstall log"
+    local layer_shell_actions="build clean run"
     local flatpak_actions="prefetch build clean run-appdir"
     local protocol_actions="regen check"
     local producer_actions="build-direct-run run-direct-run run-direct-run-producer run-direct-run-webui prefetch build-flatpak run-flatpak-appdir clean-direct-run clean-flatpak clean"
@@ -99,9 +104,14 @@ _vivid_sh_completion() {
                 _vivid_complete_words "${kde_actions}"
             fi
             ;;
+        layer-shell|consumer-layer-shell)
+            if [[ "${COMP_CWORD}" -eq 2 ]]; then
+                _vivid_complete_words "${layer_shell_actions}"
+            fi
+            ;;
         consumer)
             if [[ "${COMP_CWORD}" -eq 2 ]]; then
-                _vivid_complete_words "gnome kde"
+                _vivid_complete_words "gnome kde layer-shell"
             elif [[ "${COMP_CWORD}" -eq 3 ]]; then
                 case "${COMP_WORDS[2]}" in
                     gnome)
@@ -109,6 +119,9 @@ _vivid_sh_completion() {
                         ;;
                     kde)
                         _vivid_complete_words "${kde_actions}"
+                        ;;
+                    layer-shell)
+                        _vivid_complete_words "${layer_shell_actions}"
                         ;;
                 esac
             fi
@@ -198,6 +211,16 @@ clean_kde_consumer() {
     clean_path "KDE consumer build cache" "${VIVID_KDE_BUILD_ROOT}"
 }
 
+clean_layer_shell_consumer() {
+    local root_dir
+    root_dir="$(cd "${SCRIPT_DIR}/../consumer/layer-shell" && pwd)"
+
+    ROOT_DIR="${root_dir}"
+    . "${SCRIPT_DIR}/consumer_layer_shell/build_env.sh"
+
+    clean_path "Layer-shell consumer build cache" "${VIVID_LAYER_SHELL_BUILD_ROOT}"
+}
+
 clean_direct_run() {
     local root_dir
     root_dir="$(cd "${SCRIPT_DIR}/../producer" && pwd)"
@@ -252,6 +275,9 @@ run_clean() {
         kde|consumer-kde)
             clean_kde_consumer
             ;;
+        layer-shell|consumer-layer-shell)
+            clean_layer_shell_consumer
+            ;;
         flatpak)
             clean_flatpak
             ;;
@@ -261,11 +287,13 @@ run_clean() {
         consumer)
             clean_gnome_consumer
             clean_kde_consumer
+            clean_layer_shell_consumer
             ;;
         all)
             clean_producer
             clean_gnome_consumer
             clean_kde_consumer
+            clean_layer_shell_consumer
             ;;
         *)
             die_usage "unknown clean target: ${target}"
@@ -368,6 +396,9 @@ run_build_group() {
         kde|consumer-kde)
             run_kde build "$@"
             ;;
+        layer-shell|consumer-layer-shell)
+            run_layer_shell build "$@"
+            ;;
         flatpak)
             run_flatpak build "$@"
             ;;
@@ -375,6 +406,7 @@ run_build_group() {
             run_direct_run build "$@"
             build_gnome_consumer
             run_kde build
+            run_layer_shell build
             ;;
         *)
             die_usage "unknown build target: ${target}"
@@ -398,6 +430,29 @@ run_kde() {
     fi
 
     "${SCRIPT_DIR}/consumer_kde/run.sh" "$@"
+}
+
+run_layer_shell() {
+    local action="${1:-}"
+    if [[ -z "${action}" ]]; then
+        die_usage "missing layer-shell consumer action"
+    fi
+    shift
+
+    case "${action}" in
+        build|run)
+            "${SCRIPT_DIR}/consumer_layer_shell/run.sh" "${action}" "$@"
+            ;;
+        clean)
+            if [[ $# -ne 0 ]]; then
+                die_usage "unexpected layer-shell clean arguments: $*"
+            fi
+            clean_layer_shell_consumer
+            ;;
+        *)
+            die_usage "unknown layer-shell consumer action: ${action}"
+            ;;
+    esac
 }
 
 run_flatpak() {
@@ -523,6 +578,10 @@ case "${1:-help}" in
         shift
         run_kde "$@"
         ;;
+    layer-shell|consumer-layer-shell)
+        shift
+        run_layer_shell "$@"
+        ;;
     consumer)
         shift
         target="${1:-}"
@@ -536,6 +595,9 @@ case "${1:-help}" in
                 ;;
             kde)
                 run_kde "$@"
+                ;;
+            layer-shell)
+                run_layer_shell "$@"
                 ;;
             *)
                 die_usage "unknown consumer target: ${target}"

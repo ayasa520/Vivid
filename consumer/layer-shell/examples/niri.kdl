@@ -1,0 +1,7 @@
+// Drop these into ~/.config/niri/config.kdl. Keep existing binds.
+// vivid-layer-shell-consumer auto-selects the regular BACKGROUND layer on niri.
+// Keeping the surface out of the backdrop lets niri route pointer input to it
+// whenever no window or higher layer surface covers the pointer location.
+
+spawn-at-startup "vivid-layer-shell-consumer"
+// Do not also spawn swaybg; two BACKGROUND surfaces will stack.

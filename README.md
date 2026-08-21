@@ -56,6 +56,24 @@ tools/vivid.sh direct-run run
 
 Direct-run artifacts stay in `producer/.build/direct-run`.
 
+### Desktop consumers
+
+GNOME Shell and KDE Plasma have dedicated plugins:
+
+```sh
+tools/vivid.sh gnome build
+tools/vivid.sh kde build
+```
+
+Other Wayland compositors that speak `zwlr_layer_shell_v1` (Sway, Hyprland, labwc, river, wayfire, niri, …) use the catch-all client:
+
+```sh
+tools/vivid.sh layer-shell build
+tools/vivid.sh layer-shell run
+```
+
+See `consumer/layer-shell/README.md` and `consumer/layer-shell/examples/` for Hyprland Lua autostart / `hl.layer_rule`, Sway `exec`, and niri autostart. GNOME still needs the Shell extension; Mutter does not implement layer-shell.
+
 ### Clean
 
 ```sh
