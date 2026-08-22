@@ -8,9 +8,79 @@ Vivid is an open-source reimplementation of Wallpaper Engine for Linux.
 
 **THIS PROJECT USES VIBE CODING.**
 
+## Install a release
+
+Download files from the [GitHub Releases](https://github.com/ayasa520/Vivid/releases)
+page. Use the assets attached to a release, not the artifact ZIPs from the
+Actions page. Release assets are already unpacked into installable files.
+
+Choose `x86_64` for 64-bit Intel/AMD systems or `aarch64` for 64-bit Arm
+systems. `uname -m` prints the architecture of the current system. Each Vivid
+installation needs the Flatpak producer and one consumer matching the desktop:
+
+| Desktop | Release asset |
+| --- | --- |
+| Producer and controller | `io.github.ayasa520.Vivid-<version>-<arch>.flatpak` |
+| GNOME Shell | `vivid-consumer-gnome-<version>-<arch>.zip` |
+| KDE Plasma | `vivid-consumer-kde-<version>-<arch>.zip` |
+| Hyprland, Sway, niri, and other layer-shell compositors | `vivid-layer-shell-consumer-<version>-<arch>` |
+
+The commands below use the `1.0.6` x86_64 assets as examples. Run them from the
+directory containing the downloaded files.
+
+### Producer
+
+Install the Flatpak bundle for the current user, then start Vivid from the
+application launcher or the command line:
+
+```sh
+flatpak install --user ./io.github.ayasa520.Vivid-1.0.6-x86_64.flatpak
+flatpak run io.github.ayasa520.Vivid
+```
+
+### GNOME Shell consumer
+
+The release ZIP is ready for `gnome-extensions` and supports GNOME Shell 45
+through 50:
+
+```sh
+gnome-extensions install --force ./vivid-consumer-gnome-1.0.6-x86_64.zip
+gnome-extensions enable vivid-consumer-gnome@rikka.local
+```
+
+Log out and back in if GNOME Shell has not loaded the newly installed
+extension.
+
+### KDE Plasma consumer
+
+Extract the package, install it with KPackage, then select **Vivid** in
+**Desktop and Wallpaper** settings:
+
+```sh
+vivid_kde_stage="$(mktemp -d)"
+unzip ./vivid-consumer-kde-1.0.6-x86_64.zip -d "${vivid_kde_stage}"
+kpackagetool6 --type Plasma/Wallpaper \
+  --install "${vivid_kde_stage}/dev.rikka.vivid.consumer.kde"
+```
+
+Use `--upgrade` instead of `--install` when updating an existing KDE package.
+
+### Layer-shell consumer
+
+Install the executable in the user-local binary directory:
+
+```sh
+install -Dm755 ./vivid-layer-shell-consumer-1.0.6-x86_64 \
+  "${HOME}/.local/bin/vivid-layer-shell-consumer"
+```
+
+Start the producer first, then run `vivid-layer-shell-consumer`. See the
+[layer-shell consumer guide](consumer/layer-shell/README.md) for compositor
+autostart configuration.
+
 ## Build
 
-Build artifacts are written under `producer/.build`.
+Producer build artifacts are written under `producer/.build`.
 
 ### Flatpak
 
@@ -30,7 +100,7 @@ VIVID_FLATPAK_DISABLE_DOWNLOAD=1 tools/vivid.sh build flatpak
 The Flatpak manifest is rendered from
 `producer/packaging/flatpak/io.github.ayasa520.Vivid.yml` into
 `producer/.build/flatpak-manifest`. The bundle is written to
-`producer/.build/io.github.ayasa520.Vivid-1.0.0.flatpak` by default.
+`producer/.build/io.github.ayasa520.Vivid-1.0.0-<arch>.flatpak` by default.
 
 Set the Flatpak software version with:
 
