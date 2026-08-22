@@ -1,5 +1,7 @@
 # Vivid
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 <p align="center">
   <img src="producer/resources/io.github.ayasa520.Vivid.svg" alt="Vivid thumbnail" width="160">
 </p>
