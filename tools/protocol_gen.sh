@@ -10,8 +10,9 @@ PROTO_DIR="${REPO_ROOT}/producer/src/protocol"
 PROTO_GEN="${PROTO_DIR}/protocol_gen.py"
 PROTO_SPEC="${PROTO_DIR}/vivid_display_v1.toml"
 RENDERER_PROTO_SPEC="${PROTO_DIR}/vivid_renderer_v1.toml"
+PYTHON_BIN="${PYTHON:-python3}"
 
-exec python3 "${PROTO_GEN}" \
+exec "${PYTHON_BIN}" "${PROTO_GEN}" \
   --spec "${PROTO_SPEC}" \
   --renderer-spec "${RENDERER_PROTO_SPEC}" \
   --renderer-c-out "${PROTO_DIR}/vivid_renderer_protocol.h" \

@@ -19,15 +19,15 @@ finish-args:
   - --device=dri
   - --filesystem=host:ro
   - --filesystem=xdg-run/vivid:create
-  - --env=GI_TYPELIB_PATH=/app/lib/girepository-1.0:/app/lib/x86_64-linux-gnu/girepository-1.0
+  - --env=GI_TYPELIB_PATH=/app/lib/girepository-1.0
   - --env=LD_LIBRARY_PATH=/app/lib:/app/lib64
 
 build-options:
   append-path: /app/bin
   env:
-    GI_TYPELIB_PATH: /app/lib/girepository-1.0:/app/lib/x86_64-linux-gnu/girepository-1.0:/usr/lib/x86_64-linux-gnu/girepository-1.0
+    GI_TYPELIB_PATH: /app/lib/girepository-1.0
     LD_LIBRARY_PATH: /app/lib:/app/lib64
-    PKG_CONFIG_PATH: /app/lib64/pkgconfig:/app/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
+    PKG_CONFIG_PATH: /app/lib64/pkgconfig:/app/lib/pkgconfig
 
 modules:
   - name: unifdef

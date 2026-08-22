@@ -1,0 +1,226 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
+
+permissions:
+  contents: write
+
+jobs:
+  metadata:
+    name: Release metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      release_date: ${{ steps.release.outputs.release_date }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - id: release
+        name: Read tag metadata
+        shell: bash
+        run: |
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "Release tags must use vMAJOR.MINOR.PATCH, got ${GITHUB_REF_NAME}." >&2
+            exit 1
+          fi
+          version="${BASH_REMATCH[1]}"
+          release_date="$(git show -s --format=%cs "${GITHUB_SHA}")"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "release_date=${release_date}" >> "${GITHUB_OUTPUT}"
+
+  flatpak:
+    name: Flatpak (${{ matrix.arch }})
+    needs: metadata
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-49
+      options: --privileged
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    env:
+      VIVID_BUILD_ARCH: ${{ matrix.arch }}
+      VIVID_CMAKE_BUILD_TYPE: Release
+      VIVID_FLATPAK_APP_VERSION: ${{ needs.metadata.outputs.version }}
+      VIVID_FLATPAK_RELEASE_DATE: ${{ needs.metadata.outputs.release_date }}
+      VIVID_FLATPAK_GIT_BRANCH: ${{ github.ref_name }}
+      VIVID_FLATPAK_GIT_COMMIT: ${{ github.sha }}
+      VIVID_FLATPAK_CCACHE: "0"
+      VIVID_FLATPAK_KEEP_BUILD_DIRS: "0"
+      VIVID_FLATPAK_FORCE_CLEAN: "1"
+      VIVID_FLATPAK_DISABLE_ROFILES_FUSE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Flatpak bundle
+        run: tools/vivid.sh flatpak build
+      - name: Upload Flatpak bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: vivid-flatpak-${{ needs.metadata.outputs.version }}-${{ matrix.arch }}
+          path: producer/.build/io.github.ayasa520.Vivid-${{ needs.metadata.outputs.version }}-${{ matrix.arch }}.flatpak
+          if-no-files-found: error
+
+  gnome:
+    name: GNOME consumer (${{ matrix.arch }})
+    needs: metadata
+    runs-on: ${{ matrix.runner }}
+    container: ubuntu:24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      VIVID_BUILD_ARCH: ${{ matrix.arch }}
+      VIVID_CONSUMER_PACKAGE_VERSION: ${{ needs.metadata.outputs.version }}
+    steps:
+      - name: Update package metadata
+        run: apt-get update
+      - name: Install build dependencies
+        run: >-
+          apt-get install -y --no-install-recommends
+          ca-certificates git gcc meson ninja-build pkg-config
+          libglib2.0-dev libjson-glib-dev libgtk-4-dev libdrm-dev
+          libvulkan-dev gobject-introspection libgirepository1.0-dev
+          gnome-shell
+      - uses: actions/checkout@v4
+      - name: Build GNOME consumer
+        run: tools/vivid.sh gnome zip
+      - name: Upload GNOME consumer
+        uses: actions/upload-artifact@v4
+        with:
+          name: vivid-consumer-gnome-${{ needs.metadata.outputs.version }}-${{ matrix.arch }}
+          path: consumer/gnome/.build/dist/vivid-consumer-gnome-${{ needs.metadata.outputs.version }}-${{ matrix.arch }}.zip
+          if-no-files-found: error
+
+  kde:
+    name: KDE consumer (${{ matrix.arch }})
+    needs: metadata
+    runs-on: ${{ matrix.runner }}
+    container: ubuntu:24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      VIVID_BUILD_ARCH: ${{ matrix.arch }}
+      VIVID_CONSUMER_PACKAGE_VERSION: ${{ needs.metadata.outputs.version }}
+    steps:
+      - name: Update Ubuntu package metadata
+        run: apt-get update
+      - name: Install repository tools
+        run: >-
+          apt-get install -y --no-install-recommends
+          ca-certificates curl
+      - name: Configure KDE Neon Noble repository
+        shell: bash
+        run: |
+          key_path=/usr/share/keyrings/kde-neon.asc
+          curl --fail --location --output "${key_path}" https://archive.neon.kde.org/public.key
+          set -- $(sha256sum "${key_path}")
+          if [[ "$1" != "ee86878b3be00f5c99da50974ee7c5141a163d0e00fccb889398f1a33e112584" ]]; then
+            echo "Unexpected KDE Neon repository signing key checksum: $1" >&2
+            exit 1
+          fi
+          printf '%s\n' \
+            'deb [signed-by=/usr/share/keyrings/kde-neon.asc] https://archive.neon.kde.org/user noble main' \
+            > /etc/apt/sources.list.d/kde-neon.list
+      - name: Update KDE Neon package metadata
+        run: apt-get update
+      - name: Install build dependencies
+        run: >-
+          apt-get install -y --no-install-recommends
+          git g++ cmake ninja-build pkg-config python3
+          qt6-base-dev qt6-declarative-dev libkf6screen-dev
+          libglvnd-dev libgbm-dev libpulse-dev libvulkan-dev
+      - uses: actions/checkout@v4
+      - name: Build KDE consumer
+        run: tools/vivid.sh kde zip
+      - name: Upload KDE consumer
+        uses: actions/upload-artifact@v4
+        with:
+          name: vivid-consumer-kde-${{ needs.metadata.outputs.version }}-${{ matrix.arch }}
+          path: consumer/kde/.build/dist/vivid-consumer-kde-${{ needs.metadata.outputs.version }}-${{ matrix.arch }}.zip
+          if-no-files-found: error
+
+  layer-shell:
+    name: Layer-shell consumer (${{ matrix.arch }})
+    needs: metadata
+    runs-on: ${{ matrix.runner }}
+    container: almalinux:8
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    env:
+      VIVID_BUILD_ARCH: ${{ matrix.arch }}
+      VIVID_CONSUMER_PACKAGE_VERSION: ${{ needs.metadata.outputs.version }}
+      PYTHON: python3.11
+    steps:
+      - name: Enable AlmaLinux build repository
+        run: |
+          dnf install -y dnf-plugins-core
+          dnf config-manager --set-enabled powertools
+      - name: Install build dependencies
+        run: >-
+          dnf install -y
+          git gcc cmake ninja-build meson pkgconf-pkg-config
+          wayland-devel libglvnd-devel mesa-libEGL-devel mesa-libgbm-devel
+          vulkan-headers vulkan-loader-devel python3.11 curl tar xz
+      - uses: actions/checkout@v4
+      - name: Build layer-shell consumer
+        run: tools/vivid.sh layer-shell release
+      - name: Upload layer-shell consumer
+        uses: actions/upload-artifact@v4
+        with:
+          name: vivid-layer-shell-consumer-${{ needs.metadata.outputs.version }}-${{ matrix.arch }}
+          path: consumer/layer-shell/.build/dist/vivid-layer-shell-consumer-${{ needs.metadata.outputs.version }}-${{ matrix.arch }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs:
+      - metadata
+      - flatpak
+      - gnome
+      - kde
+      - layer-shell
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${GITHUB_REF_NAME}"
+          dist/*
+          --verify-tag
+          --title "${GITHUB_REF_NAME}"
+          --generate-notes

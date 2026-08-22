@@ -2,7 +2,9 @@
 
 set -euo pipefail
 
-if [ "$(id -u)" -eq 0 ]; then
+ACTION="${1:-help}"
+
+if [ "$(id -u)" -eq 0 ] && [ "${ACTION}" != zip ]; then
     echo "Error: this script should not be run as root" >&2
     exit 1
 fi
@@ -13,7 +15,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/../../consumer/gnome" && pwd)"
 
 UUID="${VIVID_CONSUMER_EXTENSION_UUID}"
 
-case "${1:-help}" in
+case "${ACTION}" in
     install)
         shift
         rm -rf "${VIVID_CONSUMER_BUILD_DIR}"

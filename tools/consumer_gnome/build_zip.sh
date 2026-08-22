@@ -21,6 +21,7 @@ EXTENSION_AUTHOR="${VIVID_CONSUMER_EXTENSION_AUTHOR}"
 EXTENSION_URL="${VIVID_CONSUMER_EXTENSION_URL}"
 EXTENSION_LOG_PREFIX="${VIVID_CONSUMER_EXTENSION_LOG_PREFIX}"
 PACKAGE_VERSION="${VIVID_CONSUMER_PACKAGE_VERSION}"
+BUILD_JOBS="${VIVID_BUILD_JOBS:-$(nproc)}"
 
 configure_consumer_identity() {
     meson configure "${BUILD_DIR}" \
@@ -47,7 +48,7 @@ else
     meson setup --reconfigure "${BUILD_DIR}" "${ROOT_DIR}"
 fi
 
-meson compile -C "${BUILD_DIR}"
+meson compile -C "${BUILD_DIR}" -j "${BUILD_JOBS}"
 
 rm -rf "${DESTDIR_ROOT}" "${DIST_DIR}"
 mkdir -p "${DESTDIR_ROOT}" "${DIST_DIR}"

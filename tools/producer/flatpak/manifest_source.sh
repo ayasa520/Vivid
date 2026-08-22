@@ -22,35 +22,37 @@ vivid_flatpak_sed_escape_replacement() {
     printf '%s' "$1" | sed 's/[&|\\]/\\&/g'
 }
 
-vivid_flatpak_git_branch_ref() {
-    git_branch="$1"
-
-    case "${git_branch}" in
-        refs/*)
-            printf '%s\n' "${git_branch}"
-            ;;
-        *)
-            printf 'refs/heads/%s\n' "${git_branch}"
-            ;;
-    esac
-}
-
 vivid_flatpak_git_branch_commit() {
     git_url="$1"
     git_branch="$2"
-    git_ref="$(vivid_flatpak_git_branch_ref "${git_branch}")"
 
-    # The Flatpak manifest contains both branch and commit. flatpak-builder
-    # validates that the named branch resolves to the exact commit, so resolve
-    # the configured GitHub branch first instead of using the local checkout's
-    # HEAD, which may contain commits that are not present on GitHub yet.
-    output="$(git ls-remote --exit-code "${git_url}" "${git_ref}")" || {
-        echo "Failed to resolve Flatpak git source ${git_url} ${git_ref}." >&2
-        exit 1
-    }
+    # Flatpak accepts either a branch or tag in its branch field. Release jobs
+    # use the pushed tag so the manifest remains valid even when the default
+    # branch advances before a workflow is rerun. Prefer a branch with the same
+    # short name, then the peeled tag commit for annotated tags, and finally a
+    # lightweight tag.
+    case "${git_branch}" in
+        refs/tags/*)
+            refs="${git_branch}^{} ${git_branch}"
+            ;;
+        refs/*)
+            refs="${git_branch}"
+            ;;
+        *)
+            refs="refs/heads/${git_branch} refs/tags/${git_branch}^{} refs/tags/${git_branch}"
+            ;;
+    esac
 
-    set -- ${output}
-    printf '%s\n' "$1"
+    for git_ref in ${refs}; do
+        if output="$(git ls-remote --exit-code "${git_url}" "${git_ref}" 2>/dev/null)"; then
+            set -- ${output}
+            printf '%s\n' "$1"
+            return
+        fi
+    done
+
+    echo "Failed to resolve Flatpak git source ${git_url} ${git_branch}." >&2
+    exit 1
 }
 
 vivid_flatpak_is_full_git_commit() {

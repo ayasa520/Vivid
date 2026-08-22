@@ -20,6 +20,7 @@ NATIVE_BUILD_ROOT="${VIVID_FLATPAK_NATIVE_BUILD_ROOT}"
 FLATPAK_CEF_ARCHIVE="${VIVID_CEF_ARCHIVE}"
 APP_VERSION="${VIVID_FLATPAK_APP_VERSION}"
 RELEASE_DATE="${VIVID_FLATPAK_RELEASE_DATE}"
+BUILD_ARCH="${VIVID_BUILD_ARCH}"
 DISABLE_ROFILES_FUSE="${VIVID_FLATPAK_DISABLE_ROFILES_FUSE:-0}"
 
 case "${DISABLE_ROFILES_FUSE}" in
@@ -30,6 +31,8 @@ case "${DISABLE_ROFILES_FUSE}" in
         exit 1
         ;;
 esac
+
+sh "${SCRIPT_DIR}/../fetch_cef.sh"
 
 MANIFEST_TEMPLATE="$(vivid_flatpak_absolute_path "${MANIFEST_TEMPLATE}")"
 MANIFEST="$(vivid_flatpak_absolute_path "${MANIFEST}")"
@@ -71,11 +74,13 @@ echo "==> Flatpak git source: ${GIT_URL}"
 echo "==> Flatpak git branch: ${GIT_BRANCH}"
 echo "==> Flatpak git commit: ${VIVID_FLATPAK_GIT_COMMIT}"
 echo "==> Flatpak app version: ${APP_VERSION} (${RELEASE_DATE})"
+echo "==> Flatpak architecture: ${BUILD_ARCH}"
 echo "==> Flatpak download-only dir: ${DOWNLOAD_DIR}"
 echo "==> Flatpak builder state: ${STATE_DIR}"
 echo "==> Local CEF archive source: ${FLATPAK_CEF_ARCHIVE}"
 
 set -- \
+    --arch="${BUILD_ARCH}" \
     --download-only \
     --force-clean \
     --state-dir="${STATE_DIR}" \

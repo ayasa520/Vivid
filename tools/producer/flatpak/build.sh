@@ -20,7 +20,7 @@ BUNDLE="${VIVID_FLATPAK_BUNDLE}"
 BUNDLE_BRANCH="${VIVID_FLATPAK_BUNDLE_BRANCH}"
 STATE_DIR="${VIVID_FLATPAK_STATE_DIR}"
 NATIVE_BUILD_ROOT="${VIVID_FLATPAK_NATIVE_BUILD_ROOT}"
-DEFAULT_JOBS="${VIVID_FLATPAK_DEFAULT_JOBS:-12}"
+DEFAULT_JOBS="${VIVID_FLATPAK_DEFAULT_JOBS:-$(nproc)}"
 BUILD_JOBS="${VIVID_FLATPAK_JOBS:-${DEFAULT_JOBS}}"
 FORCE_CLEAN="${VIVID_FLATPAK_FORCE_CLEAN:-auto}"
 DISABLE_DOWNLOAD="${VIVID_FLATPAK_DISABLE_DOWNLOAD:-0}"
@@ -38,6 +38,7 @@ INSTALL_DEPS_FROM="${VIVID_FLATPAK_INSTALL_DEPS_FROM:-}"
 FLATPAK_CEF_ARCHIVE="${VIVID_CEF_ARCHIVE}"
 APP_VERSION="${VIVID_FLATPAK_APP_VERSION}"
 RELEASE_DATE="${VIVID_FLATPAK_RELEASE_DATE}"
+BUILD_ARCH="${VIVID_BUILD_ARCH}"
 
 export CCACHE_DIR="${VIVID_FLATPAK_CCACHE_DIR:-${STATE_DIR}/ccache}"
 export CCACHE_MAXSIZE="${VIVID_FLATPAK_CCACHE_MAXSIZE:-20G}"
@@ -81,6 +82,10 @@ validate_bool VIVID_FLATPAK_DISABLE_ROFILES_FUSE "${DISABLE_ROFILES_FUSE}"
 validate_bool VIVID_FLATPAK_KEEP_BUILD_DIRS "${KEEP_BUILD_DIRS}"
 validate_bool VIVID_FLATPAK_CCACHE "${CCACHE}"
 vivid_flatpak_validate_app_release "${APP_VERSION}" "${RELEASE_DATE}"
+
+if [ "${DISABLE_DOWNLOAD}" = 0 ]; then
+    sh "${SCRIPT_DIR}/../fetch_cef.sh"
+fi
 
 MANIFEST_TEMPLATE="$(vivid_flatpak_absolute_path "${MANIFEST_TEMPLATE}")"
 MANIFEST="$(vivid_flatpak_absolute_path "${MANIFEST}")"
@@ -139,6 +144,7 @@ echo "==> Flatpak producer git source: ${GIT_URL}"
 echo "==> Flatpak producer git branch: ${GIT_BRANCH}"
 echo "==> Flatpak producer git commit: ${VIVID_FLATPAK_GIT_COMMIT}"
 echo "==> Flatpak app version: ${APP_VERSION} (${RELEASE_DATE})"
+echo "==> Flatpak architecture: ${BUILD_ARCH}"
 echo "==> Flatpak producer app dir: ${BUILD_DIR}"
 echo "==> Flatpak producer repository: ${REPO_DIR}"
 echo "==> Flatpak producer bundle: ${BUNDLE}"
@@ -168,6 +174,7 @@ if [ "${ACTUAL_FORCE_CLEAN}" = 1 ]; then
 fi
 
 set -- \
+    --arch="${BUILD_ARCH}" \
     --jobs="${BUILD_JOBS}" \
     --state-dir="${STATE_DIR}" \
     --repo="${REPO_DIR}" \
@@ -200,6 +207,7 @@ flatpak-builder "$@"
 
 echo "==> Building Flatpak bundle: ${BUNDLE}"
 flatpak build-bundle \
+    --arch="${BUILD_ARCH}" \
     "${REPO_DIR}" \
     "${BUNDLE}" \
     "${VIVID_PRODUCER_APP_ID}" \

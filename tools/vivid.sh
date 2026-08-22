@@ -19,7 +19,7 @@ Usage:
 
   tools/vivid.sh gnome {build|clean|install|zip|enable|disable|reset|uninstall|log}
   tools/vivid.sh kde {build|clean|install|zip|uninstall|log}
-  tools/vivid.sh layer-shell {build|clean|run}
+  tools/vivid.sh layer-shell {build|release|clean|run}
   # run forwards the optional --layer override to vivid-layer-shell-consumer.
   # Compositor snippets: consumer/layer-shell/examples/{hyprland.lua,hyprland.conf,sway.conf,niri.kdl}
 
@@ -60,7 +60,7 @@ _vivid_sh_completion() {
     local direct_run_actions="build clean run run-producer run-webui"
     local gnome_actions="build clean install zip enable disable reset uninstall log"
     local kde_actions="build clean install zip uninstall log"
-    local layer_shell_actions="build clean run"
+    local layer_shell_actions="build release clean run"
     local flatpak_actions="prefetch build clean run-appdir"
     local protocol_actions="regen check"
     local producer_actions="build-direct-run run-direct-run run-direct-run-producer run-direct-run-webui prefetch build-flatpak run-flatpak-appdir clean-direct-run clean-flatpak clean"
@@ -440,7 +440,7 @@ run_layer_shell() {
     shift
 
     case "${action}" in
-        build|run)
+        build|release|run)
             "${SCRIPT_DIR}/consumer_layer_shell/run.sh" "${action}" "$@"
             ;;
         clean)

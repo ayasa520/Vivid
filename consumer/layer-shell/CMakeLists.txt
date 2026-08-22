@@ -1,8 +1,11 @@
 cmake_minimum_required(VERSION 3.24)
 
+set(VIVID_LAYER_SHELL_VERSION "1.0.0"
+    CACHE STRING "Version embedded in the layer-shell consumer")
+
 project(
     vivid-consumer-layer-shell
-    VERSION 1.0.0
+    VERSION ${VIVID_LAYER_SHELL_VERSION}
     LANGUAGES C
 )
 

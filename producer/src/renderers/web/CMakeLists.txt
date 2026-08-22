@@ -15,6 +15,21 @@ if(NOT DEFINED CEF_ROOT)
     "(cmake -DCEF_ROOT=...)")
 endif()
 
+# CEF names the 64-bit Arm architecture "arm64", while Linux and CMake report
+# it as "aarch64" on native Arm hosts. CEF's default detection only recognizes
+# the former spelling and otherwise classifies any 64-bit host as x86_64,
+# injecting -m64 and -march=x86-64 into the wrapper build. Normalize the two
+# release architectures before importing CEF so its compiler and linker flags
+# always describe the selected binary distribution.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+  set(PROJECT_ARCH "arm64")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+  set(PROJECT_ARCH "x86_64")
+else()
+  message(FATAL_ERROR
+    "Vivid's CEF renderer does not support processor: ${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+
 list(APPEND CMAKE_MODULE_PATH "${CEF_ROOT}/cmake")
 find_package(CEF REQUIRED)
 

@@ -2,7 +2,9 @@
 
 set -euo pipefail
 
-if [ "$(id -u)" -eq 0 ]; then
+ACTION="${1:-help}"
+
+if [ "$(id -u)" -eq 0 ] && [ "${ACTION}" != build ] && [ "${ACTION}" != zip ]; then
     echo "Error: this script should not be run as root" >&2
     exit 1
 fi
@@ -10,6 +12,8 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../consumer/kde" && pwd)"
 . "${SCRIPT_DIR}/build_env.sh"
+
+BUILD_JOBS="${VIVID_BUILD_JOBS:-$(nproc)}"
 
 configure() {
     cmake -S "${ROOT_DIR}" -B "${VIVID_KDE_BUILD_DIR}" -G Ninja \
@@ -23,7 +27,7 @@ configure() {
 
 build() {
     configure
-    cmake --build "${VIVID_KDE_BUILD_DIR}"
+    cmake --build "${VIVID_KDE_BUILD_DIR}" --parallel "${BUILD_JOBS}"
 }
 
 clean_dist_archives() {
@@ -44,7 +48,7 @@ stage_package() {
         --prefix "${VIVID_KDE_STAGING_DIR}"
 }
 
-case "${1:-help}" in
+case "${ACTION}" in
     build)
         build
         ;;
@@ -61,7 +65,9 @@ case "${1:-help}" in
     zip)
         configure
         clean_dist_archives
-        cmake --build "${VIVID_KDE_BUILD_DIR}" --target package
+        cmake --build "${VIVID_KDE_BUILD_DIR}" \
+            --parallel "${BUILD_JOBS}" \
+            --target package
         ;;
     uninstall)
         kpackagetool6 --type Plasma/Wallpaper -r "${VIVID_KDE_PACKAGE_ID}"
