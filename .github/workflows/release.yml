@@ -210,6 +210,15 @@ jobs:
       - layer-shell
     runs-on: ubuntu-24.04
     steps:
+      # `--notes-from-tag` reads the tag from the checked-out Git repository.
+      # Keep release creation repository-local so gh does not reject the
+      # unsupported combination of `--repo` and `--notes-from-tag`.
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          # Preserve annotated tag objects and their messages for
+          # `--notes-from-tag`; a shallow checkout may contain only the commit.
+          fetch-depth: 0
       - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
@@ -221,7 +230,6 @@ jobs:
         run: >-
           gh release create "${GITHUB_REF_NAME}"
           dist/*
-          --repo "${GITHUB_REPOSITORY}"
           --verify-tag
           --title "${GITHUB_REF_NAME}"
           --notes-from-tag
