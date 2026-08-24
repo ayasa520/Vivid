@@ -110,7 +110,8 @@ struct VividWebVulkanRoute
      * the scene and video backends, so the export ring always lives on the
      * card the render-device value selected.
      */
-    bool ensure(const VividGpuDevice& gpu_device);
+    bool ensure(const VividGpuDevice& gpu_device,
+                const VividWebVulkanExportRequest& request);
     void reset();
     void abandon_for_process_lifetime();
     static std::vector<VividWebVulkanFormatCap> query_export_caps(

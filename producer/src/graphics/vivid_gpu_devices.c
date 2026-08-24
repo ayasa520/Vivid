@@ -28,6 +28,10 @@
     ((VkFormatFeatureFlags2)(VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | \
                              VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | \
                              VK_FORMAT_FEATURE_TRANSFER_DST_BIT))
+#define VIVID_GPU_SCENE_DMABUF_USAGE \
+    ((VkImageUsageFlags)(VK_IMAGE_USAGE_SAMPLED_BIT | \
+                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | \
+                         VK_IMAGE_USAGE_TRANSFER_DST_BIT))
 
 static gboolean
 render_device_value_is_auto(const gchar* value)
@@ -266,6 +270,73 @@ physical_device_has_scene_dmabuf_export_extensions(VkPhysicalDevice gpu)
         device_has_extension(gpu, VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME);
 }
 
+static gboolean
+physical_device_has_scene_linear_dmabuf_export_extensions(VkPhysicalDevice gpu)
+{
+    return device_has_extension(gpu, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME) &&
+        device_has_extension(gpu, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+}
+
+static gboolean
+scene_dmabuf_export_tuple_supported(VkPhysicalDevice gpu,
+                                    VkImageTiling    tiling,
+                                    guint64          modifier)
+{
+    VkPhysicalDeviceExternalImageFormatInfo external_info = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO,
+        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+    };
+    VkPhysicalDeviceImageDrmFormatModifierInfoEXT modifier_info = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT,
+        .pNext = &external_info,
+        .drmFormatModifier = modifier,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    const void* image_info_pnext = tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT
+        ? (const void*)&modifier_info
+        : (const void*)&external_info;
+    VkPhysicalDeviceImageFormatInfo2 image_info = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+        .pNext = image_info_pnext,
+        .format = VIVID_GPU_SCENE_DMABUF_VK_FORMAT,
+        .type = VK_IMAGE_TYPE_2D,
+        .tiling = tiling,
+        .usage = VIVID_GPU_SCENE_DMABUF_USAGE,
+    };
+    VkExternalImageFormatProperties external_properties = {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES,
+    };
+    VkImageFormatProperties2 image_properties = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
+        .pNext = &external_properties,
+    };
+    const VkResult result =
+        vkGetPhysicalDeviceImageFormatProperties2(gpu, &image_info, &image_properties);
+    if (result != VK_SUCCESS) {
+        g_debug("VividGpuDevices: scene DMA-BUF export query failed tiling=%s "
+                "modifier=0x%016" G_GINT64_MODIFIER "x result=%d",
+                tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT ? "modifier" : "linear",
+                modifier,
+                (int)result);
+        return FALSE;
+    }
+
+    const VkExternalMemoryProperties* external =
+        &external_properties.externalMemoryProperties;
+    if ((external->externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT) == 0 ||
+        (external->compatibleHandleTypes & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) == 0) {
+        g_debug("VividGpuDevices: scene DMA-BUF tuple is not exportable tiling=%s "
+                "modifier=0x%016" G_GINT64_MODIFIER "x external-features=0x%x "
+                "compatible-handles=0x%x",
+                tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT ? "modifier" : "linear",
+                modifier,
+                external->externalMemoryFeatures,
+                external->compatibleHandleTypes);
+        return FALSE;
+    }
+    return TRUE;
+}
+
 static void
 fill_scene_dmabuf_caps_from_physical_device(VkPhysicalDevice gpu,
                                             VividGpuDevice*  out_device)
@@ -281,11 +352,16 @@ fill_scene_dmabuf_caps_from_physical_device(VkPhysicalDevice gpu,
      * wallpaper-scene-renderer's render thread is initializing Vulkan; NVIDIA's
      * ICD/loader stack has crashed in that exact concurrent loader scan.
      */
-    dmabuf_caps_append(out_device->scene_dmabuf_caps,
-                       &out_device->scene_dmabuf_n_caps,
-                       VIVID_GPU_SCENE_DMABUF_FOURCC,
-                       DRM_FORMAT_MOD_LINEAR,
-                       1);
+    if (physical_device_has_scene_linear_dmabuf_export_extensions(gpu) &&
+        scene_dmabuf_export_tuple_supported(gpu, VK_IMAGE_TILING_LINEAR, 0)) {
+        dmabuf_caps_append(out_device->scene_dmabuf_caps,
+                           &out_device->scene_dmabuf_n_caps,
+                           VIVID_GPU_SCENE_DMABUF_FOURCC,
+                           DRM_FORMAT_MOD_LINEAR,
+                           1);
+    } else {
+        g_debug("VividGpuDevices: scene linear DMA-BUF export tuple is unavailable");
+    }
 
     if (!physical_device_has_scene_dmabuf_export_extensions(gpu))
         return;
@@ -321,6 +397,14 @@ fill_scene_dmabuf_caps_from_physical_device(VkPhysicalDevice gpu,
         if ((modifier->drmFormatModifierTilingFeatures &
              VIVID_GPU_SCENE_REQUIRED_DMABUF_FEATURES) !=
             VIVID_GPU_SCENE_REQUIRED_DMABUF_FEATURES) {
+            continue;
+        }
+        if (!scene_dmabuf_export_tuple_supported(gpu,
+                                                 VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
+                                                 modifier->drmFormatModifier)) {
+            g_debug("VividGpuDevices: skipping scene modifier=0x%016"
+                    G_GINT64_MODIFIER "x because DMA-BUF export is unavailable",
+                    modifier->drmFormatModifier);
             continue;
         }
 

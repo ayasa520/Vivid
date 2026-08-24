@@ -162,7 +162,6 @@ struct _VividSceneProducer
     bool logged_waiting_for_swapchain { false };
     bool logged_swapchain_type_mismatch { false };
     bool logged_empty_swapchain_handles { false };
-    bool logged_linear_only_caps { false };
 };
 
 namespace
@@ -188,7 +187,6 @@ void reset_scene_runtime(VividSceneProducer* self) {
     self->logged_waiting_for_swapchain = false;
     self->logged_swapchain_type_mismatch = false;
     self->logged_empty_swapchain_handles = false;
-    self->logged_linear_only_caps = false;
 }
 
 /*
@@ -684,23 +682,27 @@ vivid_scene_producer_query_dmabuf_caps(VividSceneProducer*           self,
     g_return_val_if_fail(out_caps != nullptr, FALSE);
 
     memset(out_caps, 0, sizeof(*out_caps));
-    scene_caps_append(out_caps, SCENE_DMABUF_FOURCC, DRM_FORMAT_MOD_LINEAR, 1);
-    out_caps->memory_preference = VIVID_SCENE_PRODUCER_DMABUF_MEMORY_HOST_VISIBLE;
-    if (!self->logged_linear_only_caps) {
-        /*
-         * Do not create a temporary Vulkan instance here. SceneWallpaper starts
-         * its renderer on an internal looper thread, and querying Vulkan
-         * modifiers from the producer's negotiation path can race that
-         * renderer initialization inside the Vulkan loader/ICD. waywallen gets
-         * modifier caps from an already-owned pool/backend; until
-         * wallpaper-scene-renderer exposes the same kind of in-device caps
-         * query, scene advertises the safe LINEAR export contract only.
-         */
-        g_message("VividSceneProducer: advertising LINEAR-only DMA-BUF caps for scene "
-                  "renderer; modifier caps require an in-renderer Vulkan caps hook");
-        self->logged_linear_only_caps = true;
+    if (!self->resolved_gpu_valid || self->resolved_gpu.scene_dmabuf_n_caps == 0) {
+        g_warning("VividSceneProducer: resolved GPU returned no Scene DMA-BUF capabilities");
+        return FALSE;
     }
-    return TRUE;
+
+    for (guint32 i = 0; i < self->resolved_gpu.scene_dmabuf_n_caps; i++) {
+        const VividGpuDmaBufFormatCap& cap = self->resolved_gpu.scene_dmabuf_caps[i];
+        scene_caps_append(out_caps, cap.fourcc, cap.modifier, cap.plane_count);
+    }
+    out_caps->memory_preference = self->resolved_gpu.scene_dmabuf_n_caps > 1
+        ? VIVID_SCENE_PRODUCER_DMABUF_MEMORY_DEVICE_LOCAL
+        : VIVID_SCENE_PRODUCER_DMABUF_MEMORY_HOST_VISIBLE;
+    g_message("VividSceneProducer: publishing %u GPU-filtered DMA-BUF capabilities "
+              "render-node=%s memory-preference=%s",
+              out_caps->n_caps,
+              self->resolved_gpu.render_node,
+              out_caps->memory_preference ==
+                      VIVID_SCENE_PRODUCER_DMABUF_MEMORY_DEVICE_LOCAL
+                  ? "device-local"
+                  : "host-visible");
+    return out_caps->n_caps > 0;
 }
 
 gboolean

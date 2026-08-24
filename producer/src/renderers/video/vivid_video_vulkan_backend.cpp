@@ -54,6 +54,9 @@ constexpr std::array kVaImportDeviceExtensions {
     VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
 };
 
+constexpr VkImageUsageFlags kExportImageUsage =
+    VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+
 std::mutex&
 vulkan_instance_mutex()
 {
@@ -715,6 +718,7 @@ device_supports_va_import_extensions(const std::vector<VkExtensionProperties>& e
 bool
 device_supports_linear_export(VkPhysicalDevice gpu,
                               VkFormat format,
+                              VkImageUsageFlags usage,
                               bool& requires_dedicated,
                               std::string& reason)
 {
@@ -729,7 +733,7 @@ device_supports_linear_export(VkPhysicalDevice gpu,
         .format = format,
         .type = VK_IMAGE_TYPE_2D,
         .tiling = VK_IMAGE_TILING_LINEAR,
-        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        .usage = usage,
         .flags = 0,
     };
     VkExternalImageFormatProperties external_properties {
@@ -754,6 +758,11 @@ device_supports_linear_export(VkPhysicalDevice gpu,
         reason = "linear RGBA image is not DMA-BUF exportable";
         return false;
     }
+    if ((external_properties.externalMemoryProperties.compatibleHandleTypes &
+         VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) == 0) {
+        reason = "linear RGBA image does not support DMA-BUF handles";
+        return false;
+    }
 
     requires_dedicated =
         (features & VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) != 0;
@@ -761,9 +770,118 @@ device_supports_linear_export(VkPhysicalDevice gpu,
 }
 
 bool
+device_supports_modifier_export(VkPhysicalDevice gpu,
+                                VkFormat format,
+                                uint64_t modifier,
+                                uint32_t plane_count,
+                                VkImageUsageFlags usage,
+                                std::string& reason)
+{
+    if (modifier == DRM_FORMAT_MOD_LINEAR || modifier == DRM_FORMAT_MOD_INVALID) {
+        reason = "requested modifier is not a non-linear DRM modifier";
+        return false;
+    }
+    if (plane_count == 0 || plane_count > VividVideoVulkanExportImage::kMaxPlanes) {
+        reason = "requested modifier has an invalid plane count";
+        return false;
+    }
+
+    /*
+     * The modifier property list reports the plane count that Vulkan will
+     * expose through VkImageSubresourceLayout. Negotiation carries this value
+     * across the producer/consumer boundary, so reject a mismatched tuple
+     * before creating any device-local image or exporting any fd.
+     */
+    VkDrmFormatModifierPropertiesListEXT modifier_list {
+        .sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT,
+        .pNext = nullptr,
+        .drmFormatModifierCount = 0,
+        .pDrmFormatModifierProperties = nullptr,
+    };
+    VkFormatProperties2 format_properties {
+        .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
+        .pNext = &modifier_list,
+        .formatProperties = {},
+    };
+    vkGetPhysicalDeviceFormatProperties2(gpu, format, &format_properties);
+    std::vector<VkDrmFormatModifierPropertiesEXT> modifiers(
+        modifier_list.drmFormatModifierCount);
+    if (!modifiers.empty()) {
+        modifier_list.pDrmFormatModifierProperties = modifiers.data();
+        vkGetPhysicalDeviceFormatProperties2(gpu, format, &format_properties);
+    }
+
+    const auto modifier_properties = std::find_if(
+        modifiers.begin(),
+        modifiers.end(),
+        [modifier](const VkDrmFormatModifierPropertiesEXT& properties) {
+            return properties.drmFormatModifier == modifier;
+        });
+    if (modifier_properties == modifiers.end()) {
+        reason = "requested DRM modifier is not advertised for the Vulkan format";
+        return false;
+    }
+    if (modifier_properties->drmFormatModifierPlaneCount != plane_count) {
+        reason = "requested DRM modifier plane count does not match Vulkan";
+        return false;
+    }
+
+    VkPhysicalDeviceExternalImageFormatInfo external_info {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO,
+        .pNext = nullptr,
+        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+    };
+    VkPhysicalDeviceImageDrmFormatModifierInfoEXT modifier_info {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT,
+        .pNext = &external_info,
+        .drmFormatModifier = modifier,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
+    };
+    VkPhysicalDeviceImageFormatInfo2 image_info {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+        .pNext = &modifier_info,
+        .format = format,
+        .type = VK_IMAGE_TYPE_2D,
+        .tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
+        .usage = usage,
+        .flags = 0,
+    };
+    VkExternalImageFormatProperties external_properties {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES,
+        .pNext = nullptr,
+    };
+    VkImageFormatProperties2 image_properties {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
+        .pNext = &external_properties,
+    };
+    const VkResult result =
+        vkGetPhysicalDeviceImageFormatProperties2(gpu, &image_info, &image_properties);
+    if (result != VK_SUCCESS) {
+        reason = std::string("vkGetPhysicalDeviceImageFormatProperties2=") +
+            vk_result_name(result);
+        return false;
+    }
+
+    const VkExternalMemoryProperties& external =
+        external_properties.externalMemoryProperties;
+    if ((external.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT) == 0) {
+        reason = "requested DRM modifier image is not DMA-BUF exportable";
+        return false;
+    }
+    if ((external.compatibleHandleTypes & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) == 0) {
+        reason = "requested DRM modifier image does not support DMA-BUF handles";
+        return false;
+    }
+    return true;
+}
+
+bool
 choose_physical_device(VividVideoVulkanBackend& backend,
                        const VividGpuDevice&    gpu_device,
-                       VideoFrameTransferPath    transfer_path)
+                       VideoFrameTransferPath    transfer_path,
+                       const VividVideoVulkanExportRequest& request)
 {
     uint32_t count = 0;
     VkResult result = vkEnumeratePhysicalDevices(backend.instance, &count, nullptr);
@@ -841,12 +959,40 @@ choose_physical_device(VividVideoVulkanBackend& backend,
         return false;
     }
 
+    const VkFormat target_format = target_vk_format_for_transfer_path(transfer_path);
+    const bool modifier_path = request.require_modifier &&
+        request.modifier != DRM_FORMAT_MOD_LINEAR &&
+        request.modifier != DRM_FORMAT_MOD_INVALID;
     bool requires_dedicated = false;
     std::string reason;
-    if (!device_supports_linear_export(selected,
-                                       target_vk_format_for_transfer_path(transfer_path),
-                                       requires_dedicated,
-                                       reason)) {
+    if (modifier_path) {
+        if (!device_supports_va_import_extensions(extensions, &missing_extension)) {
+            g_warning("VividVideoProducer: selected Vulkan GPU %s is missing modifier "
+                      "image extension %s",
+                      selected_properties.deviceName,
+                      missing_extension ? missing_extension : "(unknown)");
+            return false;
+        }
+        if (!device_supports_modifier_export(selected,
+                                              target_format,
+                                              request.modifier,
+                                              request.plane_count,
+                                              kExportImageUsage,
+                                              reason)) {
+            g_warning("VividVideoProducer: selected Vulkan GPU %s cannot export requested "
+                      "DRM modifier RGBA DMA-BUF images modifier=0x%016"
+                      G_GINT64_MODIFIER "x planes=%u: %s",
+                      selected_properties.deviceName,
+                      static_cast<guint64>(request.modifier),
+                      request.plane_count,
+                      reason.c_str());
+            return false;
+        }
+    } else if (!device_supports_linear_export(selected,
+                                              target_format,
+                                              kExportImageUsage,
+                                              requires_dedicated,
+                                              reason)) {
         g_warning("VividVideoProducer: selected Vulkan GPU %s cannot export linear "
                   "RGBA DMA-BUF images: %s",
                   selected_properties.deviceName,
@@ -1226,7 +1372,7 @@ VividVideoVulkanBackend::ensure(const VividGpuDevice& gpu_device,
         : DRM_FORMAT_MOD_LINEAR;
     if (!create_vulkan_instance(backend))
         return false;
-    if (!choose_physical_device(backend, gpu_device, transfer_path))
+    if (!choose_physical_device(backend, gpu_device, transfer_path, request))
         return false;
     if (!create_vulkan_device(backend))
         return false;
@@ -1248,7 +1394,6 @@ std::vector<VividVideoVulkanFormatCap>
 VividVideoVulkanBackend::query_export_caps(const VividGpuDevice& gpu_device,
                                            VkImageUsageFlags     usage)
 {
-    (void)usage;
     std::vector<VividVideoVulkanFormatCap> caps;
     if (!gpu_device.render_node[0])
         return caps;
@@ -1321,11 +1466,27 @@ VividVideoVulkanBackend::query_export_caps(const VividGpuDevice& gpu_device,
                         want_features) {
                     continue;
                 }
-                caps.push_back(VividVideoVulkanFormatCap {
-                    .fourcc = fourcc,
-                    .modifier = modifier.drmFormatModifier,
-                    .plane_count = modifier.drmFormatModifierPlaneCount,
-                });
+                std::string reason;
+                if (device_supports_modifier_export(selected,
+                                                     vk_format,
+                                                     modifier.drmFormatModifier,
+                                                     modifier.drmFormatModifierPlaneCount,
+                                                     usage,
+                                                     reason)) {
+                    caps.push_back(VividVideoVulkanFormatCap {
+                        .fourcc = fourcc,
+                        .modifier = modifier.drmFormatModifier,
+                        .plane_count = modifier.drmFormatModifierPlaneCount,
+                    });
+                } else {
+                    g_debug("VividVideoProducer: skipping unsupported Vulkan modifier "
+                            "fourcc=0x%08x modifier=0x%016" G_GINT64_MODIFIER
+                            "x planes=%u: %s",
+                            fourcc,
+                            static_cast<guint64>(modifier.drmFormatModifier),
+                            modifier.drmFormatModifierPlaneCount,
+                            reason.c_str());
+                }
             }
         }
 
@@ -1333,6 +1494,7 @@ VividVideoVulkanBackend::query_export_caps(const VividGpuDevice& gpu_device,
         std::string reason;
         if (device_supports_linear_export(selected,
                                           vk_format,
+                                          usage,
                                           requires_dedicated,
                                           reason)) {
             caps.push_back(VividVideoVulkanFormatCap {

@@ -2832,13 +2832,6 @@ vivid_video_producer_query_dmabuf_caps(VividVideoProducer*           self,
             .plane_count = cap.plane_count,
         };
     }
-    if (out_caps->n_caps == 0) {
-        out_caps->caps[out_caps->n_caps++] = {
-            .fourcc = target_fourcc,
-            .modifier = DRM_FORMAT_MOD_LINEAR,
-            .plane_count = 1,
-        };
-    }
     out_caps->memory_preference = VIVID_VIDEO_PRODUCER_DMABUF_MEMORY_DEVICE_LOCAL;
     return TRUE;
 }

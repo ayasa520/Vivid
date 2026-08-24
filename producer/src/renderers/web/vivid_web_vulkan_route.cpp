@@ -286,9 +286,127 @@ validate_linear_dmabuf_export(VkPhysicalDevice physical_device,
                   vk_external_memory_feature_names(features));
         return false;
     }
+    if ((external_properties.externalMemoryProperties.compatibleHandleTypes &
+         VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) == 0) {
+        g_warning("VividWebProducer: refusing linear DMA-BUF format=%u usage=0x%x "
+                  "without compatible DMA-BUF handle type",
+                  (uint32_t)format,
+                  usage);
+        return false;
+    }
 
     requires_dedicated =
         (features & VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) != 0;
+    return true;
+}
+
+bool
+validate_modifier_dmabuf_export(VkPhysicalDevice physical_device,
+                                VkFormat         format,
+                                uint64_t         modifier,
+                                uint32_t         plane_count,
+                                VkImageUsageFlags usage,
+                                std::string&     reason)
+{
+    if (modifier == DRM_FORMAT_MOD_LINEAR || modifier == DRM_FORMAT_MOD_INVALID) {
+        reason = "requested modifier is not a non-linear DRM modifier";
+        return false;
+    }
+    if (plane_count == 0 || plane_count > VividWebVulkanImage::kMaxPlanes) {
+        reason = "requested modifier has an invalid plane count";
+        return false;
+    }
+
+    /*
+     * The modifier property list is the source of truth for the number of
+     * memory planes exported by a DRM modifier. The protocol negotiates that
+     * number together with the modifier, so reject a mismatched tuple before
+     * creating the web export ring.
+     */
+    VkDrmFormatModifierPropertiesListEXT modifier_list {
+        .sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT,
+        .pNext = nullptr,
+        .drmFormatModifierCount = 0,
+        .pDrmFormatModifierProperties = nullptr,
+    };
+    VkFormatProperties2 format_properties {
+        .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
+        .pNext = &modifier_list,
+        .formatProperties = {},
+    };
+    vkGetPhysicalDeviceFormatProperties2(physical_device, format, &format_properties);
+    std::vector<VkDrmFormatModifierPropertiesEXT> modifiers(
+        modifier_list.drmFormatModifierCount);
+    if (!modifiers.empty()) {
+        modifier_list.pDrmFormatModifierProperties = modifiers.data();
+        vkGetPhysicalDeviceFormatProperties2(physical_device, format, &format_properties);
+    }
+
+    const auto modifier_properties = std::find_if(
+        modifiers.begin(),
+        modifiers.end(),
+        [modifier](const VkDrmFormatModifierPropertiesEXT& properties) {
+            return properties.drmFormatModifier == modifier;
+        });
+    if (modifier_properties == modifiers.end()) {
+        reason = "requested DRM modifier is not advertised for the Vulkan format";
+        return false;
+    }
+    if (modifier_properties->drmFormatModifierPlaneCount != plane_count) {
+        reason = "requested DRM modifier plane count does not match Vulkan";
+        return false;
+    }
+
+    VkPhysicalDeviceExternalImageFormatInfo external_info {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO,
+        .pNext = nullptr,
+        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+    };
+    VkPhysicalDeviceImageDrmFormatModifierInfoEXT modifier_info {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT,
+        .pNext = &external_info,
+        .drmFormatModifier = modifier,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
+    };
+    VkPhysicalDeviceImageFormatInfo2 image_info {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+        .pNext = &modifier_info,
+        .format = format,
+        .type = VK_IMAGE_TYPE_2D,
+        .tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
+        .usage = usage,
+        .flags = 0,
+    };
+    VkExternalImageFormatProperties external_properties {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES,
+        .pNext = nullptr,
+    };
+    VkImageFormatProperties2 image_properties {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
+        .pNext = &external_properties,
+    };
+    const VkResult result = vkGetPhysicalDeviceImageFormatProperties2(
+        physical_device,
+        &image_info,
+        &image_properties);
+    if (result != VK_SUCCESS) {
+        reason = std::string("vkGetPhysicalDeviceImageFormatProperties2=") +
+            vk_result_name(result);
+        return false;
+    }
+
+    const VkExternalMemoryProperties& external =
+        external_properties.externalMemoryProperties;
+    if ((external.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT) == 0) {
+        reason = "requested DRM modifier image is not DMA-BUF exportable";
+        return false;
+    }
+    if ((external.compatibleHandleTypes & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) == 0) {
+        reason = "requested DRM modifier image does not support DMA-BUF handles";
+        return false;
+    }
     return true;
 }
 
@@ -534,7 +652,8 @@ VividWebVulkanRoute::abandon_for_process_lifetime()
 }
 
 bool
-VividWebVulkanRoute::ensure(const VividGpuDevice& gpu_device)
+VividWebVulkanRoute::ensure(const VividGpuDevice& gpu_device,
+                            const VividWebVulkanExportRequest& request)
 {
     reset();
 
@@ -597,12 +716,35 @@ VividWebVulkanRoute::ensure(const VividGpuDevice& gpu_device)
         }
     }
 
+    const VkFormat export_format = fourcc_to_vk_format(WEB_EXPORT_FOURCC);
+    const VkImageUsageFlags export_usage =
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    const bool modifier_path = request.require_modifier &&
+        request.modifier != DRM_FORMAT_MOD_LINEAR &&
+        request.modifier != DRM_FORMAT_MOD_INVALID;
     bool requires_dedicated = false;
-    if (!validate_linear_dmabuf_export(selected,
-                                       fourcc_to_vk_format(WEB_EXPORT_FOURCC),
-                                       VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                                           VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-                                       requires_dedicated)) {
+    std::string reason;
+    if (modifier_path) {
+        if (!validate_modifier_dmabuf_export(selected,
+                                             export_format,
+                                             request.modifier,
+                                             request.plane_count,
+                                             export_usage,
+                                             reason)) {
+            g_warning("VividWebProducer: selected Vulkan GPU %s cannot export requested "
+                      "DRM modifier DMA-BUF modifier=0x%016" G_GINT64_MODIFIER
+                      "x planes=%u: %s",
+                      selected_properties.deviceName,
+                      static_cast<guint64>(request.modifier),
+                      request.plane_count,
+                      reason.c_str());
+            reset();
+            return false;
+        }
+    } else if (!validate_linear_dmabuf_export(selected,
+                                              export_format,
+                                              export_usage,
+                                              requires_dedicated)) {
         reset();
         return false;
     }
@@ -772,11 +914,25 @@ VividWebVulkanRoute::query_export_caps(const VividGpuDevice& gpu_device,
             (modifier.drmFormatModifierTilingFeatures & want_features) != want_features) {
             continue;
         }
-        caps.push_back(VividWebVulkanFormatCap {
-            .fourcc = WEB_EXPORT_FOURCC,
-            .modifier = modifier.drmFormatModifier,
-            .plane_count = modifier.drmFormatModifierPlaneCount,
-        });
+        std::string reason;
+        if (validate_modifier_dmabuf_export(selected,
+                                             vk_format,
+                                             modifier.drmFormatModifier,
+                                             modifier.drmFormatModifierPlaneCount,
+                                             usage,
+                                             reason)) {
+            caps.push_back(VividWebVulkanFormatCap {
+                .fourcc = WEB_EXPORT_FOURCC,
+                .modifier = modifier.drmFormatModifier,
+                .plane_count = modifier.drmFormatModifierPlaneCount,
+            });
+        } else {
+            g_debug("VividWebProducer: skipping unsupported Vulkan modifier "
+                    "modifier=0x%016" G_GINT64_MODIFIER "x planes=%u: %s",
+                    static_cast<guint64>(modifier.drmFormatModifier),
+                    modifier.drmFormatModifierPlaneCount,
+                    reason.c_str());
+        }
     }
 
     bool requires_dedicated = false;

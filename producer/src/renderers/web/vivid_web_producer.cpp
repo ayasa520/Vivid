@@ -1535,7 +1535,7 @@ struct WebFrameRing
             return false;
         }
 
-        vulkan_ready = vulkan.ensure(gpu);
+        vulkan_ready = vulkan.ensure(gpu, next_request);
         if (!vulkan_ready)
             return false;
 
@@ -3521,13 +3521,6 @@ vivid_web_producer_query_dmabuf_caps(VividWebProducer*           self,
             .fourcc = cap.fourcc,
             .modifier = cap.modifier,
             .plane_count = cap.plane_count,
-        };
-    }
-    if (out_caps->n_caps == 0) {
-        out_caps->caps[out_caps->n_caps++] = {
-            .fourcc = WEB_RING_FOURCC,
-            .modifier = DRM_FORMAT_MOD_LINEAR,
-            .plane_count = 1,
         };
     }
     out_caps->memory_preference = VIVID_WEB_PRODUCER_DMABUF_MEMORY_DEVICE_LOCAL;
