@@ -52,11 +52,16 @@ MARKERS = {
     "effect-source": r"SceneRenderGraphDetachedSourceRoute",
     "proxy-order": r"reason='proxy'",
     "deferred-layer": r"SceneObjectMaterialize: mode=\S*logical\S*",
-    "puppet": r"PuppetSurface",
+    "puppet": r"PuppetSurface|ScenePuppetAttachmentBind",
     "text": r"SceneTextLayoutContract",
     "dynamic-layers": r"SceneScriptCreateLayer",
     "video": r"VideoTextureDecoderInit",
     "camera-layer": r"SceneCameraLayerActive",
+    "light": r"SceneLightParsed",
+    "model": r"ModelRenderOrder|Scene3DModelCameraPath",
+    "particle": r"ParticleRenderPlan",
+    "bloom": r"SceneBloomGraphBind",
+    "volumetrics": r"SceneVolumetrics",
 }
 
 CAPTURE_DEFAULTS = {"width": 1600, "height": 1000, "frames": 120, "pointer_xs": [0.0, 0.5, 1.0]}

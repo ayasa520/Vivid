@@ -29,6 +29,11 @@ Usage:
 
   tools/vivid.sh protocol {regen|check}
 
+  tools/vivid.sh test
+  # Runs the native test suites (scene renderer + producer daemon) via ctest.
+  # Requires a prior `tools/vivid.sh build direct-run`, which also builds the
+  # test executables.
+
   Aliases:
     tools/vivid.sh consumer gnome ...
   tools/vivid.sh consumer kde ...
@@ -54,7 +59,7 @@ _vivid_sh_completion() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     COMPREPLY=()
 
-    local top_commands="build clean direct-run gnome consumer-gnome kde consumer-kde layer-shell consumer-layer-shell consumer flatpak producer protocol completion help -h --help"
+    local top_commands="build clean direct-run gnome consumer-gnome kde consumer-kde layer-shell consumer-layer-shell consumer flatpak producer protocol test completion help -h --help"
     local build_targets="direct-run producer gnome consumer-gnome kde consumer-kde layer-shell consumer-layer-shell flatpak all"
     local clean_targets="direct-run gnome consumer-gnome kde consumer-kde layer-shell consumer-layer-shell flatpak producer consumer all"
     local direct_run_actions="build clean run run-producer run-webui"
@@ -510,6 +515,32 @@ run_protocol() {
     esac
 }
 
+run_tests() {
+    if [[ $# -ne 0 ]]; then
+        die_usage "unexpected test arguments: $*"
+    fi
+
+    local root_dir
+    root_dir="$(cd "${SCRIPT_DIR}/../producer" && pwd)"
+    ROOT_DIR="${root_dir}"
+    . "${SCRIPT_DIR}/producer/build_env.sh"
+
+    local failed=0
+    local test_dir
+    for test_dir in "${VIVID_DIRECT_RUN_SCENE_BUILD_DIR}" "${VIVID_DIRECT_RUN_DAEMON_BUILD_DIR}"; do
+        if [[ ! -f "${test_dir}/CTestTestfile.cmake" ]]; then
+            echo "Skip: no test manifest in ${test_dir} (run 'tools/vivid.sh build direct-run' first)" >&2
+            failed=1
+            continue
+        fi
+        echo "==> ctest ${test_dir}"
+        if ! ctest --test-dir "${test_dir}" --output-on-failure; then
+            failed=1
+        fi
+    done
+    return "${failed}"
+}
+
 run_producer_alias() {
     local action="${1:-}"
     if [[ -z "${action}" ]]; then
@@ -615,6 +646,10 @@ case "${1:-help}" in
     protocol)
         shift
         run_protocol "$@"
+        ;;
+    test)
+        shift
+        run_tests "$@"
         ;;
     completion)
         shift
