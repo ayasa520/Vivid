@@ -250,14 +250,19 @@ def cmd_bisect(args: argparse.Namespace) -> None:
                  "changes against HEAD, so there is nothing to compare")
 
     tmp = FRAMES_ROOT / "bisect-tmp"
-    old_png, new_png = tmp / "old.png", tmp / "new.png"
+    old_pngs = [tmp / "old-a.png", tmp / "old-b.png"]
+    new_png = tmp / "new.png"
     git("stash", "push", "-m", "goldenframes-bisect")
     stashed = True
     try:
         build()
-        if not run_capture(project, old_png, width=params["width"], height=params["height"],
-                           frames=params["frames"], pointer_x=0.5):
-            raise RuntimeError("old-build capture failed")
+        # Capture the old build twice: a single capture can itself be the nondeterministic
+        # outlier (e.g. a video stream seeding at a different position), and the new-side
+        # retries below can never converge against a bad reference.
+        for old_png in old_pngs:
+            if not run_capture(project, old_png, width=params["width"], height=params["height"],
+                               frames=params["frames"], pointer_x=0.5):
+                raise RuntimeError("old-build capture failed")
     finally:
         if stashed:
             subprocess.run(["git", "-C", str(SUBMODULE), "stash", "pop"], check=True)
@@ -267,19 +272,18 @@ def cmd_bisect(args: argparse.Namespace) -> None:
     # Scale the instrument's noise floor and keep an absolute floor for clock-digit drift
     # across the rebuild gap.
     threshold = max(noise * 3.0, 0.5)
-    # Captures are occasionally nondeterministic (e.g. a video stream seeding at a different
-    # position). Nondeterminism can only add difference, never cancel a real behavior change,
-    # so neutrality is established by the best pairing: retry the new-build capture a couple
-    # of times and take the minimum diff.
+    # Nondeterminism can only add difference, never cancel a real behavior change, so
+    # neutrality is established by the best pairing across retries on both sides.
     best = (float("inf"), float("inf"))
     for attempt in range(3):
         if not run_capture(project, new_png, width=params["width"], height=params["height"],
                            frames=params["frames"], pointer_x=0.5):
             sys.exit("error: new-build capture failed")
-        mean, pct = image_diff(old_png, new_png)
-        best = min(best, (pct, mean))
-        print(f"attempt {attempt + 1}: mean-abs={mean:.3f} pixels>8={pct:.2f}%")
-        if pct <= threshold:
+        for old_png in old_pngs:
+            mean, pct = image_diff(old_png, new_png)
+            best = min(best, (pct, mean))
+        print(f"attempt {attempt + 1}: best mean-abs={best[1]:.3f} pixels>8={best[0]:.2f}%")
+        if best[0] <= threshold:
             break
     pct, mean = best
     verdict = "NEUTRAL" if pct <= threshold else "BEHAVIOR CHANGED"
