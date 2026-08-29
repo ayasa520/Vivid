@@ -70,3 +70,57 @@ set_target_properties(vivid-scene-renderer PROPERTIES
   INSTALL_RPATH "$ORIGIN"
   BUILD_WITH_INSTALL_RPATH TRUE
 )
+
+# Standalone capture library for the headless golden-frame workflow described in
+# .build/investigation/scene-producer-direct-screenshot.md: Python drives the producer C ABI
+# directly, waits for each frame's acquire fence, and reads the host-visible DMA-BUF plane.
+# This is the pixel-level regression check for renderer refactors; parse-level tests cannot
+# see a wrong draw route, but a frame diff can.
+option(VIVID_BUILD_SCENE_CAPTURE "Build the standalone scene producer capture library" ON)
+if(VIVID_BUILD_SCENE_CAPTURE)
+  add_library(VividScene SHARED
+    ../../graphics/vivid_gpu_devices.c
+    vivid_scene_producer.cpp
+  )
+  target_include_directories(VividScene PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}
+      ${CMAKE_CURRENT_SOURCE_DIR}/../../graphics
+      ${CMAKE_CURRENT_SOURCE_DIR}/../../protocol
+      ${CMAKE_CURRENT_SOURCE_DIR}/../../renderer_api
+      ${CMAKE_CURRENT_SOURCE_DIR}/../../renderer_host
+      ${GLIB_INCLUDE_DIRS}
+      ${GIO_INCLUDE_DIRS}
+      ${GDK_PIXBUF_INCLUDE_DIRS}
+      ${JSON_GLIB_INCLUDE_DIRS}
+      ${VULKAN_INCLUDE_DIRS}
+      ${LIBDRM_INCLUDE_DIRS}
+      ${WESCENE_RENDERER_DIR}/src
+      ${WESCENE_RENDERER_DIR}/src/Scene/include
+      ${WESCENE_RENDERER_DIR}/src/Vulkan/include
+      ${WESCENE_RENDERER_DIR}/src/VulkanRender/include
+      ${WESCENE_RENDERER_DIR}/third_party
+  )
+  target_compile_options(VividScene PRIVATE
+    ${GLIB_CFLAGS_OTHER}
+    ${GIO_CFLAGS_OTHER}
+    ${GDK_PIXBUF_CFLAGS_OTHER}
+    ${JSON_GLIB_CFLAGS_OTHER}
+    ${VULKAN_CFLAGS_OTHER}
+    ${LIBDRM_CFLAGS_OTHER}
+  )
+  target_link_libraries(VividScene PRIVATE
+    ${GLIB_LIBRARIES}
+    ${GIO_LIBRARIES}
+    ${GDK_PIXBUF_LIBRARIES}
+    ${JSON_GLIB_LIBRARIES}
+    ${VULKAN_LIBRARIES}
+    ${LIBDRM_LIBRARIES}
+    wescene-renderer
+  )
+  set_target_properties(VividScene PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/out
+    OUTPUT_NAME VividScene
+    INSTALL_RPATH "$ORIGIN"
+    BUILD_WITH_INSTALL_RPATH TRUE
+  )
+endif()
