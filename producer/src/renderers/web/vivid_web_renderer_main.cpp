@@ -1,5 +1,6 @@
 #include "vivid_web_producer.h"
 
+#include "vivid_renderer_frame_pump.h"
 #include "vivid_renderer_host.h"
 #include "vivid_renderer_worker_common.h"
 
@@ -20,8 +21,8 @@ struct WebWorker {
     GThread* frame_thread { nullptr };
     GMutex backend_lock;
     GMutex state_lock;
+    VividRendererFramePump pump;
     bool locks_initialized { false };
-    bool frame_thread_stopping { false };
     bool playing { true };
     bool muted { false };
     double volume { 1.0 };
@@ -30,6 +31,8 @@ struct WebWorker {
     int fps { 30 };
     guint16 remote_debugging_port { 0 };
 };
+
+void web_frame_event(gpointer user_data);
 
 bool json_int_member(JsonObject* object, const char* name, int& value)
 {
@@ -209,9 +212,10 @@ gboolean web_initialize(VividRendererHost* host,
     auto* worker = static_cast<WebWorker*>(backend_data);
     g_mutex_init(&worker->backend_lock);
     g_mutex_init(&worker->state_lock);
-    worker->locks_initialized = true;
     worker->playing =
         (init->playback_flags & VIVID_RENDERER_PLAYBACK_FLAG_PLAYING) != 0;
+    vivid_renderer_frame_pump_init(&worker->pump, worker->playing);
+    worker->locks_initialized = true;
     worker->muted =
         (init->playback_flags & VIVID_RENDERER_PLAYBACK_FLAG_MUTED) != 0;
     worker->volume = std::clamp(static_cast<double>(init->volume), 0.0, 1.0);
@@ -241,6 +245,9 @@ gboolean web_initialize(VividRendererHost* host,
     const VividRendererReleaseGate gate =
         vivid_renderer_worker_common_release_gate(&worker->common);
     vivid_web_producer_set_release_gate(worker->producer, &gate);
+    vivid_web_producer_set_frame_callback(worker->producer,
+                                          web_frame_event,
+                                          worker);
     if (!configure_web(worker, error))
         return FALSE;
     return publish_web_caps(worker, request_id, error);
@@ -330,15 +337,22 @@ bool convert_web_pool(const VividWebProducerBufferSet& source,
     return true;
 }
 
+void web_frame_event(gpointer user_data)
+{
+    auto* worker = static_cast<WebWorker*>(user_data);
+    vivid_renderer_frame_pump_notify(&worker->pump);
+}
+
 gpointer web_frame_thread(gpointer user_data)
 {
     auto* worker = static_cast<WebWorker*>(user_data);
     for (;;) {
         g_mutex_lock(&worker->state_lock);
-        const bool stopping = worker->frame_thread_stopping;
         const int fps = worker->fps;
         g_mutex_unlock(&worker->state_lock);
-        if (stopping)
+        const gint64 interval_usec = G_USEC_PER_SEC /
+            static_cast<gint64>(std::max(fps, 1));
+        if (!vivid_renderer_frame_pump_wait(&worker->pump, interval_usec))
             break;
         VividWebProducerFrame frame {};
         frame.acquire_sync_fd = -1;
@@ -355,21 +369,18 @@ gpointer web_frame_thread(gpointer user_data)
                     &error)) {
                 g_warning("VividWebRenderer: frame publish stopped: %s",
                           error->message);
-                g_mutex_lock(&worker->state_lock);
-                worker->frame_thread_stopping = true;
-                g_mutex_unlock(&worker->state_lock);
+                vivid_renderer_frame_pump_stop(&worker->pump);
                 break;
             }
         }
-        g_usleep(G_USEC_PER_SEC / static_cast<guint64>(std::max(fps, 1)));
     }
     return nullptr;
 }
 
 void stop_frame_thread(WebWorker* worker)
 {
+    vivid_renderer_frame_pump_stop(&worker->pump);
     g_mutex_lock(&worker->state_lock);
-    worker->frame_thread_stopping = true;
     GThread* thread = worker->frame_thread;
     worker->frame_thread = nullptr;
     g_mutex_unlock(&worker->state_lock);
@@ -409,8 +420,8 @@ gboolean web_negotiate(VividRendererHost* host,
                                                    error)) {
         return FALSE;
     }
+    vivid_renderer_frame_pump_start(&worker->pump);
     g_mutex_lock(&worker->state_lock);
-    worker->frame_thread_stopping = false;
     worker->frame_thread = g_thread_new("vivid-web-frame", web_frame_thread, worker);
     g_mutex_unlock(&worker->state_lock);
     g_mutex_lock(&worker->backend_lock);
@@ -437,6 +448,7 @@ gboolean web_runtime(VividRendererHost* host,
         if (!apply_settings_json(worker, json, false, true, error) ||
             !configure_web(worker, error))
             return FALSE;
+        vivid_renderer_frame_pump_notify(&worker->pump);
         break;
     }
     case VIVID_RENDERER_MSG_SET_PLAYBACK: {
@@ -459,6 +471,7 @@ gboolean web_runtime(VividRendererHost* host,
         worker->volume = volume;
         if (!configure_web(worker, error))
             return FALSE;
+        vivid_renderer_frame_pump_set_playing(&worker->pump, worker->playing);
         break;
     }
     case VIVID_RENDERER_MSG_SET_MEDIA_STATE: {
@@ -601,6 +614,7 @@ int main(int argc, char** argv)
     const int result = vivid_renderer_host_run(argc, argv, &backend, &worker);
     web_shutdown(nullptr, &worker);
     if (worker.locks_initialized) {
+        vivid_renderer_frame_pump_clear(&worker.pump);
         g_mutex_clear(&worker.state_lock);
         g_mutex_clear(&worker.backend_lock);
     }

@@ -24,6 +24,7 @@ add_subdirectory(${WESCENE_RENDERER_DIR}
 
 add_executable(vivid-scene-renderer
   ../../graphics/vivid_gpu_devices.c
+  ../../renderer_host/vivid_renderer_frame_pump.c
   ../../renderer_host/vivid_renderer_host.c
   ../../renderer_host/vivid_renderer_release_timeline.c
   ../../renderer_host/vivid_renderer_transport.c

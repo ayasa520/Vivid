@@ -124,6 +124,16 @@ void vivid_scene_producer_set_audio_samples(VividSceneProducer* self,
                                              GVariant*            audio_samples);
 void vivid_scene_producer_set_release_gate(VividSceneProducer*          self,
                                             const VividRendererReleaseGate* gate);
+
+/*
+ * Invoked from the scene render thread whenever a new frame becomes visible
+ * to next_frame(). The callback must only wake the relay thread and return.
+ */
+typedef void (*VividSceneProducerFrameCallback)(gpointer user_data);
+void vivid_scene_producer_set_frame_callback(
+    VividSceneProducer*             self,
+    VividSceneProducerFrameCallback callback,
+    gpointer                        user_data);
 void vivid_scene_producer_request_frame(VividSceneProducer* self,
                                           const gchar*         reason);
 

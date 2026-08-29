@@ -66,6 +66,7 @@ add_executable(vivid-web-renderer
   vivid_web_producer.cpp
   vivid_web_vulkan_route.cpp
   ../../graphics/vivid_gpu_devices.c
+  ../../renderer_host/vivid_renderer_frame_pump.c
   ../../renderer_host/vivid_renderer_host.c
   ../../renderer_host/vivid_renderer_release_timeline.c
   ../../renderer_host/vivid_renderer_transport.c

@@ -104,6 +104,17 @@ void vivid_video_producer_set_playing(VividVideoProducer* self, gboolean playing
 void vivid_video_producer_set_looping(VividVideoProducer* self, gboolean looping);
 void vivid_video_producer_set_release_gate(VividVideoProducer*          self,
                                             const VividRendererReleaseGate* gate);
+
+/*
+ * Invoked from GStreamer streaming threads whenever the appsink queued a new
+ * decoded sample (or the paused preroll frame). The callback must only wake
+ * the relay thread and return; the sample is pulled later by next_frame().
+ */
+typedef void (*VividVideoProducerFrameCallback)(gpointer user_data);
+void vivid_video_producer_set_frame_callback(
+    VividVideoProducer*             self,
+    VividVideoProducerFrameCallback callback,
+    gpointer                        user_data);
 void vivid_video_producer_request_frame(VividVideoProducer* self,
                                          const gchar*         reason);
 

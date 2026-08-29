@@ -1,5 +1,6 @@
 #include "vivid_scene_producer.h"
 
+#include "vivid_renderer_frame_pump.h"
 #include "vivid_renderer_host.h"
 #include "vivid_renderer_worker_common.h"
 
@@ -20,8 +21,8 @@ struct SceneWorker {
     GThread* frame_thread { nullptr };
     GMutex backend_lock;
     GMutex state_lock;
+    VividRendererFramePump pump;
     bool locks_initialized { false };
-    bool frame_thread_stopping { false };
     bool playing { true };
     bool muted { false };
     double volume { 1.0 };
@@ -35,6 +36,8 @@ struct SceneWorker {
     int gfx_antialiasing { 1 };
     int gfx_texture_resolution { 0 };
 };
+
+void scene_frame_event(gpointer user_data);
 
 bool json_int_member(JsonObject* object, const char* name, int& value)
 {
@@ -242,9 +245,10 @@ gboolean scene_initialize(VividRendererHost* host,
     auto* worker = static_cast<SceneWorker*>(backend_data);
     g_mutex_init(&worker->backend_lock);
     g_mutex_init(&worker->state_lock);
-    worker->locks_initialized = true;
     worker->playing =
         (init->playback_flags & VIVID_RENDERER_PLAYBACK_FLAG_PLAYING) != 0;
+    vivid_renderer_frame_pump_init(&worker->pump, worker->playing);
+    worker->locks_initialized = true;
     worker->muted =
         (init->playback_flags & VIVID_RENDERER_PLAYBACK_FLAG_MUTED) != 0;
     worker->volume = std::clamp(static_cast<double>(init->volume), 0.0, 1.0);
@@ -271,6 +275,9 @@ gboolean scene_initialize(VividRendererHost* host,
     const VividRendererReleaseGate gate =
         vivid_renderer_worker_common_release_gate(&worker->common);
     vivid_scene_producer_set_release_gate(worker->producer, &gate);
+    vivid_scene_producer_set_frame_callback(worker->producer,
+                                            scene_frame_event,
+                                            worker);
     if (!configure_scene(worker, error))
         return FALSE;
     return publish_scene_caps(worker, request_id, error);
@@ -364,15 +371,22 @@ bool convert_scene_pool(const VividSceneProducerBufferSet& source,
     return true;
 }
 
+void scene_frame_event(gpointer user_data)
+{
+    auto* worker = static_cast<SceneWorker*>(user_data);
+    vivid_renderer_frame_pump_notify(&worker->pump);
+}
+
 gpointer scene_frame_thread(gpointer user_data)
 {
     auto* worker = static_cast<SceneWorker*>(user_data);
     for (;;) {
         g_mutex_lock(&worker->state_lock);
-        const bool stopping = worker->frame_thread_stopping;
         const int fps = worker->fps;
         g_mutex_unlock(&worker->state_lock);
-        if (stopping)
+        const gint64 interval_usec = G_USEC_PER_SEC /
+            static_cast<gint64>(std::max(fps, 1));
+        if (!vivid_renderer_frame_pump_wait(&worker->pump, interval_usec))
             break;
 
         VividSceneProducerFrame frame {};
@@ -391,23 +405,18 @@ gpointer scene_frame_thread(gpointer user_data)
                     &error)) {
                 g_warning("VividSceneRenderer: frame publish stopped: %s",
                           error->message);
-                g_mutex_lock(&worker->state_lock);
-                worker->frame_thread_stopping = true;
-                g_mutex_unlock(&worker->state_lock);
+                vivid_renderer_frame_pump_stop(&worker->pump);
                 break;
             }
         }
-        const guint64 interval_usec = G_USEC_PER_SEC /
-            static_cast<guint64>(std::max(fps, 1));
-        g_usleep(interval_usec);
     }
     return nullptr;
 }
 
 void stop_frame_thread(SceneWorker* worker)
 {
+    vivid_renderer_frame_pump_stop(&worker->pump);
     g_mutex_lock(&worker->state_lock);
-    worker->frame_thread_stopping = true;
     GThread* thread = worker->frame_thread;
     worker->frame_thread = nullptr;
     g_mutex_unlock(&worker->state_lock);
@@ -447,8 +456,8 @@ gboolean scene_negotiate(VividRendererHost* host,
                                                    error)) {
         return FALSE;
     }
+    vivid_renderer_frame_pump_start(&worker->pump);
     g_mutex_lock(&worker->state_lock);
-    worker->frame_thread_stopping = false;
     worker->frame_thread =
         g_thread_new("vivid-scene-ipc", scene_frame_thread, worker);
     g_mutex_unlock(&worker->state_lock);
@@ -483,6 +492,11 @@ gboolean scene_runtime(VividRendererHost* host,
         if (!apply_settings_json(worker, json, true, error) ||
             !configure_scene(worker, error))
             return FALSE;
+        /*
+         * A reconfigure can render a one-shot frame even while playback is
+         * paused; wake the relay so that frame is published promptly.
+         */
+        vivid_renderer_frame_pump_notify(&worker->pump);
         break;
     }
     case VIVID_RENDERER_MSG_SET_PLAYBACK: {
@@ -505,6 +519,7 @@ gboolean scene_runtime(VividRendererHost* host,
         worker->volume = volume;
         if (!configure_scene(worker, error))
             return FALSE;
+        vivid_renderer_frame_pump_set_playing(&worker->pump, worker->playing);
         break;
     }
     case VIVID_RENDERER_MSG_SET_MEDIA_STATE: {
@@ -636,6 +651,7 @@ int main(int argc, char** argv)
     const int result = vivid_renderer_host_run(argc, argv, &backend, &worker);
     scene_shutdown(nullptr, &worker);
     if (worker.locks_initialized) {
+        vivid_renderer_frame_pump_clear(&worker.pump);
         g_mutex_clear(&worker.state_lock);
         g_mutex_clear(&worker.backend_lock);
     }

@@ -14,6 +14,7 @@
 #include <gst/app/gstappsink.h>
 #include <gst/gst.h>
 #include <gst/video/video.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cmath>
@@ -1631,6 +1632,8 @@ struct _VividVideoProducer
     VividVideoCudaExternalBuffer cuda_rgba_buffer;
     CUmodule cuda_module {};
     CUfunction cuda_kernel {};
+    /* Acquire SYNC_FD of the most recent async upload, owned until published. */
+    gint pending_acquire_fd { -1 };
 
     guint32 width { 0 };
     guint32 height { 0 };
@@ -1640,6 +1643,8 @@ struct _VividVideoProducer
     bool release_gate_valid { false };
     bool vulkan_ready { false };
     bool logged_first_upload { false };
+    VividVideoProducerFrameCallback frame_callback { nullptr };
+    gpointer frame_callback_user_data { nullptr };
 };
 
 namespace
@@ -1715,6 +1720,10 @@ reset_vulkan(VividVideoProducer* self)
 
     free_cuda_kernel(self);
     self->cuda_rgba_buffer.reset();
+    if (self->pending_acquire_fd >= 0) {
+        close(self->pending_acquire_fd);
+        self->pending_acquire_fd = -1;
+    }
     self->vulkan.reset();
     self->export_request = {};
     self->vulkan_ready = false;
@@ -1899,6 +1908,34 @@ pull_paused_preroll_sample(VividVideoProducer* self, GstClockTime timeout)
     return sample;
 }
 
+void
+video_emit_frame_event(VividVideoProducer* self)
+{
+    /*
+     * frame_callback is installed once by the worker before the pipeline is
+     * created and never changes afterwards, so reading it from GStreamer
+     * streaming threads without a lock is safe.
+     */
+    if (self && self->frame_callback)
+        self->frame_callback(self->frame_callback_user_data);
+}
+
+GstFlowReturn
+appsink_notify_sample(GstAppSink* appsink, gpointer user_data)
+{
+    (void)appsink;
+    video_emit_frame_event(static_cast<VividVideoProducer*>(user_data));
+    return GST_FLOW_OK;
+}
+
+GstFlowReturn
+appsink_notify_preroll(GstAppSink* appsink, gpointer user_data)
+{
+    (void)appsink;
+    video_emit_frame_event(static_cast<VividVideoProducer*>(user_data));
+    return GST_FLOW_OK;
+}
+
 bool
 ensure_pipeline(VividVideoProducer* self)
 {
@@ -2046,6 +2083,20 @@ ensure_pipeline(VividVideoProducer* self)
         return false;
     }
 
+    /*
+     * Do not pull here: the relay thread drains the queue to the latest sample
+     * in next_frame(). These callbacks only wake it, so publish latency tracks
+     * the decoder clock instead of the fixed poll cadence, and a paused
+     * preroll frame wakes the (otherwise sleeping) relay for the rebind path.
+     */
+    GstAppSinkCallbacks sink_callbacks {};
+    sink_callbacks.new_preroll = appsink_notify_preroll;
+    sink_callbacks.new_sample = appsink_notify_sample;
+    gst_app_sink_set_callbacks(GST_APP_SINK(self->appsink),
+                               &sink_callbacks,
+                               self,
+                               nullptr);
+
     apply_audio_state(self);
     apply_playback_state(self);
 
@@ -2181,6 +2232,8 @@ ensure_cuda_buffer(VividVideoProducer* self, GstCudaContext* cuda_context)
         return false;
 
     self->cuda_rgba_buffer = std::move(buffer.value());
+    /* Best effort: failure keeps the synchronous upload path. */
+    (void)self->vulkan.ensure_cuda_sync_interop(cuda_context);
     g_message("VividVideoProducer: created CUDA/Vulkan shared RGBA transfer buffer bytes=%llu",
               static_cast<unsigned long long>(rgba_size));
     return true;
@@ -2374,6 +2427,16 @@ upload_sample(VividVideoProducer* self, GstSample* sample)
     };
 
     bool pushed = gst_cuda_context_push(cuda_context);
+    /*
+     * Async ordering (see VividVideoCudaSyncInterop): before the kernel
+     * rewrites the shared transfer buffer, the stream waits for the previous
+     * Vulkan copy out of it; after the kernel, the stream signals kernel_done
+     * so the Vulkan submit can wait on the GPU instead of the CPU blocking in
+     * CuStreamSynchronize. Any interop failure invalidates the interop and
+     * this frame (and all following) take the synchronous path.
+     */
+    if (pushed && self->vulkan.cuda_sync_interop_valid())
+        (void)self->vulkan.cuda_stream_wait_copy_done(stream);
     CUresult cuda_result = pushed
         ? CuLaunchKernel(self->cuda_kernel,
                          (self->width + 15u) / 16u,
@@ -2387,7 +2450,11 @@ upload_sample(VividVideoProducer* self, GstSample* sample)
                          params,
                          nullptr)
         : CUDA_ERROR_UNKNOWN;
-    if (cuda_result == CUDA_SUCCESS)
+    bool kernel_signaled = false;
+    if (cuda_result == CUDA_SUCCESS && pushed &&
+        self->vulkan.cuda_sync_interop_valid())
+        kernel_signaled = self->vulkan.cuda_stream_signal_kernel_done(stream);
+    if (cuda_result == CUDA_SUCCESS && !kernel_signaled)
         cuda_result = stream ? CuStreamSynchronize(stream) : CuCtxSynchronize();
     if (pushed) {
         CUcontext popped {};
@@ -2401,10 +2468,14 @@ upload_sample(VividVideoProducer* self, GstSample* sample)
         return false;
     }
 
-    if (!self->vulkan.submit_rgba_buffer(self->cuda_rgba_buffer)) {
+    int acquire_fd = -1;
+    if (!self->vulkan.submit_rgba_buffer(self->cuda_rgba_buffer, &acquire_fd)) {
         g_warning("VividVideoProducer: failed to submit RGBA frame into DMA-BUF ring");
         return false;
     }
+    if (self->pending_acquire_fd >= 0)
+        close(self->pending_acquire_fd);
+    self->pending_acquire_fd = acquire_fd;
 
     self->uploaded_samples++;
     if (!self->logged_first_upload) {
@@ -2745,6 +2816,17 @@ vivid_video_producer_set_release_gate(VividVideoProducer*          self,
     }
 }
 
+void
+vivid_video_producer_set_frame_callback(VividVideoProducer*             self,
+                                        VividVideoProducerFrameCallback callback,
+                                        gpointer                        user_data)
+{
+    g_return_if_fail(self != nullptr);
+
+    self->frame_callback = callback;
+    self->frame_callback_user_data = user_data;
+}
+
 static gboolean
 vivid_video_producer_prepare_buffers_internal(
     VividVideoProducer*                    self,
@@ -2970,6 +3052,12 @@ vivid_video_producer_next_frame(VividVideoProducer*      self,
     self->frame_route.write_ready_frame(frame->index,
                                         static_cast<gint32>(frame->index),
                                         *out_frame);
+    /*
+     * Async CUDA uploads publish a real acquire fence; the synchronous paths
+     * leave -1 and the worker substitutes a pre-signaled fence as before.
+     */
+    out_frame->acquire_sync_fd = self->pending_acquire_fd;
+    self->pending_acquire_fd = -1;
     return TRUE;
 }
 

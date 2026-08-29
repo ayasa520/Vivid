@@ -132,6 +132,41 @@ struct VividVideoCudaExternalBuffer
     void reset();
 };
 
+/*
+ * GPU-side ordering between the CUDA NV12->RGBA kernel and the Vulkan
+ * buffer->image copy, replacing the historical CuStreamSynchronize +
+ * vkQueueWaitIdle CPU stalls:
+ *
+ *   kernel_done  timeline: CUDA signals value N after kernel N,
+ *                          Vulkan submit N waits value N.
+ *   copy_done    timeline: Vulkan submit N signals value N,
+ *                          the CUDA stream waits value N before kernel N+1
+ *                          rewrites the shared transfer buffer.
+ *
+ * Both semaphores are Vulkan-created, exported as OPAQUE_FD and imported into
+ * the GStreamer CUDA context. Any failure permanently invalidates the interop
+ * and the producer falls back to the fully synchronous upload path.
+ */
+struct VividVideoCudaSyncInterop
+{
+    VkDevice device { VK_NULL_HANDLE };
+    VkSemaphore kernel_done { VK_NULL_HANDLE };
+    VkSemaphore copy_done { VK_NULL_HANDLE };
+    CUexternalSemaphore cuda_kernel_done {};
+    CUexternalSemaphore cuda_copy_done {};
+    GstCudaContext* cuda_context { nullptr };
+    uint64_t kernel_value { 0 };
+    uint64_t copy_value { 0 };
+    bool valid { false };
+
+    VividVideoCudaSyncInterop() = default;
+    VividVideoCudaSyncInterop(const VividVideoCudaSyncInterop&) = delete;
+    VividVideoCudaSyncInterop& operator=(const VividVideoCudaSyncInterop&) = delete;
+    ~VividVideoCudaSyncInterop();
+
+    void reset();
+};
+
 struct VividVideoVulkanImportedImage
 {
     VkDevice device { VK_NULL_HANDLE };
@@ -163,9 +198,22 @@ struct VividVideoVulkanBackend
     VkCommandPool command_pool { VK_NULL_HANDLE };
     VkCommandBuffer command_buffer { VK_NULL_HANDLE };
     PFN_vkGetMemoryFdKHR get_memory_fd { nullptr };
+    PFN_vkGetSemaphoreFdKHR get_semaphore_fd { nullptr };
     PFN_vkGetImageDrmFormatModifierPropertiesEXT get_image_drm_format_modifier_properties {
         nullptr
     };
+    /*
+     * Async CUDA upload path: one command buffer + fence per export slot so the
+     * CPU only ever waits on the submission from a full ring rotation ago, and
+     * one exportable binary semaphore per slot whose SYNC_FD becomes the frame's
+     * explicit acquire fence for the display transport.
+     */
+    bool async_cuda_capable { false };
+    std::array<VkCommandBuffer, VIVID_VIDEO_VULKAN_EXPORT_BUFFER_COUNT> slot_command_buffers {};
+    std::array<VkFence, VIVID_VIDEO_VULKAN_EXPORT_BUFFER_COUNT> slot_fences {};
+    std::array<VkSemaphore, VIVID_VIDEO_VULKAN_EXPORT_BUFFER_COUNT> slot_acquire_semaphores {};
+    std::array<bool, VIVID_VIDEO_VULKAN_EXPORT_BUFFER_COUNT> slot_fence_in_flight {};
+    VividVideoCudaSyncInterop cuda_sync;
     std::array<VividVideoVulkanExportImage, VIVID_VIDEO_VULKAN_EXPORT_BUFFER_COUNT> images {};
     VkFormat target_format { VK_FORMAT_R8G8B8A8_UNORM };
     guint32 target_fourcc { DRM_FORMAT_ABGR8888 };
@@ -210,7 +258,25 @@ struct VividVideoVulkanBackend
 
     std::optional<VividVideoCudaExternalBuffer>
     create_cuda_external_transfer_buffer(guint64 size, GstCudaContext* cuda_context);
-    bool submit_rgba_buffer(const VividVideoCudaExternalBuffer& rgba_buffer);
+
+    /*
+     * Async CUDA/Vulkan ordering helpers. ensure_cuda_sync_interop() may fail
+     * (old driver, missing extension); everything then degrades to the
+     * synchronous CuStreamSynchronize + vkQueueWaitIdle path. The stream
+     * helpers must be called with the GStreamer CUDA context pushed.
+     */
+    bool ensure_cuda_sync_interop(GstCudaContext* cuda_context);
+    bool cuda_sync_interop_valid() const { return cuda_sync.valid; }
+    bool cuda_stream_wait_copy_done(CUstream stream);
+    bool cuda_stream_signal_kernel_done(CUstream stream);
+
+    /*
+     * On the async path *out_acquire_fd receives a SYNC_FD that signals when
+     * the copy into the export slot completes; on the synchronous fallback it
+     * stays -1 (the worker publishes a pre-signaled fence as before).
+     */
+    bool submit_rgba_buffer(const VividVideoCudaExternalBuffer& rgba_buffer,
+                            int* out_acquire_fd);
 
     std::optional<VividVideoVulkanImportedImage>
     import_va_dmabuf_rgba_image(GstCaps* caps, GstBuffer* buffer);

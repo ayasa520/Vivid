@@ -128,6 +128,16 @@ void vivid_web_producer_set_audio_samples(VividWebProducer* self,
                                            GVariant*          audio_samples);
 void vivid_web_producer_set_release_gate(VividWebProducer*          self,
                                           const VividRendererReleaseGate* gate);
+
+/*
+ * Invoked from CEF threads after an accelerated paint landed in the export
+ * ring. The callback must only wake the relay thread and return.
+ */
+typedef void (*VividWebProducerFrameCallback)(gpointer user_data);
+void vivid_web_producer_set_frame_callback(
+    VividWebProducer*             self,
+    VividWebProducerFrameCallback callback,
+    gpointer                      user_data);
 void vivid_web_producer_request_frame(VividWebProducer* self,
                                        const gchar*       reason);
 

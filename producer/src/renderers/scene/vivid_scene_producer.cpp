@@ -156,6 +156,8 @@ struct _VividSceneProducer
     ProducerFrameRoute frame_route { "VividSceneProducer" };
     VividRendererReleaseGate release_gate {};
     bool release_gate_valid { false };
+    VividSceneProducerFrameCallback frame_callback { nullptr };
+    gpointer frame_callback_user_data { nullptr };
     bool logged_waiting_for_frame { false };
     guint64 missed_frame_count { 0 };
     gint64 last_missed_frame_summary_usec { 0 };
@@ -349,6 +351,22 @@ void scene_apply_release_gate_callback(VividSceneProducer* self)
     });
 }
 
+void scene_apply_frame_ready_callback(VividSceneProducer* self)
+{
+    if (!self || !self->scene)
+        return;
+
+    if (!self->frame_callback) {
+        self->scene->setOffscreenFrameReadyCallback({});
+        return;
+    }
+
+    const VividSceneProducerFrameCallback callback = self->frame_callback;
+    gpointer user_data = self->frame_callback_user_data;
+    self->scene->setOffscreenFrameReadyCallback(
+        [callback, user_data](std::uint32_t) { callback(user_data); });
+}
+
 void scene_note_missing_frame(VividSceneProducer* self)
 {
     if (!self)
@@ -517,6 +535,7 @@ vivid_scene_producer_configure(VividSceneProducer* self,
                                 self->project))
         return FALSE;
     scene_apply_release_gate_callback(self);
+    scene_apply_frame_ready_callback(self);
 
     if (project_changed || !self->scene_ready) {
         configure_scene_wallpaper(*self->scene,
@@ -672,6 +691,18 @@ vivid_scene_producer_set_release_gate(VividSceneProducer*          self,
         self->release_gate_valid = false;
     }
     scene_apply_release_gate_callback(self);
+}
+
+void
+vivid_scene_producer_set_frame_callback(VividSceneProducer*             self,
+                                        VividSceneProducerFrameCallback callback,
+                                        gpointer                        user_data)
+{
+    g_return_if_fail(self != nullptr);
+
+    self->frame_callback = callback;
+    self->frame_callback_user_data = user_data;
+    scene_apply_frame_ready_callback(self);
 }
 
 gboolean
@@ -1190,6 +1221,14 @@ vivid_scene_producer_next_frame(VividSceneProducer*      self,
     self->frame_route.write_ready_frame(static_cast<guint32>(frame->id()),
                                         frame->id(),
                                         *out_frame);
+    /*
+     * Pipelined offscreen rendering publishes the slot before its GPU work has
+     * completed and stashes the exported acquire sync-file with the slot. When
+     * the renderer fell back to synchronous fence waits this stays -1 and the
+     * worker substitutes a pre-signaled fence.
+     */
+    out_frame->acquire_sync_fd = self->scene->exSwapchain()->takeAcquireFd(
+        static_cast<std::size_t>(frame->id()));
     return TRUE;
 }
 

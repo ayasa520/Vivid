@@ -22,6 +22,7 @@ pkg_check_modules(JSON_GLIB REQUIRED json-glib-1.0)
 
 add_executable(vivid-video-renderer
   ../../graphics/vivid_gpu_devices.c
+  ../../renderer_host/vivid_renderer_frame_pump.c
   ../../renderer_host/vivid_renderer_host.c
   ../../renderer_host/vivid_renderer_release_timeline.c
   ../../renderer_host/vivid_renderer_transport.c

@@ -2356,6 +2356,8 @@ struct _VividWebProducer
     ProducerFrameRoute frame_route { "VividWebProducer" };
     VividRendererReleaseGate release_gate {};
     bool release_gate_valid { false };
+    VividWebProducerFrameCallback frame_callback { nullptr };
+    gpointer frame_callback_user_data { nullptr };
 
     CefRefPtr<VividWebClient> client;
     bool shared_textures { false };
@@ -2699,7 +2701,13 @@ producer_handle_accelerated_paint(_VividWebProducer* self,
                   src_width,
                   src_height);
     }
+    const VividWebProducerFrameCallback frame_callback = self->frame_callback;
+    gpointer frame_callback_user_data = self->frame_callback_user_data;
     g_mutex_unlock(&self->lock);
+
+    /* Wake the relay thread outside self->lock; it must never invert into it. */
+    if (frame_callback)
+        frame_callback(frame_callback_user_data);
 }
 
 void
@@ -3262,6 +3270,19 @@ vivid_web_producer_set_release_gate(VividWebProducer*          self,
         self->release_gate = {};
         self->release_gate_valid = false;
     }
+    g_mutex_unlock(&self->lock);
+}
+
+void
+vivid_web_producer_set_frame_callback(VividWebProducer*             self,
+                                      VividWebProducerFrameCallback callback,
+                                      gpointer                      user_data)
+{
+    g_return_if_fail(self != NULL);
+
+    g_mutex_lock(&self->lock);
+    self->frame_callback = callback;
+    self->frame_callback_user_data = user_data;
     g_mutex_unlock(&self->lock);
 }
 

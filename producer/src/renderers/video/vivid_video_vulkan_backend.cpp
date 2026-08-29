@@ -39,6 +39,20 @@ CUresult CUDAAPI CuDestroyExternalMemory(CUexternalMemory extMem);
 CUresult CUDAAPI CuExternalMemoryGetMappedBuffer(CUdeviceptr* devPtr,
                                                  CUexternalMemory extMem,
                                                  const CUDA_EXTERNAL_MEMORY_BUFFER_DESC* bufferDesc);
+CUresult CUDAAPI CuImportExternalSemaphore(
+    CUexternalSemaphore* extSem_out,
+    const CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC* semHandleDesc);
+CUresult CUDAAPI CuDestroyExternalSemaphore(CUexternalSemaphore extSem);
+CUresult CUDAAPI CuSignalExternalSemaphoresAsync(
+    const CUexternalSemaphore* extSemArray,
+    const CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS* paramsArray,
+    unsigned int numExtSems,
+    CUstream stream);
+CUresult CUDAAPI CuWaitExternalSemaphoresAsync(
+    const CUexternalSemaphore* extSemArray,
+    const CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS* paramsArray,
+    unsigned int numExtSems,
+    CUstream stream);
 }
 
 namespace
@@ -573,8 +587,22 @@ VividVideoVulkanBackend::reset()
 {
     if (device != VK_NULL_HANDLE)
         (void)vkDeviceWaitIdle(device);
+    cuda_sync.reset();
     for (auto& image : images)
         image.reset();
+    for (auto& fence : slot_fences) {
+        if (fence != VK_NULL_HANDLE && device != VK_NULL_HANDLE)
+            vkDestroyFence(device, fence, nullptr);
+        fence = VK_NULL_HANDLE;
+    }
+    for (auto& semaphore : slot_acquire_semaphores) {
+        if (semaphore != VK_NULL_HANDLE && device != VK_NULL_HANDLE)
+            vkDestroySemaphore(device, semaphore, nullptr);
+        semaphore = VK_NULL_HANDLE;
+    }
+    slot_command_buffers = {};
+    slot_fence_in_flight = {};
+    async_cuda_capable = false;
     if (command_pool != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
         vkDestroyCommandPool(device, command_pool, nullptr);
         command_pool = VK_NULL_HANDLE;
@@ -592,6 +620,7 @@ VividVideoVulkanBackend::reset()
     graphics_queue = VK_NULL_HANDLE;
     graphics_queue_family = 0;
     get_memory_fd = nullptr;
+    get_semaphore_fd = nullptr;
     get_image_drm_format_modifier_properties = nullptr;
     memory_properties = {};
     target_format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -1020,6 +1049,81 @@ choose_physical_device(VividVideoVulkanBackend& backend,
     return true;
 }
 
+/*
+ * The async CUDA upload needs three capabilities on top of the export ring:
+ * timeline semaphores, OPAQUE_FD export of those timelines into CUDA, and
+ * SYNC_FD export of a binary semaphore as the per-frame acquire fence. Probe
+ * them up front; a device missing any of them keeps the synchronous path.
+ */
+bool
+query_async_cuda_capability(VividVideoVulkanBackend& backend,
+                            const std::vector<VkExtensionProperties>& available_extensions)
+{
+    if (!has_extension(available_extensions, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME) ||
+        !has_extension(available_extensions, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME))
+        return false;
+
+    VkPhysicalDeviceTimelineSemaphoreFeatures timeline_features {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
+        .pNext = nullptr,
+        .timelineSemaphore = VK_FALSE,
+    };
+    VkPhysicalDeviceFeatures2 features {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        .pNext = &timeline_features,
+        .features = {},
+    };
+    vkGetPhysicalDeviceFeatures2(backend.physical_device, &features);
+    if (timeline_features.timelineSemaphore != VK_TRUE)
+        return false;
+
+    VkSemaphoreTypeCreateInfo timeline_type {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+        .pNext = nullptr,
+        .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+        .initialValue = 0,
+    };
+    VkPhysicalDeviceExternalSemaphoreInfo timeline_info {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO,
+        .pNext = &timeline_type,
+        .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
+    };
+    VkExternalSemaphoreProperties timeline_props {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES,
+        .pNext = nullptr,
+        .exportFromImportedHandleTypes = 0,
+        .compatibleHandleTypes = 0,
+        .externalSemaphoreFeatures = 0,
+    };
+    vkGetPhysicalDeviceExternalSemaphoreProperties(backend.physical_device,
+                                                   &timeline_info,
+                                                   &timeline_props);
+    if ((timeline_props.externalSemaphoreFeatures &
+         VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT) == 0)
+        return false;
+
+    VkPhysicalDeviceExternalSemaphoreInfo binary_info {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO,
+        .pNext = nullptr,
+        .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+    };
+    VkExternalSemaphoreProperties binary_props {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES,
+        .pNext = nullptr,
+        .exportFromImportedHandleTypes = 0,
+        .compatibleHandleTypes = 0,
+        .externalSemaphoreFeatures = 0,
+    };
+    vkGetPhysicalDeviceExternalSemaphoreProperties(backend.physical_device,
+                                                   &binary_info,
+                                                   &binary_props);
+    if ((binary_props.externalSemaphoreFeatures &
+         VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT) == 0)
+        return false;
+
+    return true;
+}
+
 bool
 create_vulkan_device(VividVideoVulkanBackend& backend)
 {
@@ -1035,6 +1139,17 @@ create_vulkan_device(VividVideoVulkanBackend& backend)
     if (has_extension(available_extensions, VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME))
         enabled_extensions.push_back(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
 
+    backend.async_cuda_capable = query_async_cuda_capability(backend, available_extensions);
+    VkPhysicalDeviceTimelineSemaphoreFeatures timeline_features {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
+        .pNext = nullptr,
+        .timelineSemaphore = VK_TRUE,
+    };
+    if (backend.async_cuda_capable) {
+        enabled_extensions.push_back(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
+        enabled_extensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+    }
+
     const float queue_priority = 1.0f;
     VkDeviceQueueCreateInfo queue_info {
         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -1046,7 +1161,7 @@ create_vulkan_device(VividVideoVulkanBackend& backend)
     };
     VkDeviceCreateInfo create_info {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        .pNext = nullptr,
+        .pNext = backend.async_cuda_capable ? &timeline_features : nullptr,
         .flags = 0,
         .queueCreateInfoCount = 1,
         .pQueueCreateInfos = &queue_info,
@@ -1078,6 +1193,13 @@ create_vulkan_device(VividVideoVulkanBackend& backend)
                   backend.device_name.c_str());
         return false;
     }
+    if (backend.async_cuda_capable) {
+        backend.get_semaphore_fd =
+            reinterpret_cast<PFN_vkGetSemaphoreFdKHR>(
+                vkGetDeviceProcAddr(backend.device, "vkGetSemaphoreFdKHR"));
+        if (!backend.get_semaphore_fd)
+            backend.async_cuda_capable = false;
+    }
 
     VkCommandPoolCreateInfo pool_info {
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -1104,6 +1226,55 @@ create_vulkan_device(VividVideoVulkanBackend& backend)
         g_warning("VividVideoProducer: failed to allocate Vulkan command buffer result=%s",
                   vk_result_name(result));
         return false;
+    }
+
+    if (backend.async_cuda_capable) {
+        VkCommandBufferAllocateInfo slot_command_info {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .pNext = nullptr,
+            .commandPool = backend.command_pool,
+            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = VIVID_VIDEO_VULKAN_EXPORT_BUFFER_COUNT,
+        };
+        result = vkAllocateCommandBuffers(backend.device,
+                                          &slot_command_info,
+                                          backend.slot_command_buffers.data());
+        if (result != VK_SUCCESS)
+            backend.async_cuda_capable = false;
+    }
+    if (backend.async_cuda_capable) {
+        for (uint32_t i = 0; i < VIVID_VIDEO_VULKAN_EXPORT_BUFFER_COUNT; i++) {
+            VkFenceCreateInfo fence_info {
+                .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+            };
+            VkExportSemaphoreCreateInfo export_semaphore {
+                .sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
+                .pNext = nullptr,
+                .handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+            };
+            VkSemaphoreCreateInfo semaphore_info {
+                .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+                .pNext = &export_semaphore,
+                .flags = 0,
+            };
+            if (vkCreateFence(backend.device, &fence_info, nullptr, &backend.slot_fences[i]) !=
+                    VK_SUCCESS ||
+                vkCreateSemaphore(backend.device,
+                                  &semaphore_info,
+                                  nullptr,
+                                  &backend.slot_acquire_semaphores[i]) != VK_SUCCESS) {
+                backend.async_cuda_capable = false;
+                break;
+            }
+            backend.slot_fence_in_flight[i] = false;
+        }
+    }
+    if (!backend.async_cuda_capable) {
+        g_message("VividVideoProducer: async CUDA submit path unavailable on gpu=%s; "
+                  "keeping synchronous uploads",
+                  backend.device_name.c_str());
     }
 
     return true;
@@ -1825,10 +1996,215 @@ VividVideoVulkanBackend::create_cuda_external_transfer_buffer(guint64 size,
     return result;
 }
 
+VividVideoCudaSyncInterop::~VividVideoCudaSyncInterop()
+{
+    reset();
+}
+
+void
+VividVideoCudaSyncInterop::reset()
+{
+    if (cuda_context && (cuda_kernel_done || cuda_copy_done)) {
+        if (gst_cuda_context_push(cuda_context)) {
+            if (cuda_kernel_done)
+                (void)CuDestroyExternalSemaphore(cuda_kernel_done);
+            if (cuda_copy_done)
+                (void)CuDestroyExternalSemaphore(cuda_copy_done);
+            CUcontext popped {};
+            (void)gst_cuda_context_pop(&popped);
+        }
+    }
+    cuda_kernel_done = {};
+    cuda_copy_done = {};
+    if (device != VK_NULL_HANDLE) {
+        if (kernel_done != VK_NULL_HANDLE)
+            vkDestroySemaphore(device, kernel_done, nullptr);
+        if (copy_done != VK_NULL_HANDLE)
+            vkDestroySemaphore(device, copy_done, nullptr);
+    }
+    kernel_done = VK_NULL_HANDLE;
+    copy_done = VK_NULL_HANDLE;
+    device = VK_NULL_HANDLE;
+    if (cuda_context) {
+        gst_object_unref(cuda_context);
+        cuda_context = nullptr;
+    }
+    kernel_value = 0;
+    copy_value = 0;
+    valid = false;
+}
+
+namespace
+{
+
+VkSemaphore
+create_exported_timeline_semaphore(VividVideoVulkanBackend& backend, int* out_fd)
+{
+    VkSemaphoreTypeCreateInfo timeline_type {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+        .pNext = nullptr,
+        .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+        .initialValue = 0,
+    };
+    VkExportSemaphoreCreateInfo export_info {
+        .sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
+        .pNext = &timeline_type,
+        .handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
+    };
+    VkSemaphoreCreateInfo semaphore_info {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        .pNext = &export_info,
+        .flags = 0,
+    };
+    VkSemaphore semaphore = VK_NULL_HANDLE;
+    if (vkCreateSemaphore(backend.device, &semaphore_info, nullptr, &semaphore) != VK_SUCCESS)
+        return VK_NULL_HANDLE;
+
+    VkSemaphoreGetFdInfoKHR fd_info {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
+        .pNext = nullptr,
+        .semaphore = semaphore,
+        .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
+    };
+    if (backend.get_semaphore_fd(backend.device, &fd_info, out_fd) != VK_SUCCESS ||
+        *out_fd < 0) {
+        vkDestroySemaphore(backend.device, semaphore, nullptr);
+        return VK_NULL_HANDLE;
+    }
+    return semaphore;
+}
+
 bool
-VividVideoVulkanBackend::submit_rgba_buffer(const VividVideoCudaExternalBuffer& rgba_buffer)
+import_cuda_timeline_semaphore(int fd, CUexternalSemaphore* out_semaphore)
+{
+    CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC desc {};
+    desc.type = CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_SEMAPHORE_FD;
+    desc.handle.fd = fd;
+    return CuImportExternalSemaphore(out_semaphore, &desc) == CUDA_SUCCESS;
+}
+
+} // namespace
+
+bool
+VividVideoVulkanBackend::ensure_cuda_sync_interop(GstCudaContext* cuda_context)
 {
     auto& backend = *this;
+    if (cuda_sync.valid && cuda_sync.cuda_context == cuda_context)
+        return true;
+    cuda_sync.reset();
+    if (!backend.async_cuda_capable || !cuda_context ||
+        backend.device == VK_NULL_HANDLE || !backend.get_semaphore_fd)
+        return false;
+
+    cuda_sync.device = backend.device;
+    cuda_sync.cuda_context =
+        reinterpret_cast<GstCudaContext*>(gst_object_ref(cuda_context));
+
+    int kernel_fd = -1;
+    int copy_fd = -1;
+    cuda_sync.kernel_done = create_exported_timeline_semaphore(backend, &kernel_fd);
+    cuda_sync.copy_done = create_exported_timeline_semaphore(backend, &copy_fd);
+    bool imported = cuda_sync.kernel_done != VK_NULL_HANDLE &&
+        cuda_sync.copy_done != VK_NULL_HANDLE;
+
+    if (imported && gst_cuda_context_push(cuda_context)) {
+        /* CUDA takes ownership of the fds on successful import. */
+        if (import_cuda_timeline_semaphore(kernel_fd, &cuda_sync.cuda_kernel_done))
+            kernel_fd = -1;
+        else
+            imported = false;
+        if (imported && import_cuda_timeline_semaphore(copy_fd, &cuda_sync.cuda_copy_done))
+            copy_fd = -1;
+        else
+            imported = false;
+        CUcontext popped {};
+        (void)gst_cuda_context_pop(&popped);
+    } else {
+        imported = false;
+    }
+    if (kernel_fd >= 0)
+        close(kernel_fd);
+    if (copy_fd >= 0)
+        close(copy_fd);
+
+    if (!imported) {
+        g_message("VividVideoProducer: CUDA/Vulkan semaphore interop unavailable; "
+                  "keeping synchronous uploads");
+        cuda_sync.reset();
+        return false;
+    }
+
+    cuda_sync.valid = true;
+    g_message("VividVideoProducer: async CUDA upload path active "
+              "(timeline semaphores + per-frame acquire SYNC_FD)");
+    return true;
+}
+
+/*
+ * Any interop failure falls back to the historical fully synchronous
+ * semantics: drain the queue so no async submission is still reading the
+ * shared transfer buffer or writing an export slot, then keep interop off.
+ */
+static void
+video_backend_invalidate_cuda_sync(VividVideoVulkanBackend& backend)
+{
+    if (backend.graphics_queue != VK_NULL_HANDLE)
+        (void)vkQueueWaitIdle(backend.graphics_queue);
+    if (backend.device != VK_NULL_HANDLE) {
+        for (uint32_t i = 0; i < VIVID_VIDEO_VULKAN_EXPORT_BUFFER_COUNT; i++) {
+            if (backend.slot_fence_in_flight[i] &&
+                backend.slot_fences[i] != VK_NULL_HANDLE)
+                (void)vkResetFences(backend.device, 1, &backend.slot_fences[i]);
+            backend.slot_fence_in_flight[i] = false;
+        }
+    }
+    backend.cuda_sync.reset();
+    g_warning("VividVideoProducer: CUDA/Vulkan async sync failed; "
+              "reverting to synchronous uploads");
+}
+
+bool
+VividVideoVulkanBackend::cuda_stream_wait_copy_done(CUstream stream)
+{
+    if (!cuda_sync.valid)
+        return false;
+    if (cuda_sync.copy_value == 0)
+        return true;
+
+    CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS params {};
+    params.params.fence.value = cuda_sync.copy_value;
+    if (CuWaitExternalSemaphoresAsync(&cuda_sync.cuda_copy_done, &params, 1, stream) !=
+        CUDA_SUCCESS) {
+        video_backend_invalidate_cuda_sync(*this);
+        return false;
+    }
+    return true;
+}
+
+bool
+VividVideoVulkanBackend::cuda_stream_signal_kernel_done(CUstream stream)
+{
+    if (!cuda_sync.valid)
+        return false;
+
+    CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS params {};
+    params.params.fence.value = cuda_sync.kernel_value + 1;
+    if (CuSignalExternalSemaphoresAsync(&cuda_sync.cuda_kernel_done, &params, 1, stream) !=
+        CUDA_SUCCESS) {
+        video_backend_invalidate_cuda_sync(*this);
+        return false;
+    }
+    cuda_sync.kernel_value++;
+    return true;
+}
+
+bool
+VividVideoVulkanBackend::submit_rgba_buffer(const VividVideoCudaExternalBuffer& rgba_buffer,
+                                            int* out_acquire_fd)
+{
+    auto& backend = *this;
+    if (out_acquire_fd)
+        *out_acquire_fd = -1;
     if (backend.device == VK_NULL_HANDLE || backend.command_buffer == VK_NULL_HANDLE ||
         !rgba_buffer)
         return false;
@@ -1837,7 +2213,38 @@ VividVideoVulkanBackend::submit_rgba_buffer(const VividVideoCudaExternalBuffer& 
     if (!target)
         return false;
 
-    VkResult result = vkResetCommandBuffer(backend.command_buffer, 0);
+    /*
+     * Async path: the CUDA kernel result is consumed through the kernel_done
+     * timeline wait, the copy completion is published through copy_done (for
+     * the CUDA stream) and the slot's acquire semaphore (for the consumer),
+     * and the only CPU wait left is on the fence of the submission from one
+     * full ring rotation ago before its command buffer is re-recorded.
+     */
+    const bool async_path = backend.cuda_sync.valid &&
+        backend.cuda_sync.kernel_value > backend.cuda_sync.copy_value;
+    const uint32_t slot = backend.in_progress_index;
+    VkCommandBuffer command_buffer = async_path
+        ? backend.slot_command_buffers[slot]
+        : backend.command_buffer;
+
+    if (async_path && backend.slot_fence_in_flight[slot]) {
+        VkResult wait_result = vkWaitForFences(backend.device,
+                                               1,
+                                               &backend.slot_fences[slot],
+                                               VK_TRUE,
+                                               1000ull * 1000ull * 1000ull);
+        if (wait_result != VK_SUCCESS) {
+            g_warning("VividVideoProducer: slot fence wait failed slot=%u result=%s",
+                      slot,
+                      vk_result_name(wait_result));
+            video_backend_invalidate_cuda_sync(backend);
+            return false;
+        }
+        (void)vkResetFences(backend.device, 1, &backend.slot_fences[slot]);
+        backend.slot_fence_in_flight[slot] = false;
+    }
+
+    VkResult result = vkResetCommandBuffer(command_buffer, 0);
     if (result != VK_SUCCESS)
         return false;
 
@@ -1847,7 +2254,7 @@ VividVideoVulkanBackend::submit_rgba_buffer(const VividVideoCudaExternalBuffer& 
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         .pInheritanceInfo = nullptr,
     };
-    result = vkBeginCommandBuffer(backend.command_buffer, &begin_info);
+    result = vkBeginCommandBuffer(command_buffer, &begin_info);
     if (result != VK_SUCCESS)
         return false;
 
@@ -1883,7 +2290,7 @@ VividVideoVulkanBackend::submit_rgba_buffer(const VividVideoCudaExternalBuffer& 
         .image = target.image,
         .subresourceRange = color_range,
     };
-    vkCmdPipelineBarrier(backend.command_buffer,
+    vkCmdPipelineBarrier(command_buffer,
                          target.initialized ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
                                             : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -1906,7 +2313,7 @@ VividVideoVulkanBackend::submit_rgba_buffer(const VividVideoCudaExternalBuffer& 
         .offset = 0,
         .size = rgba_buffer.size,
     };
-    vkCmdPipelineBarrier(backend.command_buffer,
+    vkCmdPipelineBarrier(command_buffer,
                          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_DEPENDENCY_BY_REGION_BIT,
@@ -1931,7 +2338,7 @@ VividVideoVulkanBackend::submit_rgba_buffer(const VividVideoCudaExternalBuffer& 
         .imageOffset = VkOffset3D { 0, 0, 0 },
         .imageExtent = VkExtent3D { target.width, target.height, 1 },
     };
-    vkCmdCopyBufferToImage(backend.command_buffer,
+    vkCmdCopyBufferToImage(command_buffer,
                            rgba_buffer.buffer,
                            target.image,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -1950,7 +2357,7 @@ VividVideoVulkanBackend::submit_rgba_buffer(const VividVideoCudaExternalBuffer& 
         .image = target.image,
         .subresourceRange = color_range,
     };
-    vkCmdPipelineBarrier(backend.command_buffer,
+    vkCmdPipelineBarrier(command_buffer,
                          VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                          VK_DEPENDENCY_BY_REGION_BIT,
@@ -1961,27 +2368,99 @@ VividVideoVulkanBackend::submit_rgba_buffer(const VividVideoCudaExternalBuffer& 
                          1,
                          &release);
 
-    result = vkEndCommandBuffer(backend.command_buffer);
+    result = vkEndCommandBuffer(command_buffer);
     if (result != VK_SUCCESS)
         return false;
 
-    VkSubmitInfo submit_info {
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .pNext = nullptr,
-        .waitSemaphoreCount = 0,
-        .pWaitSemaphores = nullptr,
-        .pWaitDstStageMask = nullptr,
-        .commandBufferCount = 1,
-        .pCommandBuffers = &backend.command_buffer,
-        .signalSemaphoreCount = 0,
-        .pSignalSemaphores = nullptr,
-    };
-    result = vkQueueSubmit(backend.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
-    if (result != VK_SUCCESS)
-        return false;
-    result = vkQueueWaitIdle(backend.graphics_queue);
-    if (result != VK_SUCCESS)
-        return false;
+    if (async_path) {
+        const uint64_t kernel_wait_value = backend.cuda_sync.kernel_value;
+        const uint64_t copy_signal_value = backend.cuda_sync.copy_value + 1;
+        const std::array<VkSemaphore, 1> wait_semaphores { backend.cuda_sync.kernel_done };
+        const std::array<uint64_t, 1> wait_values { kernel_wait_value };
+        const std::array<VkPipelineStageFlags, 1> wait_stages {
+            VK_PIPELINE_STAGE_TRANSFER_BIT
+        };
+        const std::array<VkSemaphore, 2> signal_semaphores {
+            backend.cuda_sync.copy_done,
+            backend.slot_acquire_semaphores[slot],
+        };
+        /* Binary semaphore entries ignore their timeline value. */
+        const std::array<uint64_t, 2> signal_values { copy_signal_value, 0 };
+        VkTimelineSemaphoreSubmitInfo timeline_info {
+            .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+            .pNext = nullptr,
+            .waitSemaphoreValueCount = static_cast<uint32_t>(wait_values.size()),
+            .pWaitSemaphoreValues = wait_values.data(),
+            .signalSemaphoreValueCount = static_cast<uint32_t>(signal_values.size()),
+            .pSignalSemaphoreValues = signal_values.data(),
+        };
+        VkSubmitInfo submit_info {
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .pNext = &timeline_info,
+            .waitSemaphoreCount = static_cast<uint32_t>(wait_semaphores.size()),
+            .pWaitSemaphores = wait_semaphores.data(),
+            .pWaitDstStageMask = wait_stages.data(),
+            .commandBufferCount = 1,
+            .pCommandBuffers = &command_buffer,
+            .signalSemaphoreCount = static_cast<uint32_t>(signal_semaphores.size()),
+            .pSignalSemaphores = signal_semaphores.data(),
+        };
+        result = vkQueueSubmit(backend.graphics_queue,
+                               1,
+                               &submit_info,
+                               backend.slot_fences[slot]);
+        if (result != VK_SUCCESS) {
+            g_warning("VividVideoProducer: async upload submit failed result=%s",
+                      vk_result_name(result));
+            video_backend_invalidate_cuda_sync(backend);
+            return false;
+        }
+        backend.slot_fence_in_flight[slot] = true;
+        backend.cuda_sync.copy_value = copy_signal_value;
+
+        /*
+         * SYNC_FD export of a binary semaphore has copy transference with wait
+         * side effects, so the semaphore is unsignaled again and reusable the
+         * next time this slot rotates around.
+         */
+        VkSemaphoreGetFdInfoKHR acquire_fd_info {
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
+            .pNext = nullptr,
+            .semaphore = backend.slot_acquire_semaphores[slot],
+            .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+        };
+        int acquire_fd = -1;
+        result = backend.get_semaphore_fd(backend.device, &acquire_fd_info, &acquire_fd);
+        if (result != VK_SUCCESS || acquire_fd < 0) {
+            g_warning("VividVideoProducer: acquire SYNC_FD export failed result=%s; "
+                      "waiting for upload on the CPU",
+                      vk_result_name(result));
+            video_backend_invalidate_cuda_sync(backend);
+            acquire_fd = -1;
+        }
+        if (out_acquire_fd)
+            *out_acquire_fd = acquire_fd;
+        else if (acquire_fd >= 0)
+            close(acquire_fd);
+    } else {
+        VkSubmitInfo submit_info {
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .pNext = nullptr,
+            .waitSemaphoreCount = 0,
+            .pWaitSemaphores = nullptr,
+            .pWaitDstStageMask = nullptr,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &command_buffer,
+            .signalSemaphoreCount = 0,
+            .pSignalSemaphores = nullptr,
+        };
+        result = vkQueueSubmit(backend.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+        if (result != VK_SUCCESS)
+            return false;
+        result = vkQueueWaitIdle(backend.graphics_queue);
+        if (result != VK_SUCCESS)
+            return false;
+    }
 
     target.initialized = true;
     backend.mark_frame_ready();
@@ -2222,43 +2701,88 @@ VividVideoVulkanBackend::submit_imported_image(const VividVideoVulkanImportedIma
                          1,
                          &acquire);
 
-    VkClearColorValue clear_color {};
-    clear_color.float32[3] = 1.0f;
-    vkCmdClearColorImage(backend.command_buffer,
-                         target.image,
-                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                         &clear_color,
-                         1,
-                         &color_range);
-
     const VideoBlitRegions regions =
         compute_video_blit_regions(fill_mode, source.width, source.height, target.width, target.height);
-    VkImageBlit blit {
-        .srcSubresource =
-            VkImageSubresourceLayers {
-                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                .mipLevel = 0,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-        .srcOffsets = { regions.src0, regions.src1 },
-        .dstSubresource =
-            VkImageSubresourceLayers {
-                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                .mipLevel = 0,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-        .dstOffsets = { regions.dst0, regions.dst1 },
-    };
-    vkCmdBlitImage(backend.command_buffer,
-                   source.image,
-                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                   target.image,
-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                   1,
-                   &blit,
-                   VK_FILTER_NEAREST);
+    /*
+     * When the decoded frame already matches the export slot exactly (same
+     * format, same size, no letterbox), a raw image copy produces identical
+     * pixels without the blit's per-texel sampling or the full-frame clear.
+     * Any format difference must keep the blit: vkCmdCopyImage copies raw
+     * texels and would not swizzle BGRA into the RGBA export ring.
+     */
+    const bool direct_copy = source.format == backend.target_format &&
+        source.width == target.width && source.height == target.height &&
+        regions.src0.x == 0 && regions.src0.y == 0 &&
+        regions.dst0.x == 0 && regions.dst0.y == 0 &&
+        regions.src1.x == static_cast<int32_t>(source.width) &&
+        regions.src1.y == static_cast<int32_t>(source.height) &&
+        regions.dst1.x == static_cast<int32_t>(target.width) &&
+        regions.dst1.y == static_cast<int32_t>(target.height);
+
+    if (direct_copy) {
+        VkImageCopy copy {
+            .srcSubresource =
+                VkImageSubresourceLayers {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .mipLevel = 0,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+            .srcOffset = VkOffset3D { 0, 0, 0 },
+            .dstSubresource =
+                VkImageSubresourceLayers {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .mipLevel = 0,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+            .dstOffset = VkOffset3D { 0, 0, 0 },
+            .extent = VkExtent3D { target.width, target.height, 1 },
+        };
+        vkCmdCopyImage(backend.command_buffer,
+                       source.image,
+                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       target.image,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1,
+                       &copy);
+    } else {
+        VkClearColorValue clear_color {};
+        clear_color.float32[3] = 1.0f;
+        vkCmdClearColorImage(backend.command_buffer,
+                             target.image,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             &clear_color,
+                             1,
+                             &color_range);
+
+        VkImageBlit blit {
+            .srcSubresource =
+                VkImageSubresourceLayers {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .mipLevel = 0,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+            .srcOffsets = { regions.src0, regions.src1 },
+            .dstSubresource =
+                VkImageSubresourceLayers {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .mipLevel = 0,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+            .dstOffsets = { regions.dst0, regions.dst1 },
+        };
+        vkCmdBlitImage(backend.command_buffer,
+                       source.image,
+                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       target.image,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1,
+                       &blit,
+                       VK_FILTER_NEAREST);
+    }
 
     VkImageMemoryBarrier release {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
