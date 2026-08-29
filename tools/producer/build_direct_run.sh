@@ -28,7 +28,11 @@ echo "==> Building Scene renderer worker for direct-run"
 "${CMAKE_BIN}" -S "${VIVID_SCENE_SOURCE_DIR}" \
   -B "${SCENE_BUILD_DIR}" \
   -DCMAKE_BUILD_TYPE="${VIVID_CMAKE_BUILD_TYPE}"
-"${CMAKE_BIN}" --build "${SCENE_BUILD_DIR}" --target "${VIVID_SCENE_TARGET}" --parallel "${JOBS}" --verbose
+# VividScene is the shared library the golden-frame capture harness loads
+# (tools/producer/golden/), and scene_identity_test backs
+# `ctest --test-dir "${SCENE_BUILD_DIR}"`.
+"${CMAKE_BIN}" --build "${SCENE_BUILD_DIR}" --target "${VIVID_SCENE_TARGET}" \
+  --target VividScene --target scene_identity_test --parallel "${JOBS}" --verbose
 
 echo "==> Building Video renderer worker for direct-run"
 "${CMAKE_BIN}" -S "${VIVID_VIDEO_SOURCE_DIR}" \
