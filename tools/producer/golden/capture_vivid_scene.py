@@ -151,6 +151,11 @@ def bind_abi(lib):
         ctypes.c_double,
         ctypes.c_double,
     ]
+    lib.vivid_scene_producer_set_pointer_button.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_int,
+    ]
     lib.vivid_scene_producer_set_media_state_json.argtypes = [
         ctypes.c_void_p,
         ctypes.c_char_p,
@@ -273,11 +278,65 @@ def main():
     parser.add_argument("--height", type=int, default=1000)
     parser.add_argument("--frames", type=int, default=90)
     parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument("--content-fit", type=int, choices=(1, 2, 3), default=1)
+    parser.add_argument(
+        "--reflections",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--volumetrics", type=int, choices=range(5), default=2)
+    parser.add_argument("--shadows", type=int, choices=range(5), default=2)
+    parser.add_argument("--postprocessing", type=int, choices=range(4), default=1)
+    parser.add_argument("--antialiasing", type=int, choices=range(4), default=1)
+    parser.add_argument("--texture-resolution", type=int, choices=range(3), default=0)
     parser.add_argument("--pointer-x", type=float, default=0.5)
     parser.add_argument("--pointer-y", type=float, default=0.5)
+    parser.add_argument(
+        "--click-frame",
+        type=int,
+        default=-1,
+        help="Press a pointer button before this frame; negative disables click injection.",
+    )
+    parser.add_argument(
+        "--click-hold-frames",
+        type=int,
+        default=1,
+        help="Number of captured frames to keep the injected pointer button pressed.",
+    )
+    parser.add_argument(
+        "--click-button",
+        type=int,
+        default=1,
+        help="Pointer button id to inject (1 is the left button).",
+    )
+    parser.add_argument(
+        "--snapshot",
+        action="append",
+        default=[],
+        metavar="FRAME:PATH",
+        help="Save an additional frame; may be supplied more than once.",
+    )
     parser.add_argument("--properties", default="{}")
     parser.add_argument("--media-state", default="")
     args = parser.parse_args()
+
+    if args.fps <= 0:
+        parser.error("--fps must be greater than zero")
+    if args.click_frame >= 0 and args.click_hold_frames <= 0:
+        parser.error("--click-hold-frames must be greater than zero")
+
+    snapshot_outputs = {}
+    for snapshot_spec in args.snapshot:
+        frame_text, separator, output_path = snapshot_spec.partition(":")
+        if not separator or not frame_text or not output_path:
+            parser.error("--snapshot expects FRAME:PATH")
+        try:
+            snapshot_frame = int(frame_text)
+        except ValueError:
+            parser.error("--snapshot FRAME must be an integer")
+        if snapshot_frame < 0:
+            parser.error("--snapshot FRAME must not be negative")
+        snapshot_outputs[snapshot_frame] = output_path
 
     library_path = pathlib.Path(args.library).resolve()
     lib = ctypes.CDLL(str(library_path), mode=ctypes.RTLD_LOCAL)
@@ -313,14 +372,14 @@ def main():
             os.fsencode(args.properties),
             1,
             0.0,
-            1,
+            args.content_fit,
             args.fps,
-            1,
-            0,
-            4,
-            0,
-            0,
-            2,
+            args.reflections,
+            args.volumetrics,
+            args.shadows,
+            args.postprocessing,
+            args.antialiasing,
+            args.texture_resolution,
             render_node,
             ctypes.byref(device),
         ):
@@ -357,11 +416,28 @@ def main():
         )
 
         frame = Frame()
-        for frame_index in range(max(1, args.frames)):
+        frame_count = max(1, args.frames)
+        for frame_index in range(frame_count):
+            if args.click_frame >= 0:
+                if frame_index == args.click_frame:
+                    lib.vivid_scene_producer_set_pointer_button(
+                        producer,
+                        args.click_button,
+                        1,
+                    )
+                elif frame_index == args.click_frame + args.click_hold_frames:
+                    lib.vivid_scene_producer_set_pointer_button(
+                        producer,
+                        args.click_button,
+                        0,
+                    )
             wait_for_frame(lib, producer, frame)
             wait_for_acquire_fence(frame)
-            if frame_index + 1 < max(1, args.frames):
-                time.sleep(1.0 / 30.0)
+            snapshot_output = snapshot_outputs.get(frame_index)
+            if snapshot_output is not None:
+                save_frame(buffers, frame, snapshot_output)
+            if frame_index + 1 < frame_count:
+                time.sleep(1.0 / args.fps)
 
         stride = save_frame(buffers, frame, args.output)
         print(
