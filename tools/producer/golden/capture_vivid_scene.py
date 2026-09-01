@@ -272,6 +272,7 @@ def main():
     parser.add_argument("--width", type=int, default=1600)
     parser.add_argument("--height", type=int, default=1000)
     parser.add_argument("--frames", type=int, default=90)
+    parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--pointer-x", type=float, default=0.5)
     parser.add_argument("--pointer-y", type=float, default=0.5)
     parser.add_argument("--properties", default="{}")
@@ -313,7 +314,7 @@ def main():
             1,
             0.0,
             1,
-            30,
+            args.fps,
             1,
             0,
             4,
