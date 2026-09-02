@@ -38,6 +38,11 @@ modules:
     sources:
       - type: archive
         url: https://dotat.at/prog/unifdef/unifdef-2.12.tar.xz
+        # dotat.at is a single personal host and has dropped connections during
+        # release builds. The Fedora lookaside serves the identical upstream
+        # tarball (same sha256) from a CDN, so keep it as a fallback.
+        mirror-urls:
+          - https://src.fedoraproject.org/repo/pkgs/unifdef/unifdef-2.12.tar.xz/sha512/df78cf931989b5e604e68e0bf00490782d385a575b51584e4be44535b6bde5f9e2abff14510f8f426670d9f6f1abfb5768da5e108bdefd6c9d0c8356a05164b5/unifdef-2.12.tar.xz
         sha256: 43ce0f02ecdcdc723b2475575563ddb192e988c886d368260bc0a63aee3ac400
 
   - name: vivid-producer
