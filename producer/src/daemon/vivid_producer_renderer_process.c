@@ -66,6 +66,7 @@ struct _VividProducerRenderer
     guint64 generation;
     gboolean waiting_for_unbind;
     gboolean process_was_active;
+    gboolean process_pool_published;
     gboolean process_stop_requested;
     gboolean negotiation_sent;
     guint32 negotiated_fourcc;
@@ -502,10 +503,28 @@ renderer_process_state_changed(VividRendererProcess* process,
     } else if (new_state == VIVID_RENDERER_PROCESS_UNBINDING) {
         renderer->waiting_for_unbind = TRUE;
         renderer->generation++;
-    } else if (new_state == VIVID_RENDERER_PROCESS_CRASHED) {
-        if (renderer->process_was_active && !renderer->waiting_for_unbind) {
+    } else if (new_state == VIVID_RENDERER_PROCESS_FAILED ||
+               new_state == VIVID_RENDERER_PROCESS_CRASHED) {
+        if ((renderer->process_was_active || renderer->process_pool_published) &&
+            !renderer->waiting_for_unbind) {
+            /*
+             * BIND_BUFFERS publishes a renderer generation before the first
+             * FRAME_READY can make the worker ACTIVE. If that worker dies in
+             * WAIT_FIRST_FRAME, the committed display pool still belongs to
+             * the dead process and must be invalidated exactly like an active
+             * crash. Advancing the generation wakes every route output and the
+             * UNBIND barrier retires those DMA-BUFs before another worker is
+             * allowed to negotiate.
+             */
             renderer->waiting_for_unbind = TRUE;
             renderer->generation++;
+            g_message("VividProducerRenderer: route=%s instance=%" G_GUINT64_FORMAT
+                      " invalidated published pool after %s generation=%"
+                      G_GUINT64_FORMAT,
+                      renderer->route_id,
+                      vivid_renderer_process_instance_id(process),
+                      vivid_renderer_process_state_name(new_state),
+                      renderer->generation);
         }
     }
     if ((new_state == VIVID_RENDERER_PROCESS_FAILED ||
@@ -530,6 +549,7 @@ renderer_process_packet(VividRendererProcess* process,
     if (renderer->process != process)
         return;
     if (packet->header.opcode == VIVID_RENDERER_MSG_BIND_BUFFERS) {
+        renderer->process_pool_published = TRUE;
         renderer->generation++;
         g_message("VividProducerRenderer: route=%s instance=%" G_GUINT64_FORMAT
                   " accepted pool generation=%" G_GUINT64_FORMAT,
@@ -575,6 +595,7 @@ renderer_process_reaped(VividRendererProcess* process,
     renderer->process = NULL;
     g_mutex_unlock(&renderer->release_lock);
     renderer_schedule_reaped_collection(renderer);
+    renderer_notify_progress(renderer);
     if (!waiting_for_unbind)
         renderer_reconcile(renderer, "worker-reaped");
 }
@@ -589,6 +610,7 @@ renderer_reset_process_contract(VividProducerRenderer* renderer)
     renderer->negotiated_memory_source = 0;
     renderer->negotiated_pool_size = 0;
     renderer->process_was_active = FALSE;
+    renderer->process_pool_published = FALSE;
     renderer->process_stop_requested = FALSE;
     g_mutex_lock(&renderer->release_lock);
     renderer->last_published_release_point = 0;
@@ -1565,6 +1587,78 @@ vivid_producer_renderer_is_waiting_for_unbind(VividProducerRenderer* renderer)
     return renderer && renderer->waiting_for_unbind;
 }
 
+gboolean
+vivid_producer_renderer_invalidate_dmabuf_pool(VividProducerRenderer* renderer,
+                                               const gchar* reason,
+                                               GError** error)
+{
+    if (!renderer) {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_INVALID_ARGUMENT,
+                            "renderer is required to invalidate a DMA-BUF pool");
+        return FALSE;
+    }
+    if (renderer->waiting_for_unbind)
+        return TRUE;
+    if (!renderer->process) {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_NOT_CONNECTED,
+                            "renderer worker is unavailable while invalidating its DMA-BUF pool");
+        return FALSE;
+    }
+
+    const VividRendererProcessState state =
+        vivid_renderer_process_state(renderer->process);
+    if (state == VIVID_RENDERER_PROCESS_QUIESCING ||
+        state == VIVID_RENDERER_PROCESS_UNBINDING) {
+        return TRUE;
+    }
+    if (state != VIVID_RENDERER_PROCESS_NEGOTIATING &&
+        state != VIVID_RENDERER_PROCESS_WAIT_FIRST_FRAME &&
+        state != VIVID_RENDERER_PROCESS_ACTIVE) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_PENDING,
+                    "renderer worker cannot invalidate its DMA-BUF pool while in %s",
+                    vivid_renderer_process_state_name(state));
+        return FALSE;
+    }
+
+    g_message("VividProducerRenderer: route=%s instance=%" G_GUINT64_FORMAT
+              " retiring rejected DMA-BUF pool state=%s reason=%s",
+              renderer->route_id,
+              vivid_renderer_process_instance_id(renderer->process),
+              vivid_renderer_process_state_name(state),
+              reason && *reason ? reason : "consumer import rejected the pool");
+    g_autoptr(GError) quiesce_error = NULL;
+    if (vivid_renderer_process_request_quiesce(renderer->process,
+                                               &quiesce_error))
+        return TRUE;
+
+    /*
+     * Failure to enqueue QUIESCE leaves the worker/pool contract unusable. A
+     * normal process failure advances the published generation in the state
+     * observer above and drives the same route-wide UNBIND transaction.
+     *
+     * This termination is an owner-requested stop, not a startup failure of
+     * the project: the worker may still be in WAIT_FIRST_FRAME, and without
+     * this flag the FAILED transition would record a startup_error that stops
+     * renderer_reconcile() from spawning the replacement worker.
+     */
+    g_warning("VividProducerRenderer: route=%s instance=%" G_GUINT64_FORMAT
+              " failed to quiesce rejected DMA-BUF pool: %s",
+              renderer->route_id,
+              vivid_renderer_process_instance_id(renderer->process),
+              quiesce_error ? quiesce_error->message : "unknown error");
+    renderer->process_stop_requested = TRUE;
+    vivid_renderer_process_terminate(
+        renderer->process,
+        reason && *reason ? reason : "failed to retire rejected DMA-BUF pool");
+    return TRUE;
+}
+
 static gboolean
 renderer_signal_point(VividProducerRenderer* renderer,
                       guint64 release_point,
@@ -1628,6 +1722,23 @@ vivid_producer_renderer_complete_unbind(VividProducerRenderer* renderer,
     VividRendererProcess* process_to_shutdown = NULL;
     g_mutex_lock(&renderer->release_lock);
     if (renderer->process && !vivid_renderer_process_is_reaped(renderer->process)) {
+        const VividRendererProcessState process_state =
+            vivid_renderer_process_state(renderer->process);
+        if (process_state == VIVID_RENDERER_PROCESS_FAILED ||
+            process_state == VIVID_RENDERER_PROCESS_CRASHED ||
+            process_state == VIVID_RENDERER_PROCESS_EXITED) {
+            /*
+             * A failed worker can never reuse an exported slot, so signaling
+             * its release timeline is pointless, and reap destroys that
+             * syncobj right after this state anyway. Complete the consumer
+             * UNBIND directly so the reap callback can drive the replacement
+             * worker without depending on a dying process's timeline.
+             */
+            renderer->waiting_for_unbind = FALSE;
+            g_mutex_unlock(&renderer->release_lock);
+            return TRUE;
+        }
+
         /*
          * QUIESCED proves that no later FRAME_READY can arrive. The process
          * queue may still contain frames that were accepted after the final

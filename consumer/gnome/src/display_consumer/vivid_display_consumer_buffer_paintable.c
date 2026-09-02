@@ -20,6 +20,7 @@
 #include <json-glib/json-glib.h>
 #include <math.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR \
@@ -510,6 +511,75 @@ ensure_shadow_export(VividDisplayConsumerBufferPaintable* self,
     return TRUE;
 }
 
+/*
+ * fdIndex identifies one descriptor in the SCM_RIGHTS payload; it does not
+ * identify the underlying DMA-BUF. Non-disjoint DRM modifiers legitimately
+ * describe several format planes backed by one VkDeviceMemory allocation,
+ * while the producer transports a dup() of that allocation for each plane.
+ * Linux assigns every DMA-BUF a stable inode, so compare device/inode pairs
+ * while all descriptors are live and only reject genuinely disjoint memory.
+ * Callers skip this for single-plane buffers, where nothing can disagree.
+ */
+static gboolean
+shadow_buffer_planes_share_dmabuf(const VividDmaBufGeneration* generation,
+                                  const VividDmaBufBuffer*     buffer,
+                                  GError**                     error)
+{
+    struct stat primary_stat = {0};
+    if (fstat(buffer->planes[0].fd, &primary_stat) != 0) {
+        g_set_error(error,
+                    VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR,
+                    VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR_DMABUF,
+                    "failed to identify Vulkan shadow relay DMA-BUF generation=%"
+                    G_GUINT64_FORMAT " buffer=%u plane=0 fdIndex=%u fd=%d: %s",
+                    generation->generation,
+                    buffer->index,
+                    buffer->planes[0].fd_index,
+                    buffer->planes[0].fd,
+                    g_strerror(errno));
+        return FALSE;
+    }
+
+    for (guint plane = 1; plane < buffer->n_planes; plane++) {
+        struct stat plane_stat = {0};
+        if (fstat(buffer->planes[plane].fd, &plane_stat) != 0) {
+            g_set_error(error,
+                        VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR,
+                        VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR_DMABUF,
+                        "failed to identify Vulkan shadow relay DMA-BUF generation=%"
+                        G_GUINT64_FORMAT " buffer=%u plane=%u fdIndex=%u fd=%d: %s",
+                        generation->generation,
+                        buffer->index,
+                        plane,
+                        buffer->planes[plane].fd_index,
+                        buffer->planes[plane].fd,
+                        g_strerror(errno));
+            return FALSE;
+        }
+        if (plane_stat.st_dev != primary_stat.st_dev ||
+            plane_stat.st_ino != primary_stat.st_ino) {
+            g_set_error(error,
+                        VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR,
+                        VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR_DMABUF,
+                        "Vulkan shadow relay requires one shared DMA-BUF per buffer; "
+                        "generation=%" G_GUINT64_FORMAT " buffer=%u plane=%u "
+                        "fdIndex=%u dev=%" G_GUINT64_FORMAT " ino=%" G_GUINT64_FORMAT
+                        " fdIndex0=%u dev0=%" G_GUINT64_FORMAT " ino0=%" G_GUINT64_FORMAT,
+                        generation->generation,
+                        buffer->index,
+                        plane,
+                        buffer->planes[plane].fd_index,
+                        (guint64)plane_stat.st_dev,
+                        (guint64)plane_stat.st_ino,
+                        buffer->planes[0].fd_index,
+                        (guint64)primary_stat.st_dev,
+                        (guint64)primary_stat.st_ino);
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
 static gboolean
 import_shadow_buffer(VividDisplayConsumerBufferPaintable* self,
                      VividDmaBufGeneration*               generation,
@@ -531,22 +601,10 @@ import_shadow_buffer(VividDisplayConsumerBufferPaintable* self,
         import.strides[plane] = buffer->planes[plane].stride;
         import.offsets[plane] = buffer->planes[plane].offset;
     }
-    for (guint plane = 1; plane < buffer->n_planes; plane++) {
-        if (buffer->planes[plane].fd_index != buffer->planes[0].fd_index) {
-            g_set_error(error,
-                        VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR,
-                        VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR_DMABUF,
-                        "Vulkan shadow relay requires one shared DMA-BUF fd per buffer; "
-                        "generation=%" G_GUINT64_FORMAT " buffer=%u plane=%u has fdIndex=%u "
-                        "fdIndex0=%u",
-                        generation->generation,
-                        buffer->index,
-                        plane,
-                        buffer->planes[plane].fd_index,
-                        buffer->planes[0].fd_index);
-            return FALSE;
-        }
-    }
+
+    if (buffer->n_planes > 1 &&
+        !shadow_buffer_planes_share_dmabuf(generation, buffer, error))
+        return FALSE;
 
     /*
      * The Vulkan external-memory import consumes the fd it receives on

@@ -8827,8 +8827,48 @@ handle_bind_failed(Client* client, const guint8* body, gsize body_len)
             continue;
         output->needs_renderer_rebind = TRUE;
         output->next_renderer_retry_time_usec = 0;
+
+        if (output->memory_kind == OUTPUT_MEMORY_RENDERER_DMABUF) {
+            /*
+             * A worker-owned pool has one immutable negotiation contract. Once
+             * the consumer rejects that contract, asking the same worker for a
+             * different modifier only compares the request with its existing
+             * pool and misclassifies every remaining tuple as unsupported.
+             * Retire the rejected worker through the route-wide UNBIND barrier;
+             * its replacement will negotiate once against the updated peer
+             * blacklist and publish a pool matching the next usable tuple.
+             *
+             * This runs ahead of the Vulkan-initialization rebind barrier on
+             * purpose. That barrier only serializes cap probing of *other*
+             * outputs; it must not defer retiring this pool, otherwise the
+             * frame tick later re-enters client_rebind_output() against the
+             * still-bound worker and reproduces the blacklist cascade.
+             */
+            g_autoptr(GError) invalidate_error = NULL;
+            g_autofree gchar* invalidate_reason =
+                g_strdup_printf("consumer rejected output=%u generation=%"
+                                G_GUINT64_FORMAT " fourcc=0x%08x modifier=0x%016"
+                                G_GINT64_MODIFIER "x",
+                                output->output_id,
+                                output->generation,
+                                fourcc,
+                                (guint64)modifier);
+            if (!vivid_producer_renderer_invalidate_dmabuf_pool(
+                    output_renderer(output),
+                    invalidate_reason,
+                    &invalidate_error)) {
+                g_warning("VividProducer: could not retire rejected renderer pool "
+                          "route=%u output=%u: %s",
+                          output->route ? output->route->route_id : 0,
+                          output->output_id,
+                          invalidate_error ? invalidate_error->message : "unknown error");
+            }
+            continue;
+        }
+
         if (producer_renderer_rebind_barrier_blocks(client->producer, output))
             break;
+
         const OutputRebindResult result = client_rebind_output(client, output);
         if (result == OUTPUT_REBIND_RESULT_FAILED) {
             g_autofree gchar* error =

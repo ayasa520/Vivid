@@ -149,6 +149,15 @@ void vivid_producer_renderer_set_target_extent(VividProducerRenderer* renderer,
                                                 gdouble scale);
 gboolean vivid_producer_renderer_is_waiting_for_unbind(
     VividProducerRenderer* renderer);
+/*
+ * Retire the worker-owned DMA-BUF pool after a display consumer rejects its
+ * import contract. The renderer quiesces first; the daemon then completes the
+ * ordinary route-wide UNBIND barrier before a new worker negotiates a new pool.
+ */
+gboolean vivid_producer_renderer_invalidate_dmabuf_pool(
+    VividProducerRenderer* renderer,
+    const gchar* reason,
+    GError** error);
 gboolean vivid_producer_renderer_complete_unbind(VividProducerRenderer* renderer,
                                                   GError** error);
 gboolean vivid_producer_renderer_complete_frame_release(
