@@ -81,6 +81,23 @@ CUresult CUDAAPI CuCtxSynchronize(void);
  * upload path: NVDEC gives NV12 CUDAMemory, this kernel scales/crops into the
  * backend-owned transfer buffer, and the Vulkan backend publishes that buffer
  * into the stable DMA-BUF ring.
+ *
+ * Sampling model: every destination pixel maps its centre back into the source
+ * through the 16.16 fixed-point (origin, step) pair. The output pixel centre
+ * sits at (lx + 0.5) * step + origin, minus the half texel that converts from
+ * pixel-edge to sample-index space. Around that centre the kernel places a
+ * taps_x * taps_y grid of bilinear samples spaced sub_step apart and averages
+ * them: one tap is plain bilinear filtering, more taps cover the footprint of a
+ * destination pixel when the source is minified by more than the 2-texel
+ * bilinear reach, so heavy downscales do not skip source pixels and alias.
+ * Fractions are truncated to 8 bits so the weights, plane products and the
+ * 16-bit normalisation all stay inside 32-bit unsigned arithmetic.
+ *
+ * Chroma siting and colour conversion are parameters: chroma_off_* is the
+ * offset (in luma sample units, 16.16) between a luma sample and the chroma
+ * sample that shares its index, and the six colour coefficients are 8.8
+ * fixed-point terms of the limited/full range YCbCr->RGB matrix chosen by the
+ * host from the stream's colorimetry.
  */
 constexpr char kNv12ToRgbaScaleCudaPtx[] = R"ptx(
 .version 6.0
@@ -105,12 +122,25 @@ constexpr char kNv12ToRgbaScaleCudaPtx[] = R"ptx(
     .param .u32 src_x0_fp_param,
     .param .u32 src_y0_fp_param,
     .param .u32 step_x_fp_param,
-    .param .u32 step_y_fp_param
+    .param .u32 step_y_fp_param,
+    .param .u32 taps_x_param,
+    .param .u32 taps_y_param,
+    .param .u32 sub_x_fp_param,
+    .param .u32 sub_y_fp_param,
+    .param .u32 inv_taps_fp_param,
+    .param .u32 chroma_off_x_fp_param,
+    .param .u32 chroma_off_y_fp_param,
+    .param .s32 y_offset_param,
+    .param .s32 y_scale_param,
+    .param .s32 r_v_param,
+    .param .s32 g_u_param,
+    .param .s32 g_v_param,
+    .param .s32 b_u_param
 )
 {
-    .reg .pred %p<12>;
-    .reg .b32 %r<120>;
-    .reg .b64 %rd<32>;
+    .reg .pred %p<16>;
+    .reg .b32 %r<128>;
+    .reg .b64 %rd<48>;
 
     ld.param.u64 %rd1, [y_plane_param];
     ld.param.u64 %rd2, [uv_plane_param];
@@ -124,129 +154,314 @@ constexpr char kNv12ToRgbaScaleCudaPtx[] = R"ptx(
     ld.param.u32 %r7, [rgba_pitch_param];
     ld.param.u32 %r8, [dst_x_param];
     ld.param.u32 %r9, [dst_y_param];
-    ld.param.u32 %r16, [draw_width_param];
-    ld.param.u32 %r17, [draw_height_param];
-    ld.param.u32 %r18, [src_x0_fp_param];
-    ld.param.u32 %r19, [src_y0_fp_param];
-    ld.param.u32 %r24, [step_x_fp_param];
-    ld.param.u32 %r25, [step_y_fp_param];
+    ld.param.u32 %r10, [draw_width_param];
+    ld.param.u32 %r11, [draw_height_param];
+    ld.param.u32 %r12, [src_x0_fp_param];
+    ld.param.u32 %r13, [src_y0_fp_param];
+    ld.param.u32 %r14, [step_x_fp_param];
+    ld.param.u32 %r15, [step_y_fp_param];
+    ld.param.u32 %r100, [taps_x_param];
+    ld.param.u32 %r101, [taps_y_param];
+    ld.param.u32 %r102, [sub_x_fp_param];
+    ld.param.u32 %r103, [sub_y_fp_param];
+    ld.param.u32 %r104, [inv_taps_fp_param];
+    ld.param.u32 %r105, [chroma_off_x_fp_param];
+    ld.param.u32 %r106, [chroma_off_y_fp_param];
+    ld.param.s32 %r107, [y_offset_param];
+    ld.param.s32 %r108, [y_scale_param];
+    ld.param.s32 %r109, [r_v_param];
+    ld.param.s32 %r110, [g_u_param];
+    ld.param.s32 %r111, [g_v_param];
+    ld.param.s32 %r112, [b_u_param];
 
-    mov.u32 %r10, %ctaid.x;
-    mov.u32 %r11, %ntid.x;
-    mov.u32 %r12, %tid.x;
-    mad.lo.u32 %r20, %r10, %r11, %r12;
+    mov.u32 %r16, %ctaid.x;
+    mov.u32 %r17, %ntid.x;
+    mov.u32 %r18, %tid.x;
+    mad.lo.u32 %r20, %r16, %r17, %r18;
 
-    mov.u32 %r13, %ctaid.y;
-    mov.u32 %r14, %ntid.y;
-    mov.u32 %r15, %tid.y;
-    mad.lo.u32 %r21, %r13, %r14, %r15;
+    mov.u32 %r16, %ctaid.y;
+    mov.u32 %r17, %ntid.y;
+    mov.u32 %r18, %tid.y;
+    mad.lo.u32 %r21, %r16, %r17, %r18;
 
     setp.ge.u32 %p1, %r20, %r3;
     @%p1 bra DONE;
     setp.ge.u32 %p2, %r21, %r4;
     @%p2 bra DONE;
 
-    add.u32 %r26, %r8, %r16;
-    add.u32 %r27, %r9, %r17;
+    add.u32 %r22, %r8, %r10;
+    add.u32 %r23, %r9, %r11;
     setp.lt.u32 %p3, %r20, %r8;
     @%p3 bra BLACK;
-    setp.ge.u32 %p4, %r20, %r26;
+    setp.ge.u32 %p4, %r20, %r22;
     @%p4 bra BLACK;
     setp.lt.u32 %p5, %r21, %r9;
     @%p5 bra BLACK;
-    setp.ge.u32 %p6, %r21, %r27;
+    setp.ge.u32 %p6, %r21, %r23;
     @%p6 bra BLACK;
 
-    sub.u32 %r28, %r20, %r8;
-    sub.u32 %r29, %r21, %r9;
+    sub.u32 %r24, %r20, %r8;
+    sub.u32 %r25, %r21, %r9;
 
-    cvt.u64.u32 %rd4, %r28;
-    cvt.u64.u32 %rd5, %r24;
-    mul.lo.u64 %rd6, %rd4, %rd5;
-    cvt.u64.u32 %rd7, %r18;
-    add.u64 %rd6, %rd6, %rd7;
-    shr.u64 %rd6, %rd6, 16;
-    cvt.u32.u64 %r22, %rd6;
+    mov.b64 %rd4, 0;
+    mov.b64 %rd5, 32768;
+    sub.u32 %r26, %r1, 1;
+    sub.u32 %r27, %r2, 1;
+    cvt.u64.u32 %rd6, %r26;
+    shl.b64 %rd6, %rd6, 16;
+    cvt.u64.u32 %rd7, %r27;
+    shl.b64 %rd7, %rd7, 16;
 
-    cvt.u64.u32 %rd8, %r29;
-    cvt.u64.u32 %rd9, %r25;
-    mul.lo.u64 %rd10, %rd8, %rd9;
-    cvt.u64.u32 %rd11, %r19;
-    add.u64 %rd10, %rd10, %rd11;
-    shr.u64 %rd10, %rd10, 16;
-    cvt.u32.u64 %r23, %rd10;
+    add.u32 %r48, %r1, 1;
+    shr.u32 %r48, %r48, 1;
+    sub.u32 %r48, %r48, 1;
+    add.u32 %r49, %r2, 1;
+    shr.u32 %r49, %r49, 1;
+    sub.u32 %r49, %r49, 1;
+    cvt.u64.u32 %rd15, %r48;
+    shl.b64 %rd15, %rd15, 16;
+    cvt.u64.u32 %rd16, %r49;
+    shl.b64 %rd16, %rd16, 16;
+    cvt.u64.u32 %rd40, %r105;
+    cvt.u64.u32 %rd41, %r106;
+    mov.u32 %r36, 256;
 
-    sub.u32 %r57, %r1, 1;
-    setp.ge.u32 %p7, %r22, %r1;
-    @%p7 mov.u32 %r22, %r57;
-    sub.u32 %r58, %r2, 1;
-    setp.ge.u32 %p8, %r23, %r2;
-    @%p8 mov.u32 %r23, %r58;
+    shl.b32 %r28, %r24, 1;
+    add.u32 %r28, %r28, 1;
+    mul.wide.u32 %rd8, %r28, %r14;
+    shr.u64 %rd8, %rd8, 1;
+    cvt.u64.u32 %rd9, %r12;
+    add.s64 %rd8, %rd8, %rd9;
+    sub.s64 %rd8, %rd8, %rd5;
+    cvt.u64.u32 %rd42, %r14;
+    cvt.u64.u32 %rd43, %r102;
+    sub.u64 %rd42, %rd42, %rd43;
+    shr.u64 %rd42, %rd42, 1;
+    sub.s64 %rd8, %rd8, %rd42;
 
-    mad.lo.u32 %r30, %r23, %r5, %r22;
-    cvt.u64.u32 %rd12, %r30;
-    add.u64 %rd12, %rd1, %rd12;
-    ld.global.u8 %r31, [%rd12];
+    shl.b32 %r29, %r25, 1;
+    add.u32 %r29, %r29, 1;
+    mul.wide.u32 %rd10, %r29, %r15;
+    shr.u64 %rd10, %rd10, 1;
+    cvt.u64.u32 %rd11, %r13;
+    add.s64 %rd10, %rd10, %rd11;
+    sub.s64 %rd10, %rd10, %rd5;
+    cvt.u64.u32 %rd42, %r15;
+    cvt.u64.u32 %rd43, %r103;
+    sub.u64 %rd42, %rd42, %rd43;
+    shr.u64 %rd42, %rd42, 1;
+    sub.s64 %rd10, %rd10, %rd42;
 
-    shr.u32 %r32, %r23, 1;
-    and.b32 %r33, %r22, -2;
-    mad.lo.u32 %r34, %r32, %r6, %r33;
-    cvt.u64.u32 %rd13, %r34;
-    add.u64 %rd13, %rd2, %rd13;
-    ld.global.u8 %r35, [%rd13];
-    add.u64 %rd14, %rd13, 1;
-    ld.global.u8 %r36, [%rd14];
+    mov.u32 %r113, 0;
+    mov.u32 %r114, 0;
+    mov.u32 %r115, 0;
+    mov.u32 %r116, 0;
 
-    sub.s32 %r37, %r31, 16;
-    max.s32 %r37, %r37, 0;
-    sub.s32 %r38, %r35, 128;
-    sub.s32 %r39, %r36, 128;
+LOOP_Y:
+    mul.wide.u32 %rd11, %r116, %r103;
+    add.s64 %rd12, %rd10, %rd11;
+    max.s64 %rd12, %rd12, %rd4;
+    min.s64 %rd12, %rd12, %rd7;
 
-    mul.lo.s32 %r40, %r37, 298;
+    shr.u64 %rd13, %rd12, 16;
+    cvt.u32.u64 %r33, %rd13;
+    shr.u64 %rd13, %rd12, 8;
+    cvt.u32.u64 %r34, %rd13;
+    and.b32 %r34, %r34, 255;
+    add.u32 %r35, %r33, 1;
+    min.u32 %r35, %r35, %r27;
+    sub.u32 %r38, %r36, %r34;
 
-    mul.lo.s32 %r41, %r39, 459;
-    add.s32 %r41, %r41, %r40;
-    add.s32 %r41, %r41, 128;
-    shr.s32 %r41, %r41, 8;
-    max.s32 %r41, %r41, 0;
-    min.s32 %r41, %r41, 255;
+    sub.s64 %rd18, %rd12, %rd41;
+    max.s64 %rd18, %rd18, %rd4;
+    shr.u64 %rd18, %rd18, 1;
+    min.s64 %rd18, %rd18, %rd16;
+    shr.u64 %rd20, %rd18, 16;
+    cvt.u32.u64 %r53, %rd20;
+    shr.u64 %rd20, %rd18, 8;
+    cvt.u32.u64 %r54, %rd20;
+    and.b32 %r54, %r54, 255;
+    add.u32 %r55, %r53, 1;
+    min.u32 %r55, %r55, %r49;
+    sub.u32 %r57, %r36, %r54;
 
-    mul.lo.s32 %r42, %r38, 55;
-    sub.s32 %r42, %r40, %r42;
-    mul.lo.s32 %r43, %r39, 136;
-    sub.s32 %r42, %r42, %r43;
-    add.s32 %r42, %r42, 128;
-    shr.s32 %r42, %r42, 8;
-    max.s32 %r42, %r42, 0;
-    min.s32 %r42, %r42, 255;
+    mul.lo.u32 %r118, %r33, %r5;
+    mul.lo.u32 %r119, %r35, %r5;
+    mul.lo.u32 %r120, %r53, %r6;
+    mul.lo.u32 %r121, %r55, %r6;
 
-    mul.lo.s32 %r44, %r38, 541;
-    add.s32 %r44, %r44, %r40;
-    add.s32 %r44, %r44, 128;
-    shr.s32 %r44, %r44, 8;
-    max.s32 %r44, %r44, 0;
-    min.s32 %r44, %r44, 255;
+    mov.u32 %r117, 0;
+
+LOOP_X:
+    mul.wide.u32 %rd13, %r117, %r102;
+    add.s64 %rd14, %rd8, %rd13;
+    max.s64 %rd14, %rd14, %rd4;
+    min.s64 %rd14, %rd14, %rd6;
+
+    shr.u64 %rd19, %rd14, 16;
+    cvt.u32.u64 %r30, %rd19;
+    shr.u64 %rd19, %rd14, 8;
+    cvt.u32.u64 %r31, %rd19;
+    and.b32 %r31, %r31, 255;
+    add.u32 %r32, %r30, 1;
+    min.u32 %r32, %r32, %r26;
+    sub.u32 %r37, %r36, %r31;
+
+    sub.s64 %rd17, %rd14, %rd40;
+    max.s64 %rd17, %rd17, %rd4;
+    shr.u64 %rd17, %rd17, 1;
+    min.s64 %rd17, %rd17, %rd15;
+    shr.u64 %rd19, %rd17, 16;
+    cvt.u32.u64 %r50, %rd19;
+    shr.u64 %rd19, %rd17, 8;
+    cvt.u32.u64 %r51, %rd19;
+    and.b32 %r51, %r51, 255;
+    add.u32 %r52, %r50, 1;
+    min.u32 %r52, %r52, %r48;
+    sub.u32 %r56, %r36, %r51;
+
+    add.u32 %r40, %r118, %r30;
+    cvt.u64.u32 %rd21, %r40;
+    add.u64 %rd21, %rd1, %rd21;
+    ld.global.u8 %r41, [%rd21];
+    add.u32 %r40, %r118, %r32;
+    cvt.u64.u32 %rd21, %r40;
+    add.u64 %rd21, %rd1, %rd21;
+    ld.global.u8 %r42, [%rd21];
+    add.u32 %r40, %r119, %r30;
+    cvt.u64.u32 %rd21, %r40;
+    add.u64 %rd21, %rd1, %rd21;
+    ld.global.u8 %r43, [%rd21];
+    add.u32 %r40, %r119, %r32;
+    cvt.u64.u32 %rd21, %r40;
+    add.u64 %rd21, %rd1, %rd21;
+    ld.global.u8 %r44, [%rd21];
+
+    mul.lo.u32 %r45, %r41, %r37;
+    mad.lo.u32 %r45, %r42, %r31, %r45;
+    mul.lo.u32 %r46, %r43, %r37;
+    mad.lo.u32 %r46, %r44, %r31, %r46;
+    mul.lo.u32 %r47, %r45, %r38;
+    mad.lo.u32 %r47, %r46, %r34, %r47;
+    add.u32 %r47, %r47, 32768;
+    shr.u32 %r47, %r47, 16;
+    add.u32 %r113, %r113, %r47;
+
+    shl.b32 %r58, %r50, 1;
+    shl.b32 %r59, %r52, 1;
+    add.u32 %r60, %r120, %r58;
+    cvt.u64.u32 %rd22, %r60;
+    add.u64 %rd22, %rd2, %rd22;
+    ld.global.u8 %r61, [%rd22];
+    add.u64 %rd23, %rd22, 1;
+    ld.global.u8 %r62, [%rd23];
+    add.u32 %r60, %r120, %r59;
+    cvt.u64.u32 %rd22, %r60;
+    add.u64 %rd22, %rd2, %rd22;
+    ld.global.u8 %r63, [%rd22];
+    add.u64 %rd23, %rd22, 1;
+    ld.global.u8 %r64, [%rd23];
+    add.u32 %r60, %r121, %r58;
+    cvt.u64.u32 %rd22, %r60;
+    add.u64 %rd22, %rd2, %rd22;
+    ld.global.u8 %r65, [%rd22];
+    add.u64 %rd23, %rd22, 1;
+    ld.global.u8 %r66, [%rd23];
+    add.u32 %r60, %r121, %r59;
+    cvt.u64.u32 %rd22, %r60;
+    add.u64 %rd22, %rd2, %rd22;
+    ld.global.u8 %r67, [%rd22];
+    add.u64 %rd23, %rd22, 1;
+    ld.global.u8 %r68, [%rd23];
+
+    mul.lo.u32 %r69, %r61, %r56;
+    mad.lo.u32 %r69, %r63, %r51, %r69;
+    mul.lo.u32 %r70, %r65, %r56;
+    mad.lo.u32 %r70, %r67, %r51, %r70;
+    mul.lo.u32 %r71, %r69, %r57;
+    mad.lo.u32 %r71, %r70, %r54, %r71;
+    add.u32 %r71, %r71, 32768;
+    shr.u32 %r71, %r71, 16;
+    add.u32 %r114, %r114, %r71;
+
+    mul.lo.u32 %r72, %r62, %r56;
+    mad.lo.u32 %r72, %r64, %r51, %r72;
+    mul.lo.u32 %r73, %r66, %r56;
+    mad.lo.u32 %r73, %r68, %r51, %r73;
+    mul.lo.u32 %r74, %r72, %r57;
+    mad.lo.u32 %r74, %r73, %r54, %r74;
+    add.u32 %r74, %r74, 32768;
+    shr.u32 %r74, %r74, 16;
+    add.u32 %r115, %r115, %r74;
+
+    add.u32 %r117, %r117, 1;
+    setp.lt.u32 %p7, %r117, %r100;
+    @%p7 bra LOOP_X;
+
+    add.u32 %r116, %r116, 1;
+    setp.lt.u32 %p8, %r116, %r101;
+    @%p8 bra LOOP_Y;
+
+    mul.lo.u32 %r47, %r113, %r104;
+    add.u32 %r47, %r47, 32768;
+    shr.u32 %r47, %r47, 16;
+    mul.lo.u32 %r71, %r114, %r104;
+    add.u32 %r71, %r71, 32768;
+    shr.u32 %r71, %r71, 16;
+    mul.lo.u32 %r74, %r115, %r104;
+    add.u32 %r74, %r74, 32768;
+    shr.u32 %r74, %r74, 16;
+
+    sub.s32 %r80, %r47, %r107;
+    max.s32 %r80, %r80, 0;
+    sub.s32 %r81, %r71, 128;
+    sub.s32 %r82, %r74, 128;
+
+    mul.lo.s32 %r83, %r80, %r108;
+
+    mul.lo.s32 %r84, %r82, %r109;
+    add.s32 %r84, %r84, %r83;
+    add.s32 %r84, %r84, 128;
+    shr.s32 %r84, %r84, 8;
+    max.s32 %r84, %r84, 0;
+    min.s32 %r84, %r84, 255;
+
+    mul.lo.s32 %r85, %r81, %r110;
+    sub.s32 %r85, %r83, %r85;
+    mul.lo.s32 %r86, %r82, %r111;
+    sub.s32 %r85, %r85, %r86;
+    add.s32 %r85, %r85, 128;
+    shr.s32 %r85, %r85, 8;
+    max.s32 %r85, %r85, 0;
+    min.s32 %r85, %r85, 255;
+
+    mul.lo.s32 %r87, %r81, %r112;
+    add.s32 %r87, %r87, %r83;
+    add.s32 %r87, %r87, 128;
+    shr.s32 %r87, %r87, 8;
+    max.s32 %r87, %r87, 0;
+    min.s32 %r87, %r87, 255;
 
     bra STORE;
 
 BLACK:
-    mov.u32 %r41, 0;
-    mov.u32 %r42, 0;
-    mov.u32 %r44, 0;
+    mov.u32 %r84, 0;
+    mov.u32 %r85, 0;
+    mov.u32 %r87, 0;
 
 STORE:
-    shl.b32 %r50, %r20, 2;
-    mad.lo.u32 %r51, %r21, %r7, %r50;
-    cvt.u64.u32 %rd15, %r51;
-    add.u64 %rd15, %rd3, %rd15;
-    st.global.u8 [%rd15], %r41;
-    add.u64 %rd16, %rd15, 1;
-    st.global.u8 [%rd16], %r42;
-    add.u64 %rd16, %rd15, 2;
-    st.global.u8 [%rd16], %r44;
-    add.u64 %rd16, %rd15, 3;
-    mov.u32 %r52, 255;
-    st.global.u8 [%rd16], %r52;
+    shl.b32 %r90, %r20, 2;
+    mad.lo.u32 %r91, %r21, %r7, %r90;
+    cvt.u64.u32 %rd30, %r91;
+    add.u64 %rd30, %rd3, %rd30;
+    st.global.u8 [%rd30], %r84;
+    add.u64 %rd31, %rd30, 1;
+    st.global.u8 [%rd31], %r85;
+    add.u64 %rd31, %rd30, 2;
+    st.global.u8 [%rd31], %r87;
+    add.u64 %rd31, %rd30, 3;
+    mov.u32 %r92, 255;
+    st.global.u8 [%rd31], %r92;
 
 DONE:
     ret;
@@ -801,6 +1016,38 @@ struct VideoFitParameters
     uint32_t src_y0_fp { 0 };
     uint32_t step_x_fp { 1u << 16 };
     uint32_t step_y_fp { 1u << 16 };
+    /*
+     * Bilinear taps averaged per destination pixel. One tap reaches two source
+     * texels, so taps = ceil(step / 2) keeps adjacent taps within reach of each
+     * other and no source texel is skipped when minifying. The cap bounds the
+     * per-pixel cost; beyond a 16x minification aliasing returns gradually.
+     */
+    uint32_t taps_x { 1 };
+    uint32_t taps_y { 1 };
+    uint32_t sub_x_fp { 1u << 16 };
+    uint32_t sub_y_fp { 1u << 16 };
+    uint32_t inv_taps_fp { 1u << 16 };
+};
+
+constexpr uint32_t kVideoMaxTapsPerAxis = 8;
+
+/*
+ * YCbCr -> RGB terms handed to the CUDA kernel as 8.8 fixed point, derived from
+ * the stream's colorimetry, plus the chroma sample offsets in 16.16 luma units.
+ */
+struct VideoColorParameters
+{
+    int32_t y_offset { 16 };
+    int32_t y_scale { 298 };
+    int32_t r_v { 459 };
+    int32_t g_u { 55 };
+    int32_t g_v { 136 };
+    int32_t b_u { 541 };
+    uint32_t chroma_off_x_fp { 0 };
+    uint32_t chroma_off_y_fp { 1u << 15 };
+    const char* matrix_name { "bt709" };
+    const char* range_name { "limited" };
+    const char* chroma_site_name { "mpeg2" };
 };
 
 uint32_t
@@ -875,6 +1122,109 @@ compute_video_fit_parameters(VideoFillMode mode,
     params.src_y0_fp = double_to_fixed_16(src_y, TRUE);
     params.step_x_fp = double_to_fixed_16(sample_width / params.draw_width, FALSE);
     params.step_y_fp = double_to_fixed_16(sample_height / params.draw_height, FALSE);
+
+    const auto taps_for_step = [](uint32_t step_fp) {
+        const uint32_t taps = (step_fp + (2u << 16) - 1u) / (2u << 16);
+        return std::clamp(taps, 1u, kVideoMaxTapsPerAxis);
+    };
+    params.taps_x = taps_for_step(params.step_x_fp);
+    params.taps_y = taps_for_step(params.step_y_fp);
+    params.sub_x_fp = std::max(params.step_x_fp / params.taps_x, 1u);
+    params.sub_y_fp = std::max(params.step_y_fp / params.taps_y, 1u);
+    params.inv_taps_fp = static_cast<uint32_t>(
+        std::llround(65536.0 / static_cast<double>(params.taps_x * params.taps_y)));
+    return params;
+}
+
+const char*
+video_color_matrix_name(GstVideoColorMatrix matrix)
+{
+    switch (matrix) {
+    case GST_VIDEO_COLOR_MATRIX_BT601: return "bt601";
+    case GST_VIDEO_COLOR_MATRIX_BT709: return "bt709";
+    case GST_VIDEO_COLOR_MATRIX_BT2020: return "bt2020";
+    case GST_VIDEO_COLOR_MATRIX_SMPTE240M: return "smpte240m";
+    case GST_VIDEO_COLOR_MATRIX_FCC: return "fcc";
+    default: return "unknown";
+    }
+}
+
+/*
+ * The decoder's caps carry the stream colorimetry; GStreamer leaves the fields
+ * UNKNOWN when the bitstream does not signal them, in which case the same
+ * defaults GStreamer's own converters apply are used: BT.709 for HD sizes and
+ * BT.601 below that, limited range, and MPEG-2 style chroma siting (chroma
+ * co-sited with even luma columns, centred between luma rows).
+ */
+VideoColorParameters
+compute_video_color_parameters(const GstVideoInfo& info)
+{
+    VideoColorParameters params;
+
+    GstVideoColorMatrix matrix = info.colorimetry.matrix;
+    if (matrix == GST_VIDEO_COLOR_MATRIX_UNKNOWN || matrix == GST_VIDEO_COLOR_MATRIX_RGB) {
+        matrix = GST_VIDEO_INFO_HEIGHT(&info) > 576 ? GST_VIDEO_COLOR_MATRIX_BT709
+                                                    : GST_VIDEO_COLOR_MATRIX_BT601;
+    }
+    double kr = 0.2126;
+    double kb = 0.0722;
+    switch (matrix) {
+    case GST_VIDEO_COLOR_MATRIX_BT601:
+        kr = 0.299;
+        kb = 0.114;
+        break;
+    case GST_VIDEO_COLOR_MATRIX_BT2020:
+        kr = 0.2627;
+        kb = 0.0593;
+        break;
+    case GST_VIDEO_COLOR_MATRIX_SMPTE240M:
+        kr = 0.212;
+        kb = 0.087;
+        break;
+    case GST_VIDEO_COLOR_MATRIX_FCC:
+        kr = 0.30;
+        kb = 0.11;
+        break;
+    default:
+        break;
+    }
+    const double kg = 1.0 - kr - kb;
+
+    const bool full_range = info.colorimetry.range == GST_VIDEO_COLOR_RANGE_0_255;
+    const double luma_scale = full_range ? 1.0 : 255.0 / 219.0;
+    const double chroma_scale = full_range ? 1.0 : 255.0 / 224.0;
+    const auto fixed_8_8 = [](double value) {
+        return static_cast<int32_t>(std::llround(value * 256.0));
+    };
+    params.y_offset = full_range ? 0 : 16;
+    params.y_scale = fixed_8_8(luma_scale);
+    params.r_v = fixed_8_8(2.0 * (1.0 - kr) * chroma_scale);
+    params.g_u = fixed_8_8(2.0 * kb * (1.0 - kb) / kg * chroma_scale);
+    params.g_v = fixed_8_8(2.0 * kr * (1.0 - kr) / kg * chroma_scale);
+    params.b_u = fixed_8_8(2.0 * (1.0 - kb) * chroma_scale);
+    params.matrix_name = video_color_matrix_name(matrix);
+    params.range_name = full_range ? "full" : "limited";
+
+    /*
+     * A co-sited chroma sample sits on luma sample 2j, a non-co-sited one half
+     * way between 2j and 2j+1; the kernel subtracts the offset before halving
+     * the luma coordinate, so co-sited means 0 and centred means 0.5 luma.
+     */
+    GstVideoChromaSite site = info.chroma_site;
+    if (site == GST_VIDEO_CHROMA_SITE_UNKNOWN)
+        site = GST_VIDEO_CHROMA_SITE_MPEG2;
+    const bool h_cosited = (site & GST_VIDEO_CHROMA_SITE_H_COSITED) != 0;
+    const bool v_cosited = (site & GST_VIDEO_CHROMA_SITE_V_COSITED) != 0;
+    params.chroma_off_x_fp = h_cosited ? 0u : (1u << 15);
+    params.chroma_off_y_fp = v_cosited ? 0u : (1u << 15);
+    if (h_cosited && v_cosited)
+        params.chroma_site_name = "dv";
+    else if (h_cosited)
+        params.chroma_site_name = "mpeg2";
+    else if (v_cosited)
+        params.chroma_site_name = "v-cosited";
+    else
+        params.chroma_site_name = "jpeg";
     return params;
 }
 
@@ -2314,8 +2664,8 @@ upload_sample(VividVideoProducer* self, GstSample* sample)
         self->uploaded_samples++;
         if (!self->logged_first_upload) {
             g_message("VividVideoProducer: first GPU VA video frame uploaded src=%ux%u "
-                      "dst=%ux%u fill=%s draw=%ux%u+%d+%d decoder=%s samples=%"
-                      G_GUINT64_FORMAT,
+                      "dst=%ux%u fill=%s draw=%ux%u+%d+%d step=%.3fx%.3f filter=%s "
+                      "minify-steps=%u decoder=%s samples=%" G_GUINT64_FORMAT,
                       imported->width,
                       imported->height,
                       self->width,
@@ -2325,6 +2675,10 @@ upload_sample(VividVideoProducer* self, GstSample* sample)
                       fit.draw_height,
                       fit.dst_x,
                       fit.dst_y,
+                      fit.step_x_fp / 65536.0,
+                      fit.step_y_fp / 65536.0,
+                      imported->linear_filter ? "linear" : "nearest",
+                      self->vulkan.last_downsample_steps,
                       self->decoder_factory.empty() ? "(none)" : self->decoder_factory.c_str(),
                       self->uploaded_samples);
             self->logged_first_upload = true;
@@ -2405,6 +2759,7 @@ upload_sample(VividVideoProducer* self, GstSample* sample)
                                      static_cast<uint32_t>(src_height),
                                      self->width,
                                      self->height);
+    VideoColorParameters color = compute_video_color_parameters(info);
     void* params[] {
         &y_ptr,
         &uv_ptr,
@@ -2424,6 +2779,19 @@ upload_sample(VividVideoProducer* self, GstSample* sample)
         &fit.src_y0_fp,
         &fit.step_x_fp,
         &fit.step_y_fp,
+        &fit.taps_x,
+        &fit.taps_y,
+        &fit.sub_x_fp,
+        &fit.sub_y_fp,
+        &fit.inv_taps_fp,
+        &color.chroma_off_x_fp,
+        &color.chroma_off_y_fp,
+        &color.y_offset,
+        &color.y_scale,
+        &color.r_v,
+        &color.g_u,
+        &color.g_v,
+        &color.b_u,
     };
 
     bool pushed = gst_cuda_context_push(cuda_context);
@@ -2480,8 +2848,8 @@ upload_sample(VividVideoProducer* self, GstSample* sample)
     self->uploaded_samples++;
     if (!self->logged_first_upload) {
         g_message("VividVideoProducer: first GPU video frame uploaded src=%dx%d dst=%ux%u "
-                  "fill=%s draw=%ux%u+%u+%u decoder=%s cuda-device=%d "
-                  "samples=%" G_GUINT64_FORMAT,
+                  "fill=%s draw=%ux%u+%u+%u step=%.3fx%.3f taps=%ux%u matrix=%s range=%s "
+                  "chroma-site=%s decoder=%s cuda-device=%d samples=%" G_GUINT64_FORMAT,
                   src_width,
                   src_height,
                   self->width,
@@ -2491,6 +2859,13 @@ upload_sample(VividVideoProducer* self, GstSample* sample)
                   fit.draw_height,
                   fit.dst_x,
                   fit.dst_y,
+                  fit.step_x_fp / 65536.0,
+                  fit.step_y_fp / 65536.0,
+                  fit.taps_x,
+                  fit.taps_y,
+                  color.matrix_name,
+                  color.range_name,
+                  color.chroma_site_name,
                   self->decoder_factory.empty() ? "(none)" : self->decoder_factory.c_str(),
                   self->expected_cuda_device_id,
                   self->uploaded_samples);

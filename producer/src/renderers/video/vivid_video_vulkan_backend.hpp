@@ -175,6 +175,12 @@ struct VividVideoVulkanImportedImage
     VkFormat format { VK_FORMAT_UNDEFINED };
     uint32_t width { 0 };
     uint32_t height { 0 };
+    /*
+     * True when the driver reports linear sampling for this format/modifier
+     * tuple, so the scale blit into the export ring may use bilinear filtering
+     * instead of point sampling.
+     */
+    bool linear_filter { false };
 
     VividVideoVulkanImportedImage() = default;
     VividVideoVulkanImportedImage(const VividVideoVulkanImportedImage&) = delete;
@@ -225,6 +231,37 @@ struct VividVideoVulkanBackend
     bool export_requires_dedicated { false };
     bool export_forbids_device_local_memory { false };
     std::string device_name;
+
+    /*
+     * Imported VA frames are re-created every sample, so the per-tuple format
+     * feature query is cached here instead of being repeated for each frame.
+     */
+    struct ImportedFormatFeatures
+    {
+        VkFormat format { VK_FORMAT_UNDEFINED };
+        uint64_t modifier { 0 };
+        VkFormatFeatureFlags features { 0 };
+    };
+    std::vector<ImportedFormatFeatures> imported_format_features;
+
+    /*
+     * Minification chain for imported VA frames. A linear blit only reaches two
+     * source texels per output pixel, so a downscale beyond 2x is split into
+     * halving steps through these device-local optimal-tiled images; they are
+     * sized for the current source region and re-created when it changes.
+     */
+    struct DownsampleImage
+    {
+        VkImage image { VK_NULL_HANDLE };
+        VkDeviceMemory memory { VK_NULL_HANDLE };
+        uint32_t width { 0 };
+        uint32_t height { 0 };
+        VkFormat format { VK_FORMAT_UNDEFINED };
+    };
+    std::vector<DownsampleImage> downsample_chain;
+    VkFormat downsample_probe_format { VK_FORMAT_UNDEFINED };
+    bool downsample_format_supported { false };
+    uint32_t last_downsample_steps { 0 };
 
     VividVideoVulkanBackend() = default;
     VividVideoVulkanBackend(const VividVideoVulkanBackend&) = delete;

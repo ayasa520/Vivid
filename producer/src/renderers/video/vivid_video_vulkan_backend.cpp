@@ -545,6 +545,7 @@ VividVideoVulkanImportedImage::operator=(VividVideoVulkanImportedImage&& other) 
     format = std::exchange(other.format, VK_FORMAT_UNDEFINED);
     width = std::exchange(other.width, 0);
     height = std::exchange(other.height, 0);
+    linear_filter = std::exchange(other.linear_filter, false);
     return *this;
 }
 
@@ -575,6 +576,7 @@ VividVideoVulkanImportedImage::reset()
     format = VK_FORMAT_UNDEFINED;
     width = 0;
     height = 0;
+    linear_filter = false;
 }
 
 VividVideoVulkanBackend::~VividVideoVulkanBackend()
@@ -590,6 +592,18 @@ VividVideoVulkanBackend::reset()
     cuda_sync.reset();
     for (auto& image : images)
         image.reset();
+    for (auto& stage : downsample_chain) {
+        if (device != VK_NULL_HANDLE) {
+            if (stage.image != VK_NULL_HANDLE)
+                vkDestroyImage(device, stage.image, nullptr);
+            if (stage.memory != VK_NULL_HANDLE)
+                vkFreeMemory(device, stage.memory, nullptr);
+        }
+    }
+    downsample_chain.clear();
+    downsample_probe_format = VK_FORMAT_UNDEFINED;
+    downsample_format_supported = false;
+    last_downsample_steps = 0;
     for (auto& fence : slot_fences) {
         if (fence != VK_NULL_HANDLE && device != VK_NULL_HANDLE)
             vkDestroyFence(device, fence, nullptr);
@@ -633,6 +647,7 @@ VividVideoVulkanBackend::reset()
     export_requires_dedicated = false;
     export_forbids_device_local_memory = false;
     device_name.clear();
+    imported_format_features.clear();
 }
 
 VividVideoVulkanExportImage&
@@ -1748,6 +1763,63 @@ parse_va_rgba_dmabuf_caps(GstCaps* caps,
     return true;
 }
 
+/*
+ * Format features that apply to an image created with DRM-modifier tiling come
+ * from the modifier's own property entry, not from the linear/optimal tiling
+ * feature masks. vkCmdBlitImage with VK_FILTER_LINEAR is only valid when that
+ * entry advertises linear sampled-image filtering for the source format.
+ */
+VkFormatFeatureFlags
+imported_modifier_format_features(VividVideoVulkanBackend& backend,
+                                  VkFormat vk_format,
+                                  uint64_t drm_modifier)
+{
+    for (const auto& entry : backend.imported_format_features) {
+        if (entry.format == vk_format && entry.modifier == drm_modifier)
+            return entry.features;
+    }
+
+    VkFormatFeatureFlags features = 0;
+    if (backend.physical_device != VK_NULL_HANDLE) {
+        VkDrmFormatModifierPropertiesListEXT modifier_list {
+            .sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT,
+            .pNext = nullptr,
+            .drmFormatModifierCount = 0,
+            .pDrmFormatModifierProperties = nullptr,
+        };
+        VkFormatProperties2 format_properties {
+            .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
+            .pNext = &modifier_list,
+            .formatProperties = {},
+        };
+        vkGetPhysicalDeviceFormatProperties2(backend.physical_device,
+                                             vk_format,
+                                             &format_properties);
+        std::vector<VkDrmFormatModifierPropertiesEXT> modifiers(
+            modifier_list.drmFormatModifierCount);
+        if (!modifiers.empty()) {
+            modifier_list.pDrmFormatModifierProperties = modifiers.data();
+            vkGetPhysicalDeviceFormatProperties2(backend.physical_device,
+                                                 vk_format,
+                                                 &format_properties);
+        }
+        for (const auto& modifier : modifiers) {
+            if (modifier.drmFormatModifier == drm_modifier) {
+                features = modifier.drmFormatModifierTilingFeatures;
+                break;
+            }
+        }
+    }
+
+    backend.imported_format_features.push_back(
+        VividVideoVulkanBackend::ImportedFormatFeatures {
+            .format = vk_format,
+            .modifier = drm_modifier,
+            .features = features,
+        });
+    return features;
+}
+
 std::optional<VividVideoVulkanImportedImage>
 import_single_plane_drm_rgba_image(VividVideoVulkanBackend& backend,
                                    uint32_t width,
@@ -1765,11 +1837,19 @@ import_single_plane_drm_rgba_image(VividVideoVulkanBackend& backend,
     if (drm_modifier == DRM_FORMAT_MOD_INVALID)
         drm_modifier = DRM_FORMAT_MOD_LINEAR;
 
+    constexpr VkFormatFeatureFlags kLinearBlitSourceFeatures =
+        VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    const VkFormatFeatureFlags modifier_features =
+        imported_modifier_format_features(backend, vk_format, drm_modifier);
+
     VividVideoVulkanImportedImage result;
     result.device = backend.device;
     result.format = vk_format;
     result.width = width;
     result.height = height;
+    result.linear_filter =
+        (modifier_features & kLinearBlitSourceFeatures) == kLinearBlitSourceFeatures;
 
     VkExternalMemoryImageCreateInfo external_image {
         .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
@@ -1864,6 +1944,178 @@ import_single_plane_drm_rgba_image(VividVideoVulkanBackend& backend,
     }
 
     return result;
+}
+
+constexpr size_t kMaxDownsampleSteps = 8;
+
+/*
+ * Intermediate extents for minifying a source region into a destination rect.
+ * Each step halves whichever axis is still more than 2x larger than the
+ * destination, so every blit in the chain (including the final one into the
+ * export image) minifies by at most 2x and stays within the reach of a linear
+ * filter. An empty plan means a single blit suffices.
+ */
+std::vector<VkExtent2D>
+compute_downsample_plan(uint32_t src_width,
+                        uint32_t src_height,
+                        uint32_t dst_width,
+                        uint32_t dst_height)
+{
+    std::vector<VkExtent2D> plan;
+    if (src_width == 0 || src_height == 0 || dst_width == 0 || dst_height == 0)
+        return plan;
+
+    uint32_t width = src_width;
+    uint32_t height = src_height;
+    while ((width > 2u * dst_width || height > 2u * dst_height) &&
+           plan.size() < kMaxDownsampleSteps) {
+        const uint32_t next_width = width > 2u * dst_width ? (width + 1u) / 2u : width;
+        const uint32_t next_height = height > 2u * dst_height ? (height + 1u) / 2u : height;
+        if (next_width == width && next_height == height)
+            break;
+        plan.push_back(VkExtent2D { next_width, next_height });
+        width = next_width;
+        height = next_height;
+    }
+    return plan;
+}
+
+void
+destroy_downsample_chain(VividVideoVulkanBackend& backend)
+{
+    for (auto& stage : backend.downsample_chain) {
+        if (stage.image != VK_NULL_HANDLE)
+            vkDestroyImage(backend.device, stage.image, nullptr);
+        if (stage.memory != VK_NULL_HANDLE)
+            vkFreeMemory(backend.device, stage.memory, nullptr);
+    }
+    backend.downsample_chain.clear();
+}
+
+bool
+downsample_format_usable(VividVideoVulkanBackend& backend, VkFormat format)
+{
+    if (backend.downsample_probe_format == format)
+        return backend.downsample_format_supported;
+
+    constexpr VkFormatFeatureFlags want = VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+        VK_FORMAT_FEATURE_BLIT_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    VkFormatProperties properties {};
+    vkGetPhysicalDeviceFormatProperties(backend.physical_device, format, &properties);
+    backend.downsample_probe_format = format;
+    backend.downsample_format_supported =
+        (properties.optimalTilingFeatures & want) == want;
+    if (!backend.downsample_format_supported) {
+        g_message("VividVideoProducer: optimal tiling lacks linear blit features for "
+                  "format=%u; heavy minification uses a single blit",
+                  static_cast<unsigned>(format));
+    }
+    return backend.downsample_format_supported;
+}
+
+bool
+ensure_downsample_chain(VividVideoVulkanBackend& backend,
+                        VkFormat format,
+                        const std::vector<VkExtent2D>& plan)
+{
+    if (backend.downsample_chain.size() == plan.size()) {
+        bool same = true;
+        for (size_t i = 0; i < plan.size(); i++) {
+            const auto& stage = backend.downsample_chain[i];
+            if (stage.format != format || stage.width != plan[i].width ||
+                stage.height != plan[i].height) {
+                same = false;
+                break;
+            }
+        }
+        if (same)
+            return true;
+    }
+
+    destroy_downsample_chain(backend);
+    if (!downsample_format_usable(backend, format))
+        return false;
+
+    for (const VkExtent2D& extent : plan) {
+        VividVideoVulkanBackend::DownsampleImage stage;
+        stage.width = extent.width;
+        stage.height = extent.height;
+        stage.format = format;
+
+        VkImageCreateInfo image_info {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = format,
+            .extent = VkExtent3D { extent.width, extent.height, 1 },
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        };
+        VkResult result = vkCreateImage(backend.device, &image_info, nullptr, &stage.image);
+        if (result != VK_SUCCESS) {
+            g_warning("VividVideoProducer: failed to create minification image %ux%u result=%s; "
+                      "heavy minification uses a single blit",
+                      extent.width,
+                      extent.height,
+                      vk_result_name(result));
+            destroy_downsample_chain(backend);
+            backend.downsample_format_supported = false;
+            return false;
+        }
+
+        VkMemoryRequirements requirements {};
+        vkGetImageMemoryRequirements(backend.device, stage.image, &requirements);
+        auto memory_type = find_memory_type(backend.memory_properties,
+                                            requirements.memoryTypeBits,
+                                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (!memory_type.has_value())
+            memory_type = find_memory_type(backend.memory_properties, requirements.memoryTypeBits, 0);
+        if (!memory_type.has_value()) {
+            g_warning("VividVideoProducer: no memory type for minification image; heavy "
+                      "minification uses a single blit");
+            vkDestroyImage(backend.device, stage.image, nullptr);
+            destroy_downsample_chain(backend);
+            backend.downsample_format_supported = false;
+            return false;
+        }
+        VkMemoryAllocateInfo allocate_info {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .pNext = nullptr,
+            .allocationSize = requirements.size,
+            .memoryTypeIndex = memory_type.value(),
+        };
+        result = vkAllocateMemory(backend.device, &allocate_info, nullptr, &stage.memory);
+        if (result == VK_SUCCESS)
+            result = vkBindImageMemory(backend.device, stage.image, stage.memory, 0);
+        if (result != VK_SUCCESS) {
+            g_warning("VividVideoProducer: failed to back minification image result=%s; heavy "
+                      "minification uses a single blit",
+                      vk_result_name(result));
+            vkDestroyImage(backend.device, stage.image, nullptr);
+            if (stage.memory != VK_NULL_HANDLE)
+                vkFreeMemory(backend.device, stage.memory, nullptr);
+            destroy_downsample_chain(backend);
+            backend.downsample_format_supported = false;
+            return false;
+        }
+        backend.downsample_chain.push_back(stage);
+    }
+
+    g_message("VividVideoProducer: minification chain steps=%zu first=%ux%u last=%ux%u",
+              plan.size(),
+              plan.front().width,
+              plan.front().height,
+              plan.back().width,
+              plan.back().height);
+    return true;
 }
 
 void
@@ -2720,6 +2972,7 @@ VividVideoVulkanBackend::submit_imported_image(const VividVideoVulkanImportedIma
         regions.dst1.y == static_cast<int32_t>(target.height);
 
     if (direct_copy) {
+        backend.last_downsample_steps = 0;
         VkImageCopy copy {
             .srcSubresource =
                 VkImageSubresourceLayers {
@@ -2756,32 +3009,133 @@ VividVideoVulkanBackend::submit_imported_image(const VividVideoVulkanImportedIma
                              1,
                              &color_range);
 
+        /*
+         * The decoded frame rarely matches the output size (a 4K or 1080p
+         * video on a 1440p output is the common case), so these blits are the
+         * only resampling step between the decoder and the screen. Point
+         * sampling produces visible stair-stepping on every edge, so bilinear
+         * filtering is used whenever the imported format allows it. A linear
+         * blit only reaches two source texels, so when the region is minified
+         * by more than 2x it first passes through halving steps in the cached
+         * chain images; each hop, including the last one into the export slot,
+         * then scales by at most 2x and no source texel is skipped.
+         */
+        const uint32_t region_width =
+            static_cast<uint32_t>(std::max(regions.src1.x - regions.src0.x, 1));
+        const uint32_t region_height =
+            static_cast<uint32_t>(std::max(regions.src1.y - regions.src0.y, 1));
+        const uint32_t draw_width =
+            static_cast<uint32_t>(std::max(regions.dst1.x - regions.dst0.x, 1));
+        const uint32_t draw_height =
+            static_cast<uint32_t>(std::max(regions.dst1.y - regions.dst0.y, 1));
+        std::vector<VkExtent2D> plan;
+        if (source.linear_filter)
+            plan = compute_downsample_plan(region_width, region_height, draw_width, draw_height);
+        if (!plan.empty() && !ensure_downsample_chain(backend, source.format, plan))
+            plan.clear();
+        backend.last_downsample_steps = static_cast<uint32_t>(plan.size());
+
+        const VkImageSubresourceLayers color_layer {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .mipLevel = 0,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        };
+        VkImage blit_source = source.image;
+        VkOffset3D blit_src0 = regions.src0;
+        VkOffset3D blit_src1 = regions.src1;
+        for (size_t i = 0; i < plan.size(); i++) {
+            const VividVideoVulkanBackend::DownsampleImage& stage = backend.downsample_chain[i];
+            const VkOffset3D stage_end {
+                static_cast<int32_t>(stage.width),
+                static_cast<int32_t>(stage.height),
+                1,
+            };
+
+            /* Previous contents are irrelevant: discard via UNDEFINED. */
+            VkImageMemoryBarrier to_write {
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = 0,
+                .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = stage.image,
+                .subresourceRange = color_range,
+            };
+            vkCmdPipelineBarrier(backend.command_buffer,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 0,
+                                 0,
+                                 nullptr,
+                                 0,
+                                 nullptr,
+                                 1,
+                                 &to_write);
+
+            VkImageBlit step {
+                .srcSubresource = color_layer,
+                .srcOffsets = { blit_src0, blit_src1 },
+                .dstSubresource = color_layer,
+                .dstOffsets = { VkOffset3D { 0, 0, 0 }, stage_end },
+            };
+            vkCmdBlitImage(backend.command_buffer,
+                           blit_source,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           stage.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           1,
+                           &step,
+                           VK_FILTER_LINEAR);
+
+            VkImageMemoryBarrier to_read {
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = stage.image,
+                .subresourceRange = color_range,
+            };
+            vkCmdPipelineBarrier(backend.command_buffer,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 0,
+                                 0,
+                                 nullptr,
+                                 0,
+                                 nullptr,
+                                 1,
+                                 &to_read);
+
+            blit_source = stage.image;
+            blit_src0 = VkOffset3D { 0, 0, 0 };
+            blit_src1 = stage_end;
+        }
+
+        const VkFilter blit_filter = (!plan.empty() || source.linear_filter)
+            ? VK_FILTER_LINEAR
+            : VK_FILTER_NEAREST;
         VkImageBlit blit {
-            .srcSubresource =
-                VkImageSubresourceLayers {
-                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                    .mipLevel = 0,
-                    .baseArrayLayer = 0,
-                    .layerCount = 1,
-                },
-            .srcOffsets = { regions.src0, regions.src1 },
-            .dstSubresource =
-                VkImageSubresourceLayers {
-                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                    .mipLevel = 0,
-                    .baseArrayLayer = 0,
-                    .layerCount = 1,
-                },
+            .srcSubresource = color_layer,
+            .srcOffsets = { blit_src0, blit_src1 },
+            .dstSubresource = color_layer,
             .dstOffsets = { regions.dst0, regions.dst1 },
         };
         vkCmdBlitImage(backend.command_buffer,
-                       source.image,
+                       blit_source,
                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                        target.image,
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                        1,
                        &blit,
-                       VK_FILTER_NEAREST);
+                       blit_filter);
     }
 
     VkImageMemoryBarrier release {
