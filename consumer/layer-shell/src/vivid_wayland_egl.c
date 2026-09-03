@@ -60,6 +60,9 @@
 #ifndef EGL_SYNC_NATIVE_FENCE_FD_ANDROID
 #define EGL_SYNC_NATIVE_FENCE_FD_ANDROID 0x3145
 #endif
+#ifndef EGL_NO_NATIVE_FENCE_FD_ANDROID
+#define EGL_NO_NATIVE_FENCE_FD_ANDROID -1
+#endif
 
 static const char* k_vert_src =
     "attribute vec2 a_pos;\n"
@@ -219,6 +222,8 @@ vivid_wayland_egl_init(VividWaylandEgl* egl, struct wl_display* display)
     egl->create_sync = (PFNEGLCREATESYNCKHRPROC)eglGetProcAddress("eglCreateSyncKHR");
     egl->wait_sync = (PFNEGLWAITSYNCKHRPROC)eglGetProcAddress("eglWaitSyncKHR");
     egl->destroy_sync = (PFNEGLDESTROYSYNCKHRPROC)eglGetProcAddress("eglDestroySyncKHR");
+    egl->dup_native_fence_fd =
+        (PFNEGLDUPNATIVEFENCEFDANDROIDPROC)eglGetProcAddress("eglDupNativeFenceFDANDROID");
 
     if (!display) {
         vivid_wayland_error("missing Wayland display for EGL");
@@ -246,6 +251,10 @@ vivid_wayland_egl_init(VividWaylandEgl* egl, struct wl_display* display)
         vivid_wayland_error("eglBindAPI(OpenGL ES) failed");
         return false;
     }
+
+    const char* display_extensions = eglQueryString(egl->display, EGL_EXTENSIONS);
+    egl->native_fence_export = egl->create_sync && egl->destroy_sync &&
+        egl->dup_native_fence_fd && has_ext(display_extensions, "EGL_ANDROID_native_fence_sync");
 
     const EGLint config_attrs[] = {
         EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
@@ -872,6 +881,69 @@ vivid_wayland_egl_draw_frame(VividWaylandEgl* egl,
     glDisableVertexAttribArray(1);
     glBindTexture(GL_TEXTURE_2D, 0);
     glUseProgram(0);
-    glFinish();
+    /*
+     * Deliberately no glFinish() here. The draw is queued behind the
+     * producer's acquire fence, so finishing it on the CPU would block this
+     * single-threaded consumer for the producer's whole GPU frame time. The
+     * caller orders the producer's release against the draw with a fence
+     * exported by vivid_wayland_egl_export_draw_fence() instead.
+     */
     return true;
+}
+
+int
+vivid_wayland_egl_export_draw_fence(VividWaylandEgl* egl, const char* context)
+{
+    if (!egl || egl->display == EGL_NO_DISPLAY)
+        return -1;
+    if (!egl->native_fence_export) {
+        if (!egl->native_fence_export_logged) {
+            egl->native_fence_export_logged = true;
+            vivid_wayland_warn("EGL_ANDROID_native_fence_sync export unavailable; "
+                               "release fences fall back to glFinish()");
+        }
+        return -1;
+    }
+    if (eglGetCurrentContext() == EGL_NO_CONTEXT) {
+        vivid_wayland_warn("EGL draw fence export without current context context=%s",
+                           context ? context : "");
+        return -1;
+    }
+
+    /*
+     * Creating a native fence sync without an fd inserts a fence at the
+     * current point of the command stream. The fd only becomes available once
+     * that command stream has been flushed, so flush explicitly instead of
+     * relying on driver-specific implicit flushes.
+     */
+    const EGLint attrs[] = {
+        EGL_SYNC_NATIVE_FENCE_FD_ANDROID,
+        EGL_NO_NATIVE_FENCE_FD_ANDROID,
+        EGL_NONE,
+    };
+    EGLSyncKHR sync = egl->create_sync(egl->display, EGL_SYNC_NATIVE_FENCE_ANDROID, attrs);
+    if (sync == EGL_NO_SYNC_KHR) {
+        vivid_wayland_warn("eglCreateSyncKHR(draw fence) failed egl=0x%x context=%s",
+                           eglGetError(),
+                           context ? context : "");
+        return -1;
+    }
+    glFlush();
+    int fd = egl->dup_native_fence_fd(egl->display, sync);
+    egl->destroy_sync(egl->display, sync);
+    if (fd == EGL_NO_NATIVE_FENCE_FD_ANDROID) {
+        vivid_wayland_warn("eglDupNativeFenceFDANDROID(draw fence) failed egl=0x%x context=%s",
+                           eglGetError(),
+                           context ? context : "");
+        return -1;
+    }
+    return fd;
+}
+
+void
+vivid_wayland_egl_wait_draw_idle(VividWaylandEgl* egl)
+{
+    if (!egl || egl->display == EGL_NO_DISPLAY || eglGetCurrentContext() == EGL_NO_CONTEXT)
+        return;
+    glFinish();
 }

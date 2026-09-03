@@ -255,26 +255,28 @@ vivid_display_consumer_dmabuf_texture_query_vulkan_relay_caps_json(void)
 #endif
 }
 
-/**
- * vivid_display_consumer_dmabuf_texture_signal_release_syncobj:
- * @render_node: producer render node named in BIND_BUFFERS
- * @syncobj_fd: binary release syncobj fd received with FRAME_READY
- *
- * Signals the per-frame release syncobj after the Vulkan relay has completed
- * copying the producer image into its consumer-owned shadow.
- *
- * Returns: %TRUE when the release syncobj was signaled
+/*
+ * Both release operations need a local handle for the daemon's syncobj. The
+ * handle is a per-file-description reference to the same kernel object the
+ * daemon waits on, so whatever fence state we attach through it is what the
+ * daemon observes; destroying the handle afterwards only drops our reference.
  */
-gboolean
-vivid_display_consumer_dmabuf_texture_signal_release_syncobj(const gchar* render_node,
-                                                             gint         syncobj_fd,
-                                                             GError**     error)
+typedef int (*ReleaseSyncobjOp)(int drm_fd, guint32 handle, gpointer op_data);
+
+static gboolean
+with_release_syncobj_handle(const gchar*     render_node,
+                            gint             syncobj_fd,
+                            const gchar*     op_name,
+                            ReleaseSyncobjOp op,
+                            gpointer         op_data,
+                            GError**         error)
 {
     if (!render_node || !*render_node) {
-        g_set_error_literal(error,
-                            VIVID_DISPLAY_CONSUMER_DMABUF_TEXTURE_ERROR,
-                            VIVID_DISPLAY_CONSUMER_DMABUF_TEXTURE_ERROR_FAILED,
-                            "missing render node for release syncobj signal");
+        g_set_error(error,
+                    VIVID_DISPLAY_CONSUMER_DMABUF_TEXTURE_ERROR,
+                    VIVID_DISPLAY_CONSUMER_DMABUF_TEXTURE_ERROR_FAILED,
+                    "missing render node for release syncobj %s",
+                    op_name);
         return FALSE;
     }
     if (syncobj_fd < 0) {
@@ -290,8 +292,9 @@ vivid_display_consumer_dmabuf_texture_signal_release_syncobj(const gchar* render
         g_set_error(error,
                     VIVID_DISPLAY_CONSUMER_DMABUF_TEXTURE_ERROR,
                     VIVID_DISPLAY_CONSUMER_DMABUF_TEXTURE_ERROR_FAILED,
-                    "open(%s) for release syncobj signal failed: %s",
+                    "open(%s) for release syncobj %s failed: %s",
                     render_node,
+                    op_name,
                     g_strerror(errno));
         return FALSE;
     }
@@ -312,14 +315,15 @@ vivid_display_consumer_dmabuf_texture_signal_release_syncobj(const gchar* render
     }
 
     errno = 0;
-    result = drmSyncobjSignal(drm_fd, &handle, 1);
-    const int signal_error = errno != 0 ? errno : -result;
+    result = op(drm_fd, handle, op_data);
+    const int op_error = errno != 0 ? errno : -result;
     errno = 0;
     const int destroy_result = drmSyncobjDestroy(drm_fd, handle);
     if (destroy_result != 0) {
         g_warning("VividDisplayConsumer: drmSyncobjDestroy(release handle=%u) "
-                  "failed after signal: %s",
+                  "failed after %s: %s",
                   handle,
+                  op_name,
                   g_strerror(errno != 0 ? errno : -destroy_result));
     }
     close(drm_fd);
@@ -328,14 +332,89 @@ vivid_display_consumer_dmabuf_texture_signal_release_syncobj(const gchar* render
         g_set_error(error,
                     VIVID_DISPLAY_CONSUMER_DMABUF_TEXTURE_ERROR,
                     VIVID_DISPLAY_CONSUMER_DMABUF_TEXTURE_ERROR_FAILED,
-                    "drmSyncobjSignal(%s handle=%u) failed: %s",
+                    "release syncobj %s(%s handle=%u) failed: %s",
+                    op_name,
                     render_node,
                     handle,
-                    g_strerror(signal_error));
+                    g_strerror(op_error));
         return FALSE;
     }
 
     return TRUE;
+}
+
+static int
+release_syncobj_signal_op(int drm_fd, guint32 handle, gpointer op_data)
+{
+    (void)op_data;
+    return drmSyncobjSignal(drm_fd, &handle, 1);
+}
+
+static int
+release_syncobj_import_sync_file_op(int drm_fd, guint32 handle, gpointer op_data)
+{
+    const int sync_file_fd = *(const int*)op_data;
+    return drmSyncobjImportSyncFile(drm_fd, handle, sync_file_fd);
+}
+
+/**
+ * vivid_display_consumer_dmabuf_texture_signal_release_syncobj:
+ * @render_node: producer render node named in BIND_BUFFERS
+ * @syncobj_fd: binary release syncobj fd received with FRAME_READY
+ *
+ * Signals the per-frame release syncobj from the host. Used when the
+ * consumer never submitted GPU work that reads the producer image, or once
+ * such work is known to have completed.
+ *
+ * Returns: %TRUE when the release syncobj was signaled
+ */
+gboolean
+vivid_display_consumer_dmabuf_texture_signal_release_syncobj(const gchar* render_node,
+                                                             gint         syncobj_fd,
+                                                             GError**     error)
+{
+    return with_release_syncobj_handle(render_node,
+                                       syncobj_fd,
+                                       "signal",
+                                       release_syncobj_signal_op,
+                                       NULL,
+                                       error);
+}
+
+/**
+ * vivid_display_consumer_dmabuf_texture_attach_release_sync_file:
+ * @render_node: producer render node named in BIND_BUFFERS
+ * @syncobj_fd: binary release syncobj fd received with FRAME_READY
+ * @sync_file_fd: sync_file whose fence completes when the consumer's copy
+ *   of the producer image has finished on the GPU; not consumed
+ *
+ * Replaces the release syncobj's fence with @sync_file_fd's fence. The
+ * daemon's release wait then completes when the GPU finishes the copy,
+ * without any consumer thread blocking on that copy. This is the
+ * explicit-sync counterpart of the host signal above.
+ *
+ * Returns: %TRUE when the fence was attached
+ */
+gboolean
+vivid_display_consumer_dmabuf_texture_attach_release_sync_file(const gchar* render_node,
+                                                               gint         syncobj_fd,
+                                                               gint         sync_file_fd,
+                                                               GError**     error)
+{
+    if (sync_file_fd < 0) {
+        g_set_error_literal(error,
+                            VIVID_DISPLAY_CONSUMER_DMABUF_TEXTURE_ERROR,
+                            VIVID_DISPLAY_CONSUMER_DMABUF_TEXTURE_ERROR_FAILED,
+                            "invalid release sync_file fd");
+        return FALSE;
+    }
+    int fd = sync_file_fd;
+    return with_release_syncobj_handle(render_node,
+                                       syncobj_fd,
+                                       "import-sync-file",
+                                       release_syncobj_import_sync_file_op,
+                                       &fd,
+                                       error);
 }
 
 void

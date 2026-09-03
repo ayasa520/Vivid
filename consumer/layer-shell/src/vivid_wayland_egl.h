@@ -49,6 +49,11 @@ typedef struct {
     PFNEGLCREATESYNCKHRPROC create_sync;
     PFNEGLWAITSYNCKHRPROC wait_sync;
     PFNEGLDESTROYSYNCKHRPROC destroy_sync;
+    PFNEGLDUPNATIVEFENCEFDANDROIDPROC dup_native_fence_fd;
+    /* EGL_ANDROID_native_fence_sync is exposed by the display, so a fence
+     * inserted after the shadow draw can be exported as a sync_file. */
+    bool native_fence_export;
+    bool native_fence_export_logged;
     PFNGLEGLIMAGETARGETTEXTURE2DOESPROC image_target_texture;
     GLuint program;
     GLint loc_pos;
@@ -76,6 +81,12 @@ GLuint vivid_wayland_egl_create_texture(VividWaylandEgl* egl,
                                         char* error,
                                         size_t error_size);
 void vivid_wayland_egl_destroy_image(VividWaylandEgl* egl, EGLImageKHR* image);
+/*
+ * Records the draw of the producer texture into the current surface. The GL
+ * commands are only queued; call vivid_wayland_egl_export_draw_fence() to
+ * obtain a fence for their completion, or vivid_wayland_egl_wait_draw_idle()
+ * to block until they have executed.
+ */
 bool vivid_wayland_egl_draw_frame(VividWaylandEgl* egl,
                                   GLuint texture,
                                   int surface_w,
@@ -85,5 +96,13 @@ bool vivid_wayland_egl_draw_frame(VividWaylandEgl* egl,
                                   const VividWaylandRect* source,
                                   const VividWaylandRect* dest,
                                   const float clear_color[4]);
+/*
+ * Inserts a fence after everything queued on the current context and exports
+ * it as a sync_file. Returns the fd (caller closes it) or -1 when native fence
+ * export is unavailable or failed.
+ */
+int vivid_wayland_egl_export_draw_fence(VividWaylandEgl* egl, const char* context);
+/* CPU wait until every queued GL command on the current context has executed. */
+void vivid_wayland_egl_wait_draw_idle(VividWaylandEgl* egl);
 
 #endif

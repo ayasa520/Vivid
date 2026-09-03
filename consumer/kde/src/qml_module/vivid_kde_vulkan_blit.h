@@ -12,8 +12,24 @@
  * (per-modifier format features often exclude SAMPLED on vendor
  * tilings). The host needs a sampler-friendly OPTIMAL VkImage; this
  * blitter owns that "shadow" and copies each frame into it on the
- * host's queue, then host-signals the daemon's release_syncobj after
- * the GPU copy completes.
+ * host's queue.
+ *
+ * The copy is fully asynchronous with respect to the calling thread.
+ * The KDE plugin runs the blitter on Qt's scene graph render thread, so
+ * the blitter must never wait for GPU progress there: the producer
+ * publishes frames right after vkQueueSubmit (its acquire sync_file is
+ * still pending), and on a saturated GPU each frame's GPU work can take
+ * tens of milliseconds. A CPU-side wait per frame would stall the whole
+ * wallpaper window's scene graph for that long every frame. Instead the
+ * blit waits for the acquire fence on the GPU, exports its own
+ * completion as a sync_file, and hands that fence to the shadow's
+ * dma_resv when the shadow is exported (implicit sync for external
+ * readers) and to the daemon's release syncobj (so the producer may
+ * reuse the source slot once the copy has finished). Qt samples the
+ * shadow on the same VkQueue, so its reads are ordered after the copy
+ * by queue submission order. A small ring of command buffers keeps
+ * several copies in flight; when the ring is full the frame is dropped
+ * and its source slot is released immediately.
  *
  * Reuses ww_vk_backend_t for the device-level fns it shares with the
  * dmabuf import path; resolves command-recording / fence / submit
@@ -36,6 +52,47 @@
 extern "C" {
 #    endif
 
+/* Number of copies that may be in flight on the GPU at once. The producer
+ * exports a triple-buffered ring, so three pending copies cover the case
+ * where every producer slot has been published but none has completed yet. */
+#    define WW_VK_BLIT_RING_SIZE 3
+
+/*
+ * One in-flight copy. Each slot owns its command pool (vkResetCommandPool
+ * must not touch a pool whose other buffers are still executing), the fence
+ * that tells us when the slot may be recycled, and the two semaphores the
+ * submission references. Semaphores referenced by a pending submission must
+ * not be destroyed or re-imported until that submission has completed, so
+ * they live for the whole blitter lifetime and are reused only after the
+ * slot's fence has signaled.
+ */
+typedef struct ww_vk_blit_slot {
+    VkCommandPool   pool;
+    VkCommandBuffer cb;
+    VkFence         fence;
+    /* True while a submission that signals `fence` may still be executing. */
+    bool armed;
+
+    /* Binary semaphore the acquire sync_file is imported into (temporary
+     * payload). The queue wait consumes the payload, after which the next
+     * import into the same semaphore is legal once `fence` has signaled. */
+    VkSemaphore acquire_sem;
+
+    /* Signal semaphore for the blit submission, exportable as SYNC_FD.
+     * After submit, vkGetSemaphoreFdKHR(SYNC_FD) gives us a sync_file fd
+     * for the still-pending copy. We ioctl-import it into the shadow
+     * dmabuf's dma_resv as a DMA_BUF_SYNC_WRITE fence (GSK's later sample
+     * submission then waits for the copy via kernel implicit DMA-BUF sync,
+     * the pattern in gsk/gpu/gskgpudownloadop.c) and into the daemon's
+     * release syncobj (the producer's release gate opens when the copy is
+     * done). SYNC_FD export has copy transference, so the semaphore is
+     * reset by the export and reusable for the slot's next submission. */
+    VkSemaphore export_sem;
+    /* Set when a submission signaled `export_sem` but the export failed, so
+     * the semaphore stayed signaled. It is replaced once the slot is idle. */
+    bool export_sem_stale;
+} ww_vk_blit_slot_t;
+
 typedef struct ww_vk_blitter {
     /* Embedded backend, loaded with install_debug_utils=false to avoid
      * doubling up driver log forwarding when the same VkInstance is
@@ -54,6 +111,7 @@ typedef struct ww_vk_blitter {
     PFN_vkCreateFence            vkCreateFence;
     PFN_vkDestroyFence           vkDestroyFence;
     PFN_vkResetFences            vkResetFences;
+    PFN_vkGetFenceStatus         vkGetFenceStatus;
     PFN_vkWaitForFences          vkWaitForFences;
     PFN_vkQueueSubmit            vkQueueSubmit;
 
@@ -63,18 +121,19 @@ typedef struct ww_vk_blitter {
     PFN_vkGetImageSubresourceLayout vkGetImageSubresourceLayout;
     PFN_vkGetSemaphoreFdKHR         vkGetSemaphoreFdKHR;
 
-    VkCommandPool   pool;
-    VkCommandBuffer cb;
-    VkFence         fence;
-    bool            fence_armed;
+    ww_vk_blit_slot_t ring[WW_VK_BLIT_RING_SIZE];
+    /* Index of the slot the next blit will use; always the oldest one. */
+    unsigned next_slot;
 
-    /* Signal semaphore for each blit submission, exportable as SYNC_FD.
-     * After submit, vkGetSemaphoreFdKHR(SYNC_FD) gives us a sync_file
-     * fd which we ioctl-import into the shadow dmabuf's dma_resv as a
-     * DMA_BUF_SYNC_WRITE fence. GSK's later sample submission then
-     * sees fresh content via kernel implicit DMA-BUF sync. Matches the
-     * exact pattern in gsk/gpu/gskgpudownloadop.c. */
-    VkSemaphore export_sem;
+    /* Diagnostics for the ring-full frame drop path; the counter is
+     * reported in a rate-limited log line. */
+    uint64_t dropped_frames;
+    uint64_t dropped_frames_logged;
+
+    /* Set once vkGetSemaphoreFdKHR(SYNC_FD) failed for a completed submit.
+     * The blitter then falls back to a bounded CPU wait plus host-side
+     * release signal for every frame, and logs the downgrade once. */
+    bool sync_file_export_unavailable;
 
     VkImage        shadow_image;
     VkDeviceMemory shadow_mem;
@@ -175,28 +234,68 @@ int ww_vk_blitter_get_export(const ww_vk_blitter_t* b, int* out_fd, uint32_t* ou
                              uint64_t* out_modifier);
 
 /*
+ * Host callbacks through which the blitter hands the source DMA-BUF back to
+ * the daemon. Both receive the release syncobj fd owned by the caller of
+ * ww_vk_blitter_blit; neither closes it.
+ *
+ * `signal_release` signals the syncobj from the host. The blitter uses it
+ * when no GPU work references the source image (frame dropped, failure
+ * before submit) and as the fallback after a bounded CPU wait when the
+ * copy's completion could not be exported as a sync_file.
+ *
+ * `import_release_sync_file` attaches `sync_file_fd` (the pending copy's
+ * completion fence) to the syncobj, so the daemon's release wait completes
+ * on the GPU without this thread waiting. It must not close `sync_file_fd`.
+ * Return 0 on success, negative errno on failure; on failure the blitter
+ * falls back to the bounded wait plus `signal_release`.
+ */
+typedef struct ww_vk_blit_release_ops {
+    int (*signal_release)(int release_syncobj_fd, void* user_data);
+    int (*import_release_sync_file)(int release_syncobj_fd, int sync_file_fd, void* user_data);
+} ww_vk_blit_release_ops_t;
+
+typedef enum ww_vk_blit_status {
+    /* The copy was submitted; the shadow will hold this frame once it lands. */
+    WW_VK_BLIT_SUBMITTED = 0,
+    /* Every ring slot is still executing; the frame was skipped and its
+     * source slot released. The shadow keeps the previous frame. */
+    WW_VK_BLIT_DROPPED = 1,
+} ww_vk_blit_status_t;
+
+/*
  * Copy `imported` into the shadow. The producer releases imported
  * DMA-BUF images to VK_QUEUE_FAMILY_FOREIGN_EXT in GENERAL layout; the
  * blitter acquires that ownership, copies from TRANSFER_SRC_OPTIMAL, and
- * releases the image back to FOREIGN/GENERAL before completing. Waits on
- * `acquire_sem` (may be VK_NULL_HANDLE), then blocks the calling thread
- * until the copy completes (vkWaitForFences).
+ * releases the image back to FOREIGN/GENERAL before completing.
  *
- * `release_syncobj_fd` ownership transfers in. On success, the blitter
- * invokes `signal_release_syncobj` after the copy fence signals, then
- * closes the fd. Failures before submit also signal because the source
- * DMA-BUF is no longer queued for GPU reads; failures after submit only
- * close because the copy may still be in flight. Pass -1 if the caller
- * has no syncobj to signal.
+ * `acquire_sync_fd` is the producer's explicit acquire fence; ownership
+ * transfers in (it is consumed by the semaphore import or closed). The copy
+ * waits for it on the GPU. Pass -1 to copy without an acquire wait.
  *
- * Returns 0 on success, negative errno on failure.
+ * `release_syncobj_fd` ownership transfers in: the blitter routes it through
+ * `release_ops` (see above) and always closes it before returning. Pass -1
+ * if the caller has no syncobj to release.
+ *
+ * Never blocks on GPU progress unless sync_file export is unavailable on
+ * this driver. The caller must keep `imported` alive until
+ * ww_vk_blitter_drain() has returned successfully or the blitter is shut
+ * down, because the submission may still be executing when this returns.
+ *
+ * Returns WW_VK_BLIT_SUBMITTED or WW_VK_BLIT_DROPPED on success, negative
+ * errno on failure.
  */
-typedef int (*ww_vk_release_syncobj_fn)(int release_syncobj_fd, void* user_data);
-
 int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_t h,
-                       VkSemaphore acquire_sem, int release_syncobj_fd,
-                       ww_vk_release_syncobj_fn signal_release_syncobj,
-                       void* signal_release_user_data);
+                       int acquire_sync_fd, int release_syncobj_fd,
+                       const ww_vk_blit_release_ops_t* release_ops, void* release_user_data);
+
+/*
+ * Wait until every in-flight copy has completed, bounded by `timeout_ns`.
+ * Required before destroying an imported source image or replacing the
+ * shadow. Returns 0 when the ring is idle, -ETIMEDOUT when a copy is still
+ * executing after the timeout (the caller must then keep the referenced
+ * resources alive), negative errno on other failures.
+ */
+int ww_vk_blitter_drain(ww_vk_blitter_t* b, uint64_t timeout_ns);
 
 static inline VkImage ww_vk_blitter_shadow(const ww_vk_blitter_t* b) {
     return b ? b->shadow_image : VK_NULL_HANDLE;

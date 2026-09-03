@@ -563,12 +563,31 @@ vivid_wayland_output_present(VividWaylandOutput* output)
     }
 
     /*
-     * Ack the producer as soon as the GLES shadow-copy is done. Never wait for
-     * compositor wl_surface.frame here: that would stall the DMA-BUF pipeline
-     * at 0–1 fps on wallpaper layer-shell surfaces.
+     * Hand the source slot back to the producer as soon as the GLES draw has
+     * finished reading it, but let the GPU decide when that is: the draw sits
+     * behind the producer's acquire fence, and on a GPU that is already busy
+     * with the wallpaper itself that can be tens of milliseconds. Attaching
+     * the draw's completion fence to the release syncobj keeps this
+     * single-threaded main loop free for Wayland events and the swap below.
+     * Only when no native fence can be exported do we fall back to glFinish()
+     * and a host-side signal. Never wait for compositor wl_surface.frame here:
+     * that would stall the DMA-BUF pipeline at 0–1 fps on wallpaper
+     * layer-shell surfaces.
      */
-    vivid_wayland_signal_release_syncobj(generation->render_node, output->pending_release_fd,
-                                         "shadow-copy-complete");
+    int draw_fence_fd = vivid_wayland_egl_export_draw_fence(&output->app->egl, context);
+    bool released = false;
+    if (draw_fence_fd >= 0) {
+        released = vivid_wayland_attach_release_sync_file(generation->render_node,
+                                                          output->pending_release_fd,
+                                                          draw_fence_fd,
+                                                          "shadow-copy-fence");
+        vivid_wayland_close_fd(&draw_fence_fd);
+    }
+    if (!released) {
+        vivid_wayland_egl_wait_draw_idle(&output->app->egl);
+        vivid_wayland_signal_release_syncobj(generation->render_node, output->pending_release_fd,
+                                             "shadow-copy-complete");
+    }
     vivid_wayland_close_fd(&output->pending_release_fd);
     output->pending_frame = false;
     output->swap_pending = true;

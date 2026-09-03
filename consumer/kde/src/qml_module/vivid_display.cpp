@@ -281,12 +281,27 @@ struct VividDrmSyncobjArray {
     _IOWR(DRM_IOCTL_BASE, 0xC2, struct VividDrmSyncobjHandle)
 #define VIVID_DRM_IOCTL_SYNCOBJ_SIGNAL \
     _IOWR(DRM_IOCTL_BASE, 0xC5, struct VividDrmSyncobjArray)
+/* FD_TO_HANDLE flag: replace an existing handle's fence with the fence carried
+ * by a sync_file fd instead of importing a syncobj fd. */
+#define VIVID_DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE (1u << 0)
 
-bool signalReleaseSyncobj(const QString& renderNode, int syncobjFd, const QString& context)
+/*
+ * Resolves the daemon's release syncobj fd into a local handle, runs `op` on
+ * it and drops the handle again. The handle references the same kernel object
+ * the daemon waits on, so whatever fence state `op` installs is what the
+ * daemon observes.
+ */
+template<typename Op>
+bool withReleaseSyncobjHandle(const QString& renderNode,
+                              int syncobjFd,
+                              const QString& context,
+                              const char* opName,
+                              Op&& op)
 {
     if (renderNode.isEmpty() || syncobjFd < 0) {
         qCWarning(lcWallpaperKde,
-                  "cannot signal release syncobj context=%s render-node=%s fd=%d",
+                  "cannot %s release syncobj context=%s render-node=%s fd=%d",
+                  opName,
                   qPrintable(context),
                   qPrintable(renderNode.isEmpty() ? QStringLiteral("(missing)") : renderNode),
                   syncobjFd);
@@ -296,8 +311,9 @@ bool signalReleaseSyncobj(const QString& renderNode, int syncobjFd, const QStrin
     const int drmFd = ::open(qPrintable(renderNode), O_RDWR | O_CLOEXEC);
     if (drmFd < 0) {
         qCWarning(lcWallpaperKde,
-                  "open(%s) for release syncobj signal failed context=%s: %s",
+                  "open(%s) for release syncobj %s failed context=%s: %s",
                   qPrintable(renderNode),
+                  opName,
                   qPrintable(context),
                   strerror(errno));
         return false;
@@ -320,15 +336,9 @@ bool signalReleaseSyncobj(const QString& renderNode, int syncobjFd, const QStrin
         return false;
     }
 
-    quint32 handles[1] = { import.handle };
-    VividDrmSyncobjArray signal {
-        .handles = reinterpret_cast<quintptr>(handles),
-        .countHandles = 1,
-        .pad = 0,
-    };
     errno = 0;
-    const bool signalOk = (::ioctl(drmFd, VIVID_DRM_IOCTL_SYNCOBJ_SIGNAL, &signal) == 0);
-    const int signalError = errno;
+    const bool opOk = op(drmFd, import.handle);
+    const int opError = errno;
 
     VividDrmSyncobjDestroy destroy {
         .handle = import.handle,
@@ -345,16 +355,60 @@ bool signalReleaseSyncobj(const QString& renderNode, int syncobjFd, const QStrin
     }
     ::close(drmFd);
 
-    if (!signalOk) {
+    if (!opOk) {
         qCWarning(lcWallpaperKde,
-                  "DRM_IOCTL_SYNCOBJ_SIGNAL(%s handle=%u) failed context=%s: %s",
+                  "release syncobj %s(%s handle=%u) failed context=%s: %s",
+                  opName,
                   qPrintable(renderNode),
                   import.handle,
                   qPrintable(context),
-                  strerror(signalError));
+                  strerror(opError));
         return false;
     }
     return true;
+}
+
+bool signalReleaseSyncobj(const QString& renderNode, int syncobjFd, const QString& context)
+{
+    return withReleaseSyncobjHandle(
+        renderNode, syncobjFd, context, "signal", [](int drmFd, quint32 handle) {
+            quint32 handles[1] = { handle };
+            VividDrmSyncobjArray signal {
+                .handles = reinterpret_cast<quintptr>(handles),
+                .countHandles = 1,
+                .pad = 0,
+            };
+            return ::ioctl(drmFd, VIVID_DRM_IOCTL_SYNCOBJ_SIGNAL, &signal) == 0;
+        });
+}
+
+/*
+ * Makes the release syncobj complete when the fence inside `syncFileFd`
+ * signals, i.e. when the consumer's GPU copy of the producer image is done.
+ * Neither fd is consumed. This is the explicit-sync counterpart of the host
+ * signal above and never waits on this thread.
+ */
+bool attachReleaseSyncFile(const QString& renderNode,
+                           int syncobjFd,
+                           int syncFileFd,
+                           const QString& context)
+{
+    if (syncFileFd < 0) {
+        qCWarning(lcWallpaperKde,
+                  "cannot attach release fence context=%s: invalid sync_file fd",
+                  qPrintable(context));
+        return false;
+    }
+    return withReleaseSyncobjHandle(
+        renderNode, syncobjFd, context, "import-sync-file", [syncFileFd](int drmFd, quint32 handle) {
+            VividDrmSyncobjHandle attach {
+                .handle = handle,
+                .flags = VIVID_DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE,
+                .fd = syncFileFd,
+                .pad = 0,
+            };
+            return ::ioctl(drmFd, VIVID_DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &attach) == 0;
+        });
 }
 
 struct VulkanReleaseSignalContext {
@@ -372,6 +426,22 @@ int signalReleaseSyncobjFromVulkanBlit(int releaseSyncobjFd, void* userData)
         signalReleaseSyncobj(context->renderNode, releaseSyncobjFd, context->context);
     return signaled ? 0 : -EIO;
 }
+
+int attachReleaseSyncFileFromVulkanBlit(int releaseSyncobjFd, int syncFileFd, void* userData)
+{
+    auto* context = static_cast<VulkanReleaseSignalContext*>(userData);
+    if (!context) {
+        return -EINVAL;
+    }
+    const bool attached =
+        attachReleaseSyncFile(context->renderNode, releaseSyncobjFd, syncFileFd, context->context);
+    return attached ? 0 : -EIO;
+}
+
+const ww_vk_blit_release_ops_t kVulkanBlitReleaseOps {
+    .signal_release = signalReleaseSyncobjFromVulkanBlit,
+    .import_release_sync_file = attachReleaseSyncFileFromVulkanBlit,
+};
 
 quint64 jsonUInt64(const QJsonValue& value, quint64 fallback = 0)
 {
@@ -469,6 +539,7 @@ using EglQueryDmaBufModifiersExt = PFNEGLQUERYDMABUFMODIFIERSEXTPROC;
 using EglCreateSyncKhr = PFNEGLCREATESYNCKHRPROC;
 using EglWaitSyncKhr = PFNEGLWAITSYNCKHRPROC;
 using EglDestroySyncKhr = PFNEGLDESTROYSYNCKHRPROC;
+using EglDupNativeFenceFdAndroid = PFNEGLDUPNATIVEFENCEFDANDROIDPROC;
 
 struct GpuIdentity {
     QString renderNode;
@@ -508,6 +579,7 @@ struct EglSyncApi {
     EglCreateSyncKhr createSync { nullptr };
     EglWaitSyncKhr waitSync { nullptr };
     EglDestroySyncKhr destroySync { nullptr };
+    EglDupNativeFenceFdAndroid dupNativeFenceFd { nullptr };
 };
 
 const EglSyncApi& eglSyncApi()
@@ -516,8 +588,68 @@ const EglSyncApi& eglSyncApi()
         resolveEglProc<EglCreateSyncKhr>("eglCreateSyncKHR"),
         resolveEglProc<EglWaitSyncKhr>("eglWaitSyncKHR"),
         resolveEglProc<EglDestroySyncKhr>("eglDestroySyncKHR"),
+        resolveEglProc<EglDupNativeFenceFdAndroid>("eglDupNativeFenceFDANDROID"),
     };
     return api;
+}
+
+bool extensionListHasToken(const char* extensions, const char* token);
+
+/*
+ * Inserts a fence behind everything queued on the current GL context and
+ * exports it as a sync_file. Used after the EGL shadow blit so the producer's
+ * release can follow the GPU instead of the next FRAME_READY. Returns -1 when
+ * EGL_ANDROID_native_fence_sync export is unavailable; callers then keep the
+ * host-signaled release cadence.
+ */
+int exportEglDrawFence(EGLDisplay display, const QString& context)
+{
+    static bool unavailableLogged = false;
+    if (display == EGL_NO_DISPLAY || eglGetCurrentContext() == EGL_NO_CONTEXT)
+        return -1;
+
+    const EglSyncApi& api = eglSyncApi();
+    const bool supported = api.createSync && api.destroySync && api.dupNativeFenceFd &&
+        extensionListHasToken(eglQueryString(display, EGL_EXTENSIONS),
+                              "EGL_ANDROID_native_fence_sync");
+    if (!supported) {
+        if (!unavailableLogged) {
+            unavailableLogged = true;
+            qCInfo(lcWallpaperKde,
+                   "EGL_ANDROID_native_fence_sync export unavailable; producer releases "
+                   "stay on the next-frame cadence");
+        }
+        return -1;
+    }
+
+    /* Without an fd attribute the sync is created at the current point of the
+     * command stream; the fd only materializes once that stream is flushed. */
+    const EGLint attrs[] = {
+        EGL_SYNC_NATIVE_FENCE_FD_ANDROID,
+        EGL_NO_NATIVE_FENCE_FD_ANDROID,
+        EGL_NONE,
+    };
+    const EGLSyncKHR sync = api.createSync(display, EGL_SYNC_NATIVE_FENCE_ANDROID, attrs);
+    if (sync == EGL_NO_SYNC_KHR) {
+        qCWarning(lcWallpaperKde,
+                  "eglCreateSyncKHR(draw fence) failed egl=0x%x context=%s",
+                  static_cast<unsigned>(eglGetError()),
+                  qPrintable(context));
+        return -1;
+    }
+    if (auto* gl = QOpenGLContext::currentContext())
+        gl->functions()->glFlush();
+    const int fd = api.dupNativeFenceFd(display, sync);
+    const EGLint dupError = fd == EGL_NO_NATIVE_FENCE_FD_ANDROID ? eglGetError() : EGL_SUCCESS;
+    (void)api.destroySync(display, sync);
+    if (fd == EGL_NO_NATIVE_FENCE_FD_ANDROID) {
+        qCWarning(lcWallpaperKde,
+                  "eglDupNativeFenceFDANDROID(draw fence) failed egl=0x%x context=%s",
+                  static_cast<unsigned>(dupError),
+                  qPrintable(context));
+        return -1;
+    }
+    return fd;
 }
 
 bool enqueueEglAcquireWait(EGLDisplay display, int& syncFd, const QString& context)
@@ -2172,10 +2304,10 @@ void VividDisplay::releaseSceneGraphResources()
     signalPendingEglRelease(QStringLiteral("scene-graph-invalidated"));
     signalPendingVulkanFrame(QStringLiteral("scene-graph-invalidated"));
     clearGenerations(false);
-    if (m_vkBlitterReady && m_vkBlitter.fence_armed) {
-        /* A timed-out copy may still reference an imported generation.  The
-         * blitter shutdown waits/reaps that submission before the pending
-         * generation queue is drained. */
+    if (m_vkBlitterReady && ww_vk_blitter_drain(&m_vkBlitter, 0) != 0) {
+        /* In-flight copies may still reference an imported generation.  The
+         * blitter shutdown waits for the device before the pending generation
+         * queue is drained. */
         ww_vk_blitter_shutdown(&m_vkBlitter);
         m_vkBlitterReady = false;
     }
@@ -3079,11 +3211,12 @@ void VividDisplay::handleBindBuffers(const QByteArray& body, VividDisplayRecvSta
     }
 
     /*
-     * waywallen completes Vulkan DMA-BUF import and creates one reusable
-     * acquire semaphore per slot while handling BIND_BUFFERS.  Keep the same
-     * invariant here: once SET_CONFIG / FRAME_READY are dispatched on later
-     * event-loop iterations, the pool is already GPU-ready and the render
-     * thread only has to consume the pending frame and run the shadow copy.
+     * waywallen completes Vulkan DMA-BUF import while handling BIND_BUFFERS.
+     * Keep the same invariant here: once SET_CONFIG / FRAME_READY are
+     * dispatched on later event-loop iterations, the pool is already
+     * GPU-ready and the render thread only has to consume the pending frame
+     * and run the shadow copy. Acquire semaphores live in the blitter's ring,
+     * one per in-flight copy, so no per-slot semaphore is created here.
      * Vulkan object creation/import does not require a current Qt render
      * context; it uses the VkDevice captured from the initialized scene graph.
     */
@@ -3093,24 +3226,6 @@ void VividDisplay::handleBindBuffers(const QByteArray& body, VividDisplayRecvSta
             if (!imported || !ensureVulkanBufferImported(generation, buffer)) {
                 imported = false;
                 break;
-            }
-            if (buffer.acquireSemaphore == VK_NULL_HANDLE) {
-                const VkSemaphoreCreateInfo createInfo {
-                    .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-                    .pNext = nullptr,
-                    .flags = 0,
-                };
-                const VkResult createResult =
-                    m_vkBackend.vkCreateSemaphore(m_vkDevice,
-                                                  &createInfo,
-                                                  nullptr,
-                                                  &buffer.acquireSemaphore);
-                if (createResult != VK_SUCCESS) {
-                    setLastError(QStringLiteral("vkCreateSemaphore(acquire) failed during BIND_BUFFERS result=%1")
-                                     .arg(static_cast<int>(createResult)));
-                    imported = false;
-                    break;
-                }
             }
         }
         if (!imported) {
@@ -3345,10 +3460,11 @@ void VividDisplay::handleFrameReady(const QByteArray& body, VividDisplayRecvStat
             .arg(targetTimeUsec);
     if (m_activeBackend == BackendVulkan) {
         /* Match Waywallen's KDE Vulkan hand-off: the socket/GUI thread only
-         * imports the acquire sync_fd and replaces the pending frame. It must
-         * never submit Vulkan work or wait for a GPU fence here, otherwise a
-         * full-rate producer can starve Plasma's GUI-to-QSG synchronization
-         * and the first texture node is never created. */
+         * replaces the pending frame. It must never submit Vulkan work or wait
+         * for a GPU fence here, otherwise a full-rate producer can starve
+         * Plasma's GUI-to-QSG synchronization and the first texture node is
+         * never created. The acquire sync_file travels to the render thread
+         * as an fd; the blitter imports it into a ring semaphore there. */
         signalPendingVulkanFrame(QStringLiteral("superseded"));
         if (!m_vkBackendReady) {
             signalReleaseSyncobj(generationState->renderNode,
@@ -3357,41 +3473,6 @@ void VividDisplay::handleFrameReady(const QByteArray& body, VividDisplayRecvStat
             closeFrameFds();
             return;
         }
-        if (buffer->acquireSemaphore == VK_NULL_HANDLE) {
-            const VkSemaphoreCreateInfo createInfo {
-                .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-                .pNext = nullptr,
-                .flags = 0,
-            };
-            const VkResult createResult =
-                m_vkBackend.vkCreateSemaphore(m_vkDevice,
-                                              &createInfo,
-                                              nullptr,
-                                              &buffer->acquireSemaphore);
-            if (createResult != VK_SUCCESS) {
-                setLastError(QStringLiteral("vkCreateSemaphore(acquire) failed result=%1")
-                                 .arg(static_cast<int>(createResult)));
-                signalReleaseSyncobj(generationState->renderNode,
-                                     releaseFd,
-                                     QStringLiteral("acquire-semaphore-create-failed"));
-                closeFrameFds();
-                return;
-            }
-        }
-        const int importRc =
-            ww_vk_import_sync_fd(&m_vkBackend, buffer->acquireSemaphore, acquireFd);
-        if (importRc != 0) {
-            setLastError(QStringLiteral("ww_vk_import_sync_fd failed generation=%1 buffer=%2 rc=%3")
-                             .arg(generation)
-                             .arg(bufferIndex)
-                             .arg(importRc));
-            signalReleaseSyncobj(generationState->renderNode,
-                                 releaseFd,
-                                 QStringLiteral("acquire-sync-import-failed"));
-            closeFrameFds();
-            return;
-        }
-        acquireFd = -1;
         {
             QMutexLocker lock(&m_pendingVulkanMutex);
             m_currentGeneration = generation;
@@ -3399,18 +3480,24 @@ void VividDisplay::handleFrameReady(const QByteArray& body, VividDisplayRecvStat
             m_pendingVulkanFrame.valid = true;
             m_pendingVulkanFrame.generation = generation;
             m_pendingVulkanFrame.bufferIndex = bufferIndex;
+            m_pendingVulkanFrame.acquireSyncFd = acquireFd;
             m_pendingVulkanFrame.releaseSyncobjFd = releaseFd;
             m_pendingVulkanFrame.renderNode = generationState->renderNode;
             m_pendingVulkanFrame.releaseContext = syncContext;
         }
+        acquireFd = -1;
         releaseFd = -1;
     } else if (m_activeBackend == BackendEgl) {
         /*
          * Waywallen releases the previously accepted EGL frame when the next
          * FRAME_READY arrives, then coalesces the newest slot into a
-         * BeforeSynchronizingStage render job. Keep that cadence, but carry the
-         * acquire fence into the render job so eglWaitSyncKHR runs with Qt's GL
-         * context current instead of blocking this socket callback.
+         * BeforeSynchronizingStage render job. The render job normally attaches
+         * its blit fence to the release right after copying, so this is a
+         * no-op for frames that reached the GPU; it still covers frames whose
+         * fence could not be exported and frames superseded before their blit
+         * ran. The acquire fence is carried into the render job so
+         * eglWaitSyncKHR runs with Qt's GL context current instead of blocking
+         * this socket callback.
          */
         signalPendingEglRelease(QStringLiteral("next-frame"));
 
@@ -3721,6 +3808,8 @@ void VividDisplay::signalPendingVulkanFrame(const QString& reason)
         pending = m_pendingVulkanFrame;
         m_pendingVulkanFrame = PendingVulkanFrame {};
     }
+    /* The frame never reached the GPU, so its acquire fence is simply dropped. */
+    closeFd(pending.acquireSyncFd);
     if (pending.releaseSyncobjFd < 0)
         return;
 
@@ -3807,11 +3896,6 @@ void VividDisplay::destroyImportedResourcesWithBackend(Generation& generation,
             ww_vk_destroy_imported_image(backend, &buffer.vkImage);
             buffer.hasVkImage = false;
         }
-        if (buffer.acquireSemaphore != VK_NULL_HANDLE && backendReady && backend &&
-            backend->vkDestroySemaphore) {
-            backend->vkDestroySemaphore(backend->device, buffer.acquireSemaphore, nullptr);
-            buffer.acquireSemaphore = VK_NULL_HANDLE;
-        }
         buffer.importAttempted = false;
     }
 
@@ -3842,7 +3926,21 @@ void VividDisplay::clearGenerations(bool destroyGlResources)
 
 int VividDisplay::drainPendingGenerationResources()
 {
-    if (m_vkBlitterReady && m_vkBlitter.fence_armed)
+    {
+        QMutexLocker lock(&m_pendingGenerationMutex);
+        if (m_pendingGenerations.isEmpty())
+            return 0;
+    }
+
+    /*
+     * Retired pools may still be read by shadow copies that are executing on
+     * the GPU. Give the ring a short, bounded wait: a copy completes within a
+     * frame or two even on a saturated GPU, and this only runs while a retired
+     * pool is actually queued (wallpaper switch, resize), never per frame. If
+     * copies are still pending afterwards the next render pass retries.
+     */
+    static const uint64_t kRetiredPoolDrainNs = 100ull * 1000ull * 1000ull;
+    if (m_vkBlitterReady && ww_vk_blitter_drain(&m_vkBlitter, kRetiredPoolDrainNs) != 0)
         return 0;
 
     QVector<Generation> pending;
@@ -3859,8 +3957,7 @@ int VividDisplay::drainPendingGenerationResources()
         for (const Buffer& buffer : generation.buffers) {
             needsGlContext = needsGlContext || buffer.eglImage != EGL_NO_IMAGE_KHR ||
                 buffer.glTexture != 0;
-            needsVulkanBackend = needsVulkanBackend || buffer.hasVkImage ||
-                buffer.acquireSemaphore != VK_NULL_HANDLE;
+            needsVulkanBackend = needsVulkanBackend || buffer.hasVkImage;
         }
     }
 
@@ -4001,8 +4098,7 @@ bool VividDisplay::destroyFinalGpuCleanup(FinalGpuCleanup* cleanup)
         for (const Buffer& buffer : generation.buffers) {
             needsGlContext = needsGlContext || buffer.eglImage != EGL_NO_IMAGE_KHR ||
                 buffer.glTexture != 0;
-            needsVulkanBackend = needsVulkanBackend || buffer.hasVkImage ||
-                buffer.acquireSemaphore != VK_NULL_HANDLE;
+            needsVulkanBackend = needsVulkanBackend || buffer.hasVkImage;
         }
     }
 
@@ -4549,6 +4645,35 @@ void VividDisplay::renderThreadBlitEgl()
         m_currentGeneration = pending.generation;
         m_currentBuffer = pending.bufferIndex;
     }
+
+    /*
+     * The blit above only queued GPU work. Hand the producer slot back when
+     * that work has actually finished: attach a fence recorded behind the blit
+     * to the release syncobj, so the daemon's release wait completes on the
+     * GPU. This replaces the host-signal-at-next-FRAME_READY cadence, which
+     * could release the slot while the blit was still pending on a busy GPU.
+     * If no fence can be exported the pending release stays in place and the
+     * next FRAME_READY signals it exactly as before.
+     */
+    int drawFenceFd = exportEglDrawFence(eglDisplay, pending.acquireContext);
+    if (drawFenceFd >= 0) {
+        PendingEglRelease attached;
+        {
+            QMutexLocker lock(&m_pendingEglMutex);
+            if (m_pendingEglRelease.syncobjFd >= 0 &&
+                m_pendingEglRelease.generation == pending.generation &&
+                m_pendingEglRelease.sequence == pending.sequence &&
+                attachReleaseSyncFile(m_pendingEglRelease.renderNode,
+                                      m_pendingEglRelease.syncobjFd,
+                                      drawFenceFd,
+                                      m_pendingEglRelease.context)) {
+                attached = std::move(m_pendingEglRelease);
+                m_pendingEglRelease = PendingEglRelease {};
+            }
+        }
+        closeFd(attached.syncobjFd);
+        closeFd(drawFenceFd);
+    }
 }
 
 VkFormat VividDisplay::vkFormatForFourcc(quint32 fourcc) const
@@ -4558,7 +4683,7 @@ VkFormat VividDisplay::vkFormatForFourcc(quint32 fourcc) const
 
 bool VividDisplay::ensureVulkanShadowCopy(Generation& generation,
                                           Buffer&     buffer,
-                                          PendingVulkanFrame pending)
+                                          PendingVulkanFrame& pending)
 {
     if (!pending.valid) {
         return ww_vk_blitter_shadow_has_content(&m_vkBlitter);
@@ -4566,6 +4691,7 @@ bool VividDisplay::ensureVulkanShadowCopy(Generation& generation,
 
 
     auto releaseWithoutCopy = [&](const QString& reason) {
+        closeFd(pending.acquireSyncFd);
         if (pending.releaseSyncobjFd < 0)
             return;
         const QString context = pending.releaseContext.isEmpty()
@@ -4585,8 +4711,7 @@ bool VividDisplay::ensureVulkanShadowCopy(Generation& generation,
         return false;
     }
 
-    if (!buffer.hasVkImage || buffer.vkImage.image == VK_NULL_HANDLE ||
-        buffer.acquireSemaphore == VK_NULL_HANDLE) {
+    if (!buffer.hasVkImage || buffer.vkImage.image == VK_NULL_HANDLE) {
         setLastError(QStringLiteral("generation %1 buffer %2 has no Qt-imported Vulkan frame")
                          .arg(generation.id)
                          .arg(buffer.index));
@@ -4634,8 +4759,11 @@ bool VividDisplay::ensureVulkanShadowCopy(Generation& generation,
     /*
      * This is the Waywallen KDE Vulkan route: producer image import, acquire
      * semaphore wait, shadow copy, and producer release all happen on the Qt
-     * scene graph's VkDevice/VkQueue. The socket thread never waits for GPU
-     * work, and Qt samples only the local shadow image.
+     * scene graph's VkDevice/VkQueue. Neither the socket thread nor this
+     * render thread waits for GPU work: the copy waits for the acquire fence
+     * on the GPU and the producer's release is attached to the copy's
+     * completion fence. Qt samples only the local shadow image, ordered after
+     * the copy by queue submission order and the blitter's final barrier.
      */
     VulkanReleaseSignalContext signalContext {
         pending.renderNode,
@@ -4648,17 +4776,22 @@ bool VividDisplay::ensureVulkanShadowCopy(Generation& generation,
                                           buffer.vkImage.image,
                                           static_cast<uint32_t>(generation.width),
                                           static_cast<uint32_t>(generation.height),
-                                          buffer.acquireSemaphore,
+                                          pending.acquireSyncFd,
                                           pending.releaseSyncobjFd,
-                                          signalReleaseSyncobjFromVulkanBlit,
+                                          &kVulkanBlitReleaseOps,
                                           &signalContext);
-    if (blitRc != 0) {
+    /* Both fds were consumed by the blitter regardless of the outcome. */
+    pending.acquireSyncFd = -1;
+    pending.releaseSyncobjFd = -1;
+    if (blitRc < 0) {
         setLastError(QStringLiteral("ww_vk_blitter_blit failed generation=%1 buffer=%2 rc=%3")
                          .arg(generation.id)
                          .arg(buffer.index)
                          .arg(blitRc));
         return false;
     }
+    /* WW_VK_BLIT_DROPPED keeps the previous frame in the shadow; the texture
+     * node stays valid, so the frame is treated as presented. */
     return true;
 }
 
@@ -4700,13 +4833,19 @@ QSGNode* VividDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*)
             ww_vk_blitter_shadow_has_content(&m_vkBlitter))
 #endif
         ;
-    if (!generation || (!buffer && !generationResourcesReleased)) {
+    /* A pending Vulkan frame that cannot be copied hands its source slot back
+     * to the producer immediately; nothing on the GPU ever referenced it. */
+    auto releasePendingVulkanFrame = [&](const QString& reason) {
+        closeFd(pendingVulkanFrame.acquireSyncFd);
         if (pendingVulkanFrame.releaseSyncobjFd >= 0) {
             signalReleaseSyncobj(pendingVulkanFrame.renderNode,
                                  pendingVulkanFrame.releaseSyncobjFd,
-                                 QStringLiteral("pending-generation-missing"));
+                                 reason);
             closeFd(pendingVulkanFrame.releaseSyncobjFd);
         }
+    };
+    if (!generation || (!buffer && !generationResourcesReleased)) {
+        releasePendingVulkanFrame(QStringLiteral("pending-generation-missing"));
         delete oldNode;
         return nullptr;
     }
@@ -4715,14 +4854,8 @@ QSGNode* VividDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*)
     QQuickWindow* quickWindow = window();
     if (!quickWindow) {
         delete oldNode;
-        if (useVulkan) {
-            if (pendingVulkanFrame.releaseSyncobjFd >= 0) {
-                signalReleaseSyncobj(pendingVulkanFrame.renderNode,
-                                     pendingVulkanFrame.releaseSyncobjFd,
-                                     QStringLiteral("window-missing"));
-                closeFd(pendingVulkanFrame.releaseSyncobjFd);
-            }
-        }
+        if (useVulkan)
+            releasePendingVulkanFrame(QStringLiteral("window-missing"));
         return nullptr;
     }
 
@@ -4730,6 +4863,8 @@ QSGNode* VividDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*)
         /* The old imported pool has already been detached and queued.  The
          * persistent shadow is the only presentation resource left, so keep
          * the last frame visible until the replacement generation blits. */
+        if (useVulkan)
+            releasePendingVulkanFrame(QStringLiteral("pending-generation-released"));
         if (!shadowHasContent) {
             delete oldNode;
             return nullptr;

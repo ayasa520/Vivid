@@ -219,7 +219,6 @@ private:
         bool importAttempted { false };
         ww_vk_imported_image_t vkImage {};
         bool hasVkImage { false };
-        VkSemaphore acquireSemaphore { VK_NULL_HANDLE };
     };
 
     struct Generation {
@@ -290,6 +289,11 @@ private:
         bool valid { false };
         quint64 generation { 0 };
         quint32 bufferIndex { 0 };
+        /* Producer acquire sync_file, carried to the render thread unimported.
+         * The blitter imports it into one of its ring semaphores right before
+         * the copy is submitted, so a semaphore is never re-imported while a
+         * previous copy still waits on it. */
+        int acquireSyncFd { -1 };
         int releaseSyncobjFd { -1 };
         QString renderNode;
         QString releaseContext;
@@ -376,7 +380,7 @@ private:
     void renderThreadBlitEgl();
     bool ensureVulkanShadowCopy(Generation& generation,
                                 Buffer&     buffer,
-                                PendingVulkanFrame pending);
+                                PendingVulkanFrame& pending);
     bool bindVulkanBackend();
     void shutdownVulkanBackend();
     VkFormat vkFormatForFourcc(quint32 fourcc) const;

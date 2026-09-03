@@ -63,6 +63,10 @@ struct vivid_drm_syncobj_array {
 #define VIVID_DRM_IOCTL_SYNCOBJ_SIGNAL \
     _IOWR(DRM_IOCTL_BASE, 0xC5, struct vivid_drm_syncobj_array)
 
+/* FD_TO_HANDLE flag: instead of importing a syncobj fd, replace the fence of
+ * an existing handle with the fence carried by a sync_file fd. */
+#define VIVID_DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE (1u << 0)
+
 bool
 vivid_wayland_fourcc_supported(uint32_t fourcc)
 {
@@ -255,6 +259,83 @@ vivid_wayland_signal_release_syncobj(const char* render_node,
                            import.handle,
                            context ? context : "(none)",
                            strerror(signal_err));
+        return false;
+    }
+    return true;
+}
+
+bool
+vivid_wayland_attach_release_sync_file(const char* render_node,
+                                       int syncobj_fd,
+                                       int sync_file_fd,
+                                       const char* context)
+{
+    if (!render_node || !render_node[0] || syncobj_fd < 0 || sync_file_fd < 0) {
+        vivid_wayland_warn("cannot attach release fence context=%s render-node=%s syncobj=%d sync-file=%d",
+                           context ? context : "(none)",
+                           render_node && render_node[0] ? render_node : "(missing)",
+                           syncobj_fd,
+                           sync_file_fd);
+        return false;
+    }
+
+    int drm_fd = open(render_node, O_RDWR | O_CLOEXEC);
+    if (drm_fd < 0) {
+        vivid_wayland_warn("open(%s) for release fence attach failed context=%s: %s",
+                           render_node,
+                           context ? context : "(none)",
+                           strerror(errno));
+        return false;
+    }
+
+    struct vivid_drm_syncobj_handle import = {
+        .handle = 0,
+        .flags = 0,
+        .fd = syncobj_fd,
+        .pad = 0,
+    };
+    if (ioctl(drm_fd, VIVID_DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &import) != 0) {
+        vivid_wayland_warn("DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE(%s) failed context=%s: %s",
+                           render_node,
+                           context ? context : "(none)",
+                           strerror(errno));
+        close(drm_fd);
+        return false;
+    }
+
+    /*
+     * The handle references the daemon's own syncobj, so replacing its fence
+     * here is what the daemon's release wait observes: it completes when the
+     * GPU finishes the work the sync_file describes, without any CPU wait on
+     * this side. Equivalent to libdrm's drmSyncobjImportSyncFile().
+     */
+    struct vivid_drm_syncobj_handle attach = {
+        .handle = import.handle,
+        .flags = VIVID_DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE,
+        .fd = sync_file_fd,
+        .pad = 0,
+    };
+    int attach_rc = ioctl(drm_fd, VIVID_DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &attach);
+    int attach_err = errno;
+
+    struct vivid_drm_syncobj_destroy destroy = {
+        .handle = import.handle,
+        .pad = 0,
+    };
+    if (ioctl(drm_fd, VIVID_DRM_IOCTL_SYNCOBJ_DESTROY, &destroy) != 0) {
+        vivid_wayland_warn("drmSyncobjDestroy(handle=%u) failed context=%s: %s",
+                           import.handle,
+                           context ? context : "(none)",
+                           strerror(errno));
+    }
+    close(drm_fd);
+
+    if (attach_rc != 0) {
+        vivid_wayland_warn("DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE(import-sync-file %s handle=%u) failed context=%s: %s",
+                           render_node,
+                           import.handle,
+                           context ? context : "(none)",
+                           strerror(attach_err));
         return false;
     }
     return true;

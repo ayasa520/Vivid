@@ -399,6 +399,67 @@ blitter_signal_release_syncobj(int release_syncobj_fd,
         : -EIO;
 }
 
+static int
+blitter_attach_release_sync_file(int   release_syncobj_fd,
+                                 int   sync_file_fd,
+                                 void* user_data)
+{
+    const VividReleaseSignalContext* context = user_data;
+    if (!context)
+        return -EINVAL;
+
+    g_autoptr(GError) error = NULL;
+    if (!vivid_display_consumer_dmabuf_texture_attach_release_sync_file(context->render_node,
+                                                                        release_syncobj_fd,
+                                                                        sync_file_fd,
+                                                                        &error)) {
+        g_warning("VividDisplayConsumer: attaching shadow-copy fence to release syncobj "
+                  "failed generation=%" G_GUINT64_FORMAT " buffer=%u: %s",
+                  context->generation,
+                  context->buffer_index,
+                  error ? error->message : "unknown release attach error");
+        return -EIO;
+    }
+    return 0;
+}
+
+static const ww_vk_blit_release_ops_t blitter_release_ops = {
+    .signal_release = blitter_signal_release_syncobj,
+    .import_release_sync_file = blitter_attach_release_sync_file,
+};
+
+/*
+ * Shadow copies complete asynchronously and keep reading the imported
+ * producer VkImages until their fences signal. Destroying those images while
+ * a copy is still executing is undefined behaviour, so every path that frees
+ * a generation's buffers waits for the ring first. This only runs on
+ * generation teardown (wallpaper switch, resize, disconnect), never per frame.
+ * When the wait times out the GPU is wedged; the Vulkan images are then
+ * leaked deliberately instead of being destroyed under an in-flight copy.
+ */
+static void
+drain_blitter_before_buffer_teardown(VividDisplayConsumerBufferPaintable* self,
+                                     VividDmaBufGeneration*               generation)
+{
+    if (!self->vk_relay_ready || !generation || !generation->buffers)
+        return;
+
+    static const guint64 TEARDOWN_DRAIN_NS = 2ull * 1000ull * 1000ull * 1000ull;
+    const int rc = ww_vk_blitter_drain(&self->vk_blitter, TEARDOWN_DRAIN_NS);
+    if (rc == 0)
+        return;
+
+    g_warning("VividDisplayConsumer: shadow copies still in flight after %" G_GUINT64_FORMAT
+              " ms (rc=%d); leaking imported Vulkan images of generation=%" G_GUINT64_FORMAT,
+              (guint64)(TEARDOWN_DRAIN_NS / 1000000ull),
+              rc,
+              generation->generation);
+    for (guint i = 0; i < generation->buffers->len; i++) {
+        VividDmaBufBuffer* buffer = g_ptr_array_index(generation->buffers, i);
+        buffer->has_vk_image = FALSE;
+    }
+}
+
 static void
 remove_generation(VividDisplayConsumerBufferPaintable* self,
                   guint64                               generation)
@@ -406,6 +467,7 @@ remove_generation(VividDisplayConsumerBufferPaintable* self,
     for (guint i = 0; i < self->generations->len; i++) {
         VividDmaBufGeneration* candidate = g_ptr_array_index(self->generations, i);
         if (candidate->generation == generation) {
+            drain_blitter_before_buffer_teardown(self, candidate);
             g_ptr_array_remove_index(self->generations, i);
             return;
         }
@@ -1197,53 +1259,6 @@ vivid_display_consumer_buffer_paintable_show_frame_with_sync(
         return FALSE;
     }
 
-    VkSemaphore acquire_sem = VK_NULL_HANDLE;
-    VkSemaphoreCreateInfo sem_info = {
-        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-    };
-    VkResult vr = self->vk_blitter.backend.vkCreateSemaphore(
-        self->vk_blitter.backend.device, &sem_info, NULL, &acquire_sem);
-    if (vr != VK_SUCCESS) {
-        close(acquire_sync_fd);
-        signal_release_syncobj_fd(generation->render_node,
-                                  release_syncobj_fd,
-                                  generation_id,
-                                  buffer_index,
-                                  "shadow-copy-create-acquire-semaphore-failed");
-        close(release_syncobj_fd);
-        g_set_error(error,
-                    VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR,
-                    VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR_DMABUF,
-                    "failed to create Vulkan acquire semaphore: %s",
-                    ww_vk_result_str(vr));
-        return FALSE;
-    }
-
-    int import_rc = ww_vk_import_sync_fd(&self->vk_blitter.backend,
-                                         acquire_sem,
-                                         acquire_sync_fd);
-    if (import_rc != 0) {
-        close(acquire_sync_fd);
-        signal_release_syncobj_fd(generation->render_node,
-                                  release_syncobj_fd,
-                                  generation_id,
-                                  buffer_index,
-                                  "shadow-copy-acquire-import-failed");
-        close(release_syncobj_fd);
-        self->vk_blitter.backend.vkDestroySemaphore(
-            self->vk_blitter.backend.device, acquire_sem, NULL);
-        g_set_error(error,
-                    VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR,
-                    VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR_DMABUF,
-                    "failed to import acquire sync_file into Vulkan semaphore rc=%d "
-                    "generation=%" G_GUINT64_FORMAT " buffer=%u",
-                    import_rc,
-                    generation_id,
-                    buffer_index);
-        return FALSE;
-    }
-    acquire_sync_fd = -1;
-
     VividReleaseSignalContext release_context = {
         .render_node = generation->render_node,
         .generation = generation_id,
@@ -1251,20 +1266,25 @@ vivid_display_consumer_buffer_paintable_show_frame_with_sync(
         .context = "shadow-copy-complete",
     };
 
+    /*
+     * This runs on the GTK main thread. The blitter imports the acquire
+     * sync_file into a semaphore, submits the copy with a GPU-side wait on it,
+     * and attaches the copy's completion fence to the shadow DMA-BUF and to
+     * the release syncobj, so nothing here waits for the producer's GPU work.
+     * Both fds are owned by the blitter from this point on.
+     */
     ww_vk_blitter_tick_pending_destroys(&self->vk_blitter);
     const int blit_rc = ww_vk_blitter_blit(&self->vk_blitter,
                                            buffer->vk_image.image,
                                            generation->width,
                                            generation->height,
-                                           acquire_sem,
+                                           acquire_sync_fd,
                                            release_syncobj_fd,
-                                           blitter_signal_release_syncobj,
+                                           &blitter_release_ops,
                                            &release_context);
+    acquire_sync_fd = -1;
     release_syncobj_fd = -1;
-    self->vk_blitter.backend.vkDestroySemaphore(
-        self->vk_blitter.backend.device, acquire_sem, NULL);
-    acquire_sem = VK_NULL_HANDLE;
-    if (blit_rc != 0) {
+    if (blit_rc < 0) {
         g_set_error(error,
                     VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR,
                     VIVID_DISPLAY_CONSUMER_BUFFER_PAINTABLE_ERROR_DMABUF,
@@ -1274,6 +1294,14 @@ vivid_display_consumer_buffer_paintable_show_frame_with_sync(
                     generation_id,
                     buffer_index);
         return FALSE;
+    }
+    if (blit_rc == WW_VK_BLIT_DROPPED) {
+        /*
+         * The GPU is still busy with earlier copies; the frame was handed back
+         * to the producer and the shadow keeps the newest completed frame, so
+         * the current texture stays valid and nothing needs repainting.
+         */
+        return TRUE;
     }
 
     g_autoptr(GdkTexture) texture = build_shadow_texture_for_generation(self, generation, error);
@@ -1364,8 +1392,13 @@ clear_state(VividDisplayConsumerBufferPaintable* self,
             gboolean                             invalidate)
 {
     g_clear_object(&self->texture);
-    if (self->generations)
+    if (self->generations) {
+        for (guint i = 0; i < self->generations->len; i++) {
+            drain_blitter_before_buffer_teardown(self,
+                                                 g_ptr_array_index(self->generations, i));
+        }
         g_ptr_array_set_size(self->generations, 0);
+    }
     self->current_generation = 0;
     self->current_buffer_index = 0;
     self->current_width = 0;
