@@ -19,6 +19,7 @@ MAX_DEVICES = 16
 DRM_FORMAT_ABGR8888 = 0x34324241
 DRM_FORMAT_MOD_LINEAR = 0
 DMABUF_MEMORY_HOST_VISIBLE = 1
+DMABUF_MEMORY_DEVICE_LOCAL = 2
 RELEASE_GATE_ABI_VERSION = 1
 
 
@@ -182,7 +183,23 @@ def bind_abi(lib):
     lib.vivid_scene_producer_buffer_set_clear.argtypes = [ctypes.POINTER(BufferSet)]
 
 
-def choose_gpu(devices):
+def device_render_node(device):
+    return bytes(device.render_node).split(b"\0", 1)[0]
+
+
+def choose_gpu(devices, render_node=None):
+    if render_node:
+        wanted = os.fsencode(render_node)
+        for index in range(devices.n_devices):
+            if device_render_node(devices.devices[index]) == wanted:
+                return index
+        available = ", ".join(
+            os.fsdecode(device_render_node(devices.devices[index]))
+            for index in range(devices.n_devices)
+        )
+        raise RuntimeError(
+            f"render node {render_node} is not a usable Vulkan device (available: {available})"
+        )
     for index in range(devices.n_devices):
         if devices.devices[index].is_discrete:
             return index
@@ -318,6 +335,25 @@ def main():
     )
     parser.add_argument("--properties", default="{}")
     parser.add_argument("--media-state", default="")
+    parser.add_argument(
+        "--render-node",
+        default=os.environ.get("VIVID_CAPTURE_RENDER_NODE", ""),
+        help="DRM render node to render on (default: first discrete GPU, else device 0).",
+    )
+    parser.add_argument(
+        "--modifier",
+        type=lambda text: int(text, 0),
+        default=DRM_FORMAT_MOD_LINEAR,
+        help="DRM format modifier to request for the exported buffers (default: LINEAR). "
+        "Non-linear captures save the raw tiled bytes; use them to check that frames "
+        "are produced, not for pixel comparison.",
+    )
+    parser.add_argument(
+        "--memory",
+        choices=("host-visible", "device-local"),
+        default="host-visible",
+        help="Memory preference for the exported buffers (default: host-visible).",
+    )
     args = parser.parse_args()
 
     if args.fps <= 0:
@@ -346,9 +382,11 @@ def main():
     if not lib.vivid_gpu_devices_enumerate(ctypes.byref(devices)) or not devices.n_devices:
         raise RuntimeError("no usable Vulkan render device was found")
 
-    device_index = choose_gpu(devices)
+    device_index = choose_gpu(devices, args.render_node)
     device = devices.devices[device_index]
-    render_node = bytes(device.render_node).split(b"\0", 1)[0]
+    render_node = device_render_node(device)
+    device_name = bytes(device.name).split(b"\0", 1)[0].decode(errors="replace")
+    print(f"rendering on {os.fsdecode(render_node)} ({device_name})", flush=True)
 
     producer = lib.vivid_scene_producer_new()
     if not producer:
@@ -394,10 +432,12 @@ def main():
 
         request = DmaBufRequest(
             DRM_FORMAT_ABGR8888,
-            DRM_FORMAT_MOD_LINEAR,
+            args.modifier,
             1,
             1,
-            DMABUF_MEMORY_HOST_VISIBLE,
+            DMABUF_MEMORY_DEVICE_LOCAL
+            if args.memory == "device-local"
+            else DMABUF_MEMORY_HOST_VISIBLE,
         )
         wait_for_buffers(
             lib,
