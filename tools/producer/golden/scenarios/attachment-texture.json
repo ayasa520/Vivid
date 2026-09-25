@@ -1,9 +1,9 @@
 {
-  "_comment": "Nine ordinary attachment-to-texture states at fixed camera and zero parallax; the existing image-transform-blend consumers remain present.",
+  "_comment": "Nine ordinary attachment-to-texture states followed by 46 finite Mat4 operations driving the disc origin; the first ninety transform and attachment frames remain present.",
   "width": 1600,
   "height": 1000,
   "fps": 30,
-  "steps": 90,
+  "steps": 136,
   "seed": 1,
   "epoch": 1700000000,
   "content_fit": 1,
@@ -32,7 +32,13 @@
     58,
     68,
     78,
-    88
+    88,
+    89,
+    90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
+    100, 101, 102, 103, 104, 105, 106, 107, 108, 109,
+    110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
+    120, 121, 122, 123, 124, 125, 126, 127, 128, 129,
+    130, 131, 132, 133, 134, 135
   ],
   "trace_steps": [
     8,
@@ -43,6 +49,11 @@
     58,
     68,
     78,
-    88
+    88,
+    90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
+    100, 101, 102, 103, 104, 105, 106, 107, 108, 109,
+    110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
+    120, 121, 122, 123, 124, 125, 126, 127, 128, 129,
+    130, 131, 132, 133, 134, 135
   ]
 }

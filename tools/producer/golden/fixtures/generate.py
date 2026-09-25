@@ -35,6 +35,7 @@ from camera_path_pose import make_fixture as make_camera_path_pose_fixture
 from general_zoom import make_fixture as make_general_zoom_fixture
 from init_property_write import make_fixture as make_init_property_write_fixture
 from animation_fractional_seek import make_fixture as make_animation_fractional_seek_fixture
+from mat4_methods import make_fixture as make_mat4_methods_fixture
 
 HERE = Path(__file__).resolve().parent
 SPEC_PATH = HERE / "fixtures.json"
@@ -398,6 +399,9 @@ def expand_spec(spec, assets_dir):
     """Materialize generated fixture families (one per official effect) into concrete entries."""
     fixtures = dict(spec.get("fixtures", {}))
     for family in spec.get("families", []):
+        if family["kind"] == "mat4-methods":
+            fixtures["image-transform-blend"] = make_mat4_methods_fixture(
+                fixtures["image-transform-blend"])
         if family["kind"] == "animation-fractional-seek":
             fixtures["animation-fractional-seek"] = make_animation_fractional_seek_fixture()
         if family["kind"] == "init-property-write":
