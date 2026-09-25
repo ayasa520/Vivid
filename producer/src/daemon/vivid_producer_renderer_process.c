@@ -1758,6 +1758,16 @@ vivid_producer_renderer_complete_unbind(VividProducerRenderer* renderer,
         }
         renderer->last_signaled_release_point = final_release_point;
         g_hash_table_remove_all(renderer->completed_release_points);
+        g_debug("VividProducerRenderer: route=%s instance=%" G_GUINT64_FORMAT
+                " retired frame timeline published=%" G_GUINT64_FORMAT
+                " accepted=%" G_GUINT64_FORMAT
+                " signaled=%" G_GUINT64_FORMAT " queued=%u",
+                renderer->route_id,
+                vivid_renderer_process_instance_id(renderer->process),
+                renderer->last_published_release_point,
+                vivid_renderer_process_last_release_point(renderer->process),
+                final_release_point,
+                vivid_renderer_process_pending_frame_count(renderer->process));
         if (vivid_renderer_process_state(renderer->process) ==
             VIVID_RENDERER_PROCESS_UNBINDING) {
             process_to_shutdown = renderer->process;

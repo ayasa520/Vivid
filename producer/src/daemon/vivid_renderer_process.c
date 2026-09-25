@@ -710,26 +710,67 @@ process_accept_packet(VividRendererProcess* process, VividRendererPacket* packet
         process->release_timeline_seen = TRUE;
         break;
     case VIVID_RENDERER_MSG_BIND_BUFFERS:
+        /*
+         * A pool negotiated before QUIESCE can still be travelling from the
+         * worker when the owner requests retirement. The worker drains that
+         * event before acknowledging QUIESCED, so retain the negotiated pool
+         * and its FDs until the ordinary unbind/shutdown transaction finishes.
+         * The request ID and store_pool() still reject unsolicited or duplicate
+         * bindings; accepting this reply does not start another negotiation.
+         */
         if ((process->state != VIVID_RENDERER_PROCESS_WAIT_FIRST_FRAME &&
-             process->state != VIVID_RENDERER_PROCESS_ACTIVE) ||
+             process->state != VIVID_RENDERER_PROCESS_ACTIVE &&
+             process->state != VIVID_RENDERER_PROCESS_QUIESCING) ||
             packet->header.request_id != process->negotiate_request_id) {
             return FALSE;
         }
         if (!store_pool(process, packet))
             return FALSE;
         process->bind_buffers_seen = TRUE;
+        if (process->state == VIVID_RENDERER_PROCESS_QUIESCING) {
+            g_debug("VividRendererProcess: route=%s instance=%" G_GUINT64_FORMAT
+                    " retained in-flight pool generation=%" G_GUINT64_FORMAT
+                    " buffers=%u during QUIESCING",
+                    process->route_id,
+                    process->instance_id,
+                    process->pool.generation,
+                    process->pool.n_buffers);
+        }
         break;
     case VIVID_RENDERER_MSG_FRAME_READY:
+        /*
+         * QUIESCED, rather than the outgoing QUIESCE request, closes the frame
+         * stream. Frames already queued by the worker remain owned by this
+         * process and keep the same pool, sequence, fence and release checks.
+         * complete_unbind() releases the highest accepted point even when a
+         * retiring owner never forwards those frames to a display consumer.
+         */
         if ((process->state != VIVID_RENDERER_PROCESS_WAIT_FIRST_FRAME &&
-             process->state != VIVID_RENDERER_PROCESS_ACTIVE) ||
+             process->state != VIVID_RENDERER_PROCESS_ACTIVE &&
+             process->state != VIVID_RENDERER_PROCESS_QUIESCING) ||
             !process->bind_buffers_seen) {
             return FALSE;
         }
         if (!store_frame(process, packet))
             return FALSE;
+        if (process->state == VIVID_RENDERER_PROCESS_QUIESCING) {
+            g_debug("VividRendererProcess: route=%s instance=%" G_GUINT64_FORMAT
+                    " retained in-flight frame generation=%" G_GUINT64_FORMAT
+                    " sequence=%" G_GUINT64_FORMAT
+                    " release-point=%" G_GUINT64_FORMAT
+                    " queued=%u during QUIESCING",
+                    process->route_id,
+                    process->instance_id,
+                    process->pool.generation,
+                    process->last_frame_sequence,
+                    process->last_release_point,
+                    g_queue_get_length(&process->frames));
+        }
         if (!process->first_frame_seen) {
             process->first_frame_seen = TRUE;
-            process_transition(process, VIVID_RENDERER_PROCESS_ACTIVE);
+            /* A late first frame must not cancel an already requested stop. */
+            if (process->state == VIVID_RENDERER_PROCESS_WAIT_FIRST_FRAME)
+                process_transition(process, VIVID_RENDERER_PROCESS_ACTIVE);
         }
         break;
     case VIVID_RENDERER_MSG_STATE_CHANGED:
