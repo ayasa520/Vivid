@@ -36,6 +36,7 @@ from general_zoom import make_fixture as make_general_zoom_fixture
 from init_property_write import make_fixture as make_init_property_write_fixture
 from animation_fractional_seek import make_fixture as make_animation_fractional_seek_fixture
 from mat4_methods import make_fixture as make_mat4_methods_fixture
+from model_depth_volumetrics import make_fixture as make_model_depth_volumetrics_fixture
 
 HERE = Path(__file__).resolve().parent
 SPEC_PATH = HERE / "fixtures.json"
@@ -399,6 +400,9 @@ def expand_spec(spec, assets_dir):
     """Materialize generated fixture families (one per official effect) into concrete entries."""
     fixtures = dict(spec.get("fixtures", {}))
     for family in spec.get("families", []):
+        if family["kind"] == "model-depth-volumetrics":
+            fixtures["model-depth-volumetrics"] = make_model_depth_volumetrics_fixture(
+                fixtures["material-pass-scene-reflection"])
         if family["kind"] == "mat4-methods":
             fixtures["image-transform-blend"] = make_mat4_methods_fixture(
                 fixtures["image-transform-blend"])

@@ -2,6 +2,9 @@
   "_comment": "Feature-isolated fixture scenes for golden.py --tier fixtures. 'families' expand into one fixture per official asset (effects). Each entry names the official documentation pages it covers (relative to docs/en/); COVERAGE-MATRIX.md is derived from these lists plus the workshop probe report. Optional 'scenario' selects a scenarios/*.json for the fixture.",
   "families": [
     {
+      "kind": "model-depth-volumetrics"
+    },
+    {
       "kind": "mat4-methods"
     },
     {
