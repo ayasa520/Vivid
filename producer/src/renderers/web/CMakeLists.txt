@@ -33,6 +33,16 @@ endif()
 list(APPEND CMAKE_MODULE_PATH "${CEF_ROOT}/cmake")
 find_package(CEF REQUIRED)
 
+# Let the toolchain own an explicitly selected fortification level. The Flatpak SDK passes
+# it through -Wp,-D_FORTIFY_SOURCE, which GCC processes after ordinary -U/-D options, so
+# CEF's Release undefine/redefine pair still conflicts with that SDK definition under
+# -Werror. Remove only that pair when the toolchain supplies the macro; keep CEF's other
+# compiler checks and its Release settings for builds without an explicit toolchain level.
+set(vivid_web_toolchain_flags "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_RELEASE}")
+if(vivid_web_toolchain_flags MATCHES "(^|[ ,])-D_FORTIFY_SOURCE(=|[ ,]|$)")
+  list(REMOVE_ITEM CEF_COMPILER_FLAGS_RELEASE -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2)
+endif()
+
 # The packaged CEF SDK supplies Release binaries. Our worker and CEF wrapper still use the
 # selected CMake configuration; their imported library and runtime files both come from the
 # SDK's Release directory, including when the worker itself is built for debugging.
