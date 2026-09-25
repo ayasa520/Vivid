@@ -1,0 +1,80 @@
+{
+  "_comment": "Tier membership for golden.py. Ids are Steam Workshop ids; content stays machine-local. 'full' is filled from the probe report so every renderer mechanism marker is covered at least twice. Per-wallpaper overrides: scenario, class (exact|tolerant), tolerance, mask ([x0,y0,x1,y1] fractions excluded from comparison).",
+  "default_scenario": "default",
+  "tiers": {
+    "quick": [
+      "3219908811",
+      "3486806915",
+      "3521337568",
+      "3492627662",
+      "3363252053",
+      "2938612768"
+    ],
+    "full": [
+      "3219908811",
+      "3486806915",
+      "3521337568",
+      "3492627662",
+      "3363252053",
+      "3662790108",
+      "3509243656",
+      "3565190341",
+      "3706286085",
+      "3048838818",
+      "2938612768"
+    ],
+    "lifecycle": [
+      "3219908811",
+      "3486806915"
+    ],
+    "video-tolerant": [
+      "2805838493",
+      "2938612768",
+      "3326873240",
+      "3369989878",
+      "3383601065",
+      "3410266156",
+      "3445534475",
+      "3513007011",
+      "3579374731",
+      "3585875739",
+      "3714466840"
+    ]
+  },
+  "wallpapers": {
+    "2805838493": {
+      "class": "tolerant"
+    },
+    "2938612768": {
+      "class": "tolerant",
+      "scenario": "music-capsule-media"
+    },
+    "3326873240": {
+      "class": "tolerant"
+    },
+    "3369989878": {
+      "class": "tolerant"
+    },
+    "3383601065": {
+      "class": "tolerant"
+    },
+    "3410266156": {
+      "class": "tolerant"
+    },
+    "3445534475": {
+      "class": "tolerant"
+    },
+    "3513007011": {
+      "class": "tolerant"
+    },
+    "3579374731": {
+      "class": "tolerant"
+    },
+    "3585875739": {
+      "class": "tolerant"
+    },
+    "3714466840": {
+      "class": "tolerant"
+    }
+  }
+}

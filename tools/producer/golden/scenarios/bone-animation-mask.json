@@ -1,0 +1,50 @@
+{
+  "width": 960,
+  "height": 540,
+  "fps": 30,
+  "steps": 90,
+  "dt": 0.03333333333333333,
+  "seed": 1,
+  "epoch": 1700000000,
+  "content_fit": 1,
+  "mute": true,
+  "volume": 50,
+  "user_properties": {
+    "schemecolor": "0 0 0"
+  },
+  "media_state": null,
+  "pointer": [
+    0.5,
+    0.5
+  ],
+  "audio": "silence",
+  "events": [],
+  "snapshots": [
+    0,
+    14,
+    29,
+    30,
+    31,
+    32,
+    44,
+    59,
+    60,
+    61,
+    62,
+    89
+  ],
+  "trace_steps": [
+    0,
+    14,
+    29,
+    30,
+    31,
+    32,
+    44,
+    59,
+    60,
+    61,
+    62,
+    89
+  ]
+}

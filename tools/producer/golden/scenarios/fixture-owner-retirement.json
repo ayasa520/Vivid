@@ -1,0 +1,79 @@
+{
+  "_comment": "Refresh material registrations, defer removal, create a replacement inside destroy, and retain a shared hidden owner before its later removal.",
+  "width": 960,
+  "height": 540,
+  "fps": 30,
+  "steps": 120,
+  "seed": 1,
+  "epoch": 1700000000,
+  "content_fit": 1,
+  "mute": true,
+  "volume": 50,
+  "reflections": true,
+  "volumetrics": 2,
+  "shadows": 2,
+  "postprocessing": 1,
+  "antialiasing": 1,
+  "texture_resolution": 0,
+  "user_properties": {
+    "phase": 0
+  },
+  "media_state": null,
+  "pointer": [
+    0.5,
+    0.5
+  ],
+  "audio": null,
+  "events": [
+    {
+      "step": 20,
+      "properties": {
+        "phase": 1
+      }
+    },
+    {
+      "step": 40,
+      "properties": {
+        "phase": 2
+      }
+    },
+    {
+      "step": 60,
+      "properties": {
+        "phase": 3
+      }
+    },
+    {
+      "step": 80,
+      "properties": {
+        "phase": 4
+      }
+    }
+  ],
+  "snapshots": [
+    0,
+    19,
+    21,
+    39,
+    41,
+    59,
+    61,
+    79,
+    81,
+    99,
+    119
+  ],
+  "trace_steps": [
+    0,
+    19,
+    21,
+    39,
+    41,
+    59,
+    61,
+    79,
+    81,
+    99,
+    119
+  ]
+}

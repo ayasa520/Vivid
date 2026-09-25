@@ -1,0 +1,48 @@
+{
+  "_comment": "Nine ordinary attachment-to-texture states at fixed camera and zero parallax; the existing image-transform-blend consumers remain present.",
+  "width": 1600,
+  "height": 1000,
+  "fps": 30,
+  "steps": 90,
+  "seed": 1,
+  "epoch": 1700000000,
+  "content_fit": 1,
+  "mute": true,
+  "volume": 50,
+  "reflections": true,
+  "volumetrics": 2,
+  "shadows": 2,
+  "postprocessing": 1,
+  "antialiasing": 1,
+  "texture_resolution": 0,
+  "user_properties": {},
+  "media_state": null,
+  "pointer": [
+    0.5,
+    0.5
+  ],
+  "audio": "silence",
+  "events": [],
+  "snapshots": [
+    8,
+    18,
+    28,
+    38,
+    48,
+    58,
+    68,
+    78,
+    88
+  ],
+  "trace_steps": [
+    8,
+    18,
+    28,
+    38,
+    48,
+    58,
+    68,
+    78,
+    88
+  ]
+}

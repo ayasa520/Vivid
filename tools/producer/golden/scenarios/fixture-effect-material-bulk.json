@@ -1,0 +1,467 @@
+{
+  "_comment": "Forty-four fixed bulk material states. The accepted thirty-eight states retain their timing; six appended Vec4 dot cases reuse the image/text scalar material consumers.",
+  "width": 960,
+  "height": 540,
+  "fps": 30,
+  "seed": 1,
+  "epoch": 1700000000,
+  "content_fit": 1,
+  "mute": true,
+  "volume": 50,
+  "reflections": true,
+  "volumetrics": 2,
+  "shadows": 2,
+  "postprocessing": 1,
+  "antialiasing": 1,
+  "texture_resolution": 0,
+  "media_state": null,
+  "pointer": [
+    0.5,
+    0.5
+  ],
+  "audio": null,
+  "steps": 440,
+  "user_properties": {
+    "phase": 0
+  },
+  "events": [
+    {
+      "step": 10,
+      "properties": {
+        "phase": 1
+      }
+    },
+    {
+      "step": 20,
+      "properties": {
+        "phase": 2
+      }
+    },
+    {
+      "step": 30,
+      "properties": {
+        "phase": 3
+      }
+    },
+    {
+      "step": 40,
+      "properties": {
+        "phase": 4
+      }
+    },
+    {
+      "step": 50,
+      "properties": {
+        "phase": 5
+      }
+    },
+    {
+      "step": 60,
+      "properties": {
+        "phase": 6
+      }
+    },
+    {
+      "step": 70,
+      "properties": {
+        "phase": 7
+      }
+    },
+    {
+      "step": 80,
+      "properties": {
+        "phase": 8
+      }
+    },
+    {
+      "step": 90,
+      "properties": {
+        "phase": 9
+      }
+    },
+    {
+      "step": 100,
+      "properties": {
+        "phase": 10
+      }
+    },
+    {
+      "step": 110,
+      "properties": {
+        "phase": 11
+      }
+    },
+    {
+      "step": 120,
+      "properties": {
+        "phase": 12
+      }
+    },
+    {
+      "step": 130,
+      "properties": {
+        "phase": 13
+      }
+    },
+    {
+      "step": 140,
+      "properties": {
+        "phase": 14
+      }
+    },
+    {
+      "step": 150,
+      "properties": {
+        "phase": 15
+      }
+    },
+    {
+      "step": 160,
+      "properties": {
+        "phase": 16
+      }
+    },
+    {
+      "step": 170,
+      "properties": {
+        "phase": 17
+      }
+    },
+    {
+      "step": 180,
+      "properties": {
+        "phase": 18
+      }
+    },
+    {
+      "step": 190,
+      "properties": {
+        "phase": 19
+      }
+    },
+    {
+      "step": 200,
+      "properties": {
+        "phase": 20
+      }
+    },
+    {
+      "step": 210,
+      "properties": {
+        "phase": 21
+      }
+    },
+    {
+      "step": 220,
+      "properties": {
+        "phase": 22
+      }
+    },
+    {
+      "step": 230,
+      "properties": {
+        "phase": 23
+      }
+    },
+    {
+      "step": 240,
+      "properties": {
+        "phase": 24
+      }
+    },
+    {
+      "step": 250,
+      "properties": {
+        "phase": 25
+      }
+    },
+    {
+      "step": 260,
+      "properties": {
+        "phase": 26
+      }
+    },
+    {
+      "step": 270,
+      "properties": {
+        "phase": 27
+      }
+    },
+    {
+      "step": 280,
+      "properties": {
+        "phase": 28
+      }
+    },
+    {
+      "step": 290,
+      "properties": {
+        "phase": 29
+      }
+    },
+    {
+      "step": 300,
+      "properties": {
+        "phase": 30
+      }
+    },
+    {
+      "step": 310,
+      "properties": {
+        "phase": 31
+      }
+    },
+    {
+      "step": 320,
+      "properties": {
+        "phase": 32
+      }
+    },
+    {
+      "step": 330,
+      "properties": {
+        "phase": 33
+      }
+    },
+    {
+      "step": 340,
+      "properties": {
+        "phase": 34
+      }
+    },
+    {
+      "step": 350,
+      "properties": {
+        "phase": 35
+      }
+    },
+    {
+      "step": 360,
+      "properties": {
+        "phase": 36
+      }
+    },
+    {
+      "step": 370,
+      "properties": {
+        "phase": 37
+      }
+    },
+    {
+      "step": 380,
+      "properties": {
+        "phase": 38
+      }
+    },
+    {
+      "step": 390,
+      "properties": {
+        "phase": 39
+      }
+    },
+    {
+      "step": 400,
+      "properties": {
+        "phase": 40
+      }
+    },
+    {
+      "step": 410,
+      "properties": {
+        "phase": 41
+      }
+    },
+    {
+      "step": 420,
+      "properties": {
+        "phase": 42
+      }
+    },
+    {
+      "step": 430,
+      "properties": {
+        "phase": 43
+      }
+    }
+  ],
+  "snapshots": [
+    3,
+    9,
+    13,
+    19,
+    23,
+    29,
+    33,
+    39,
+    43,
+    49,
+    53,
+    59,
+    63,
+    69,
+    73,
+    79,
+    83,
+    89,
+    93,
+    99,
+    103,
+    109,
+    113,
+    119,
+    123,
+    129,
+    133,
+    139,
+    143,
+    149,
+    153,
+    159,
+    163,
+    169,
+    173,
+    179,
+    183,
+    189,
+    193,
+    199,
+    203,
+    209,
+    213,
+    219,
+    223,
+    229,
+    233,
+    239,
+    243,
+    249,
+    253,
+    259,
+    263,
+    269,
+    273,
+    279,
+    283,
+    289,
+    293,
+    299,
+    303,
+    309,
+    313,
+    319,
+    323,
+    329,
+    333,
+    339,
+    343,
+    349,
+    353,
+    359,
+    363,
+    369,
+    373,
+    379,
+    383,
+    389,
+    393,
+    399,
+    403,
+    409,
+    413,
+    419,
+    423,
+    429,
+    433,
+    439
+  ],
+  "trace_steps": [
+    3,
+    9,
+    13,
+    19,
+    23,
+    29,
+    33,
+    39,
+    43,
+    49,
+    53,
+    59,
+    63,
+    69,
+    73,
+    79,
+    83,
+    89,
+    93,
+    99,
+    103,
+    109,
+    113,
+    119,
+    123,
+    129,
+    133,
+    139,
+    143,
+    149,
+    153,
+    159,
+    163,
+    169,
+    173,
+    179,
+    183,
+    189,
+    193,
+    199,
+    203,
+    209,
+    213,
+    219,
+    223,
+    229,
+    233,
+    239,
+    243,
+    249,
+    253,
+    259,
+    263,
+    269,
+    273,
+    279,
+    283,
+    289,
+    293,
+    299,
+    303,
+    309,
+    313,
+    319,
+    323,
+    329,
+    333,
+    339,
+    343,
+    349,
+    353,
+    359,
+    363,
+    369,
+    373,
+    379,
+    383,
+    389,
+    393,
+    399,
+    403,
+    409,
+    413,
+    419,
+    423,
+    429,
+    433,
+    439
+  ]
+}

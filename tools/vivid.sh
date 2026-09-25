@@ -34,6 +34,11 @@ Usage:
   # Requires a prior `tools/vivid.sh build direct-run`, which also builds the
   # test executables.
 
+  tools/vivid.sh golden {probe|init|run|promote|packet|bisect-run|status} ...
+  # Deterministic golden-frame regression harness for the scene renderer
+  # (tools/producer/golden/golden.py). `run --tier quick` is the pre-commit gate
+  # for renderer changes; `run --tier full` and `--tier fixtures` before commit.
+
   Aliases:
     tools/vivid.sh consumer gnome ...
   tools/vivid.sh consumer kde ...
@@ -59,7 +64,7 @@ _vivid_sh_completion() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     COMPREPLY=()
 
-    local top_commands="build clean direct-run gnome consumer-gnome kde consumer-kde layer-shell consumer-layer-shell consumer flatpak producer protocol test completion help -h --help"
+    local top_commands="build clean direct-run gnome consumer-gnome kde consumer-kde layer-shell consumer-layer-shell consumer flatpak producer protocol test golden completion help -h --help"
     local build_targets="direct-run producer gnome consumer-gnome kde consumer-kde layer-shell consumer-layer-shell flatpak all"
     local clean_targets="direct-run gnome consumer-gnome kde consumer-kde layer-shell consumer-layer-shell flatpak producer consumer all"
     local direct_run_actions="build clean run run-producer run-webui"
@@ -650,6 +655,10 @@ case "${1:-help}" in
     test)
         shift
         run_tests "$@"
+        ;;
+    golden)
+        shift
+        exec python3 "${SCRIPT_DIR}/producer/golden/golden.py" "$@"
         ;;
     completion)
         shift

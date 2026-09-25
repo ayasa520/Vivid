@@ -1,0 +1,32 @@
+{
+  "_comment": "Shared live selections, an independently retained hidden material, repeated return to released inputs, and an authored reset. Sample the draw after each property event because property application has one-draw latency.",
+  "width": 960,
+  "height": 540,
+  "fps": 30,
+  "steps": 140,
+  "seed": 1,
+  "epoch": 1700000000,
+  "content_fit": 1,
+  "mute": true,
+  "volume": 50,
+  "reflections": true,
+  "volumetrics": 2,
+  "shadows": 2,
+  "postprocessing": 1,
+  "antialiasing": 1,
+  "texture_resolution": 0,
+  "user_properties": {"selection": "retire-base", "show_peer": false},
+  "media_state": null,
+  "pointer": [0.5, 0.5],
+  "audio": null,
+  "events": [
+    {"step": 20, "properties": {"selection": "retire-a"}},
+    {"step": 40, "properties": {"selection": "retire-b"}},
+    {"step": 60, "properties": {"selection": "retire-a"}},
+    {"step": 80, "properties": {"selection": "retire-base"}},
+    {"step": 100, "properties": {"selection": "retire-b", "show_peer": true}},
+    {"step": 120, "properties": {"selection": ""}}
+  ],
+  "snapshots": [0, 19, 21, 39, 41, 59, 61, 79, 81, 99, 101, 119, 121, 139],
+  "trace_steps": [0, 19, 21, 39, 41, 59, 61, 79, 81, 99, 101, 119, 121, 139]
+}

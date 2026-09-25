@@ -1,0 +1,28 @@
+{
+  "_comment": "Mechanism probe: tiny and short; only the renderer log matters.",
+  "width": 640,
+  "height": 400,
+  "fps": 30,
+  "steps": 12,
+  "seed": 1,
+  "epoch": 1700000000,
+  "mute": true,
+  "audio": "sweep",
+  "pointer": [
+    0.5,
+    0.5
+  ],
+  "events": [
+    {
+      "step": 4,
+      "pointer": [
+        0.2,
+        0.3
+      ]
+    }
+  ],
+  "snapshots": [
+    11
+  ],
+  "trace_steps": []
+}

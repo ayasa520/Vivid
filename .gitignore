@@ -1,6 +1,7 @@
 # Hanabi extension
 src/video.*
 .build
+/build/
 src/schemas/gschemas.compiled
 src/native/scene/build/
 

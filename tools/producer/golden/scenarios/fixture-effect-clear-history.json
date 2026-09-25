@@ -1,0 +1,374 @@
+{
+  "name": "fixture-effect-clear-history",
+  "width": 960,
+  "height": 540,
+  "fps": 30,
+  "steps": 320,
+  "dt": 0.03333333333333333,
+  "seed": 1,
+  "epoch": 1700000000,
+  "content_fit": 1,
+  "mute": true,
+  "volume": 50,
+  "reflections": true,
+  "volumetrics": 2,
+  "shadows": 2,
+  "postprocessing": 1,
+  "antialiasing": 1,
+  "texture_resolution": 0,
+  "user_properties": {
+    "phase": 0
+  },
+  "events": [
+    {
+      "step": 10,
+      "properties": {
+        "phase": 1
+      }
+    },
+    {
+      "step": 20,
+      "properties": {
+        "phase": 2
+      }
+    },
+    {
+      "step": 30,
+      "properties": {
+        "phase": 3
+      }
+    },
+    {
+      "step": 40,
+      "properties": {
+        "phase": 4
+      }
+    },
+    {
+      "step": 50,
+      "properties": {
+        "phase": 5
+      }
+    },
+    {
+      "step": 60,
+      "properties": {
+        "phase": 6
+      }
+    },
+    {
+      "step": 70,
+      "properties": {
+        "phase": 7
+      }
+    },
+    {
+      "step": 80,
+      "properties": {
+        "phase": 8
+      }
+    },
+    {
+      "step": 90,
+      "properties": {
+        "phase": 9
+      }
+    },
+    {
+      "step": 100,
+      "properties": {
+        "phase": 10
+      }
+    },
+    {
+      "step": 110,
+      "properties": {
+        "phase": 11
+      }
+    },
+    {
+      "step": 120,
+      "properties": {
+        "phase": 12
+      }
+    },
+    {
+      "step": 130,
+      "properties": {
+        "phase": 13
+      }
+    },
+    {
+      "step": 140,
+      "properties": {
+        "phase": 14
+      }
+    },
+    {
+      "step": 150,
+      "properties": {
+        "phase": 15
+      }
+    },
+    {
+      "step": 160,
+      "properties": {
+        "phase": 16
+      }
+    },
+    {
+      "step": 170,
+      "properties": {
+        "phase": 17
+      }
+    },
+    {
+      "step": 180,
+      "properties": {
+        "phase": 18
+      }
+    },
+    {
+      "step": 190,
+      "properties": {
+        "phase": 19
+      }
+    },
+    {
+      "step": 200,
+      "properties": {
+        "phase": 20
+      }
+    },
+    {
+      "step": 210,
+      "properties": {
+        "phase": 21
+      }
+    },
+    {
+      "step": 220,
+      "properties": {
+        "phase": 22
+      }
+    },
+    {
+      "step": 230,
+      "properties": {
+        "phase": 23
+      }
+    },
+    {
+      "step": 240,
+      "properties": {
+        "phase": 24
+      }
+    },
+    {
+      "step": 250,
+      "properties": {
+        "phase": 25
+      }
+    },
+    {
+      "step": 260,
+      "properties": {
+        "phase": 26
+      }
+    },
+    {
+      "step": 270,
+      "properties": {
+        "phase": 27
+      }
+    },
+    {
+      "step": 280,
+      "properties": {
+        "phase": 28
+      }
+    },
+    {
+      "step": 290,
+      "properties": {
+        "phase": 29
+      }
+    },
+    {
+      "step": 300,
+      "properties": {
+        "phase": 30
+      }
+    },
+    {
+      "step": 310,
+      "properties": {
+        "phase": 31
+      }
+    }
+  ],
+  "snapshots": [
+    3,
+    9,
+    13,
+    19,
+    23,
+    29,
+    33,
+    39,
+    43,
+    49,
+    53,
+    59,
+    63,
+    69,
+    73,
+    79,
+    83,
+    89,
+    93,
+    99,
+    103,
+    109,
+    113,
+    119,
+    123,
+    129,
+    133,
+    139,
+    143,
+    149,
+    153,
+    159,
+    163,
+    169,
+    173,
+    179,
+    183,
+    189,
+    193,
+    199,
+    203,
+    209,
+    213,
+    219,
+    223,
+    229,
+    233,
+    239,
+    243,
+    249,
+    253,
+    259,
+    263,
+    269,
+    273,
+    279,
+    283,
+    289,
+    293,
+    299,
+    303,
+    309,
+    313,
+    319
+  ],
+  "trace_steps": [
+    1,
+    3,
+    9,
+    11,
+    13,
+    19,
+    21,
+    23,
+    29,
+    31,
+    33,
+    39,
+    41,
+    43,
+    49,
+    51,
+    53,
+    59,
+    61,
+    63,
+    69,
+    71,
+    73,
+    79,
+    81,
+    83,
+    89,
+    91,
+    93,
+    99,
+    101,
+    103,
+    109,
+    111,
+    113,
+    119,
+    121,
+    123,
+    129,
+    131,
+    133,
+    139,
+    141,
+    143,
+    149,
+    151,
+    153,
+    159,
+    161,
+    163,
+    169,
+    171,
+    173,
+    179,
+    181,
+    183,
+    189,
+    191,
+    193,
+    199,
+    201,
+    203,
+    209,
+    211,
+    213,
+    219,
+    221,
+    223,
+    229,
+    231,
+    233,
+    239,
+    241,
+    243,
+    249,
+    251,
+    253,
+    259,
+    261,
+    263,
+    269,
+    271,
+    273,
+    279,
+    281,
+    283,
+    289,
+    291,
+    293,
+    299,
+    301,
+    303,
+    309,
+    311,
+    313,
+    319
+  ]
+}
