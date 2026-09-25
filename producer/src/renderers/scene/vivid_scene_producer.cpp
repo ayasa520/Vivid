@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -238,14 +239,12 @@ bool scene_dmabuf_requests_equal(const SceneDmaBufRequest& a,
         a.memory_preference == b.memory_preference;
 }
 
-bool scene_size_contract_changed(const VividSceneProducer* self,
+bool scene_output_extent_changed(const VividSceneProducer* self,
                                  guint32                   width,
-                                 guint32                   height,
-                                 double                    render_scale)
+                                 guint32                   height)
 {
     return self->width != width ||
-        self->height != height ||
-        std::abs(self->render_scale - render_scale) > 0.0001;
+        self->height != height;
 }
 
 wallpaper::ExternalFrameMemoryPreference
@@ -612,6 +611,54 @@ vivid_scene_producer_request_frame(VividSceneProducer* self, const gchar* reason
     self->scene->requestFrame();
 }
 
+gboolean
+vivid_scene_producer_step(VividSceneProducer* self)
+{
+    g_return_val_if_fail(self != nullptr, FALSE);
+
+    if (!self->scene)
+        return FALSE;
+
+    return self->scene->requestFrame() ? TRUE : FALSE;
+}
+
+gboolean
+vivid_scene_producer_flush(VividSceneProducer* self, guint timeout_ms)
+{
+    g_return_val_if_fail(self != nullptr, FALSE);
+
+    if (!self->scene)
+        return FALSE;
+
+    return self->scene->flush(std::chrono::milliseconds(timeout_ms)) ? TRUE : FALSE;
+}
+
+gboolean
+vivid_scene_producer_wait_scene_ready(VividSceneProducer* self, guint timeout_ms)
+{
+    g_return_val_if_fail(self != nullptr, FALSE);
+
+    if (!self->scene)
+        return FALSE;
+
+    /*
+     * Scene installation is the tail of a chain that crosses both renderer
+     * threads (Vulkan init on the render thread, parse on the main thread,
+     * install on the render thread again), so a single barrier cannot wait for
+     * it. Poll the installed flag, then cross the renderer barriers once it is
+     * set so the install message itself has completed before capture begins.
+     */
+    const gint64 deadline = g_get_monotonic_time() + static_cast<gint64>(timeout_ms) * 1000;
+    for (;;) {
+        if (self->scene->sceneLoaded()) {
+            return self->scene->flush(std::chrono::milliseconds(timeout_ms)) ? TRUE : FALSE;
+        }
+        if (g_get_monotonic_time() >= deadline)
+            return FALSE;
+        g_usleep(2000);
+    }
+}
+
 void
 vivid_scene_producer_set_pointer_motion(VividSceneProducer* self,
                                          gdouble              x,
@@ -771,65 +818,12 @@ vivid_scene_producer_prepare_buffers_with_request(
         return FALSE;
     }
 
-    const bool size_contract_changed =
+    const bool output_extent_changed =
         self->render_ready &&
-        scene_size_contract_changed(self, width, height, render_scale);
+        scene_output_extent_changed(self, width, height);
     const bool dmabuf_contract_changed =
         self->render_ready &&
         !scene_dmabuf_requests_equal(self->dmabuf_request, dmabuf_request);
-
-    if (size_contract_changed) {
-        /*
-         * Size and render-scale still define the scene's framebuffer and text
-         * rasterization contract.  Keep those as scene rebuild triggers, while
-         * modifier/memory-only retries are handled by the route swapchain below
-         * so consumer import failures do not reload the wallpaper project.
-         */
-        g_message("VividSceneProducer: scene size contract changed %ux%u scale=%.3f "
-                  "modifier=0x%016" G_GINT64_MODIFIER "x memory=%s -> %ux%u "
-                  "scale=%.3f modifier=0x%016" G_GINT64_MODIFIER
-                  "x memory=%s; recreating scene",
-                  self->width,
-                  self->height,
-                  self->render_scale,
-                  static_cast<guint64>(self->dmabuf_request.modifier),
-                  scene_memory_preference_name(self->dmabuf_request.memory_preference),
-                  width,
-                  height,
-                  render_scale,
-                  static_cast<guint64>(dmabuf_request.modifier),
-                  scene_memory_preference_name(dmabuf_request.memory_preference));
-        self->scene.reset();
-        self->scene_ready = false;
-        self->render_ready = false;
-        self->logged_waiting_for_frame = false;
-        self->logged_waiting_for_swapchain = false;
-        self->logged_swapchain_type_mismatch = false;
-        self->logged_empty_swapchain_handles = false;
-        if (!ensure_scene_wallpaper(self->scene,
-                                    CACHE_DIR_NAME,
-                                    "producer-resize",
-                                    self->project)) {
-            self->last_dmabuf_prepare_status =
-                VIVID_SCENE_PRODUCER_DMABUF_PREPARE_UNSUPPORTED;
-            return FALSE;
-        }
-        scene_apply_release_gate_callback(self);
-        configure_scene_wallpaper(*self->scene,
-                                  self->project,
-                                  self->volume,
-                                  self->muted,
-                                  self->fill_mode,
-                                  self->fps,
-                                  self->reflections,
-                                  self->volumetrics,
-                                  self->shadows,
-                                  self->postprocessing,
-                                  self->antialiasing,
-                                  self->texture_resolution);
-        self->scene_ready = true;
-        apply_scene_script_runtime_objects(self);
-    }
 
     if (!self->render_ready) {
         if (!self->resolved_gpu_valid) {
@@ -980,7 +974,7 @@ vivid_scene_producer_prepare_buffers_with_request(
         return FALSE;
     }
 
-    if (dmabuf_contract_changed && !size_contract_changed) {
+    if (output_extent_changed || dmabuf_contract_changed) {
         const bool explicit_non_linear_modifier =
             dmabuf_request.require_modifier &&
             dmabuf_request.modifier != DRM_FORMAT_MOD_LINEAR &&
@@ -993,12 +987,12 @@ vivid_scene_producer_prepare_buffers_with_request(
             : std::vector<uint64_t> {};
 
         /*
-         * This is the waywallen-style long-lived scene route: consumer
-         * BIND_FAILED changes the export slot contract, not the wallpaper scene.
-         * The call is synchronous but executes allocation on SceneWallpaper's
-         * render thread, so TextureCache and the Vulkan device remain
-         * renderer-thread-owned while prepare_buffers still reports allocation
-         * failure through the existing producer-side blacklist path.
+         * Physical output dimensions and consumer import requirements belong to
+         * the exported buffer generation. Reconfigure that generation while the
+         * scene retains its script instances, timers, camera path and fixed
+         * private targets. Allocation runs synchronously on the render thread;
+         * its successful extent handoff also refreshes screen-bound resources
+         * and notifies the retained script host before rendering resumes.
          */
         /*
          * The display may still be sampling a slot from the previous export
@@ -1015,12 +1009,18 @@ vivid_scene_producer_prepare_buffers_with_request(
             }
         }
 
-        g_message("VividSceneProducer: DMA-BUF route contract changed "
-                  "modifier=0x%016" G_GINT64_MODIFIER "x memory=%s -> "
+        g_message("VividSceneProducer: output contract changed %ux%u scale=%.3f "
+                  "modifier=0x%016" G_GINT64_MODIFIER "x memory=%s -> %ux%u scale=%.3f "
                   "modifier=0x%016" G_GINT64_MODIFIER "x memory=%s; "
-                  "reconfiguring export route without recreating scene",
+                  "reconfiguring exported buffers",
+                  self->width,
+                  self->height,
+                  self->render_scale,
                   static_cast<guint64>(self->dmabuf_request.modifier),
                   scene_memory_preference_name(self->dmabuf_request.memory_preference),
+                  width,
+                  height,
+                  render_scale,
                   static_cast<guint64>(dmabuf_request.modifier),
                   scene_memory_preference_name(dmabuf_request.memory_preference));
         if (!self->scene->reconfigureOffscreenExport(
@@ -1039,11 +1039,17 @@ vivid_scene_producer_prepare_buffers_with_request(
                 VIVID_SCENE_PRODUCER_DMABUF_PREPARE_UNSUPPORTED;
             return FALSE;
         }
+        self->width = width;
+        self->height = height;
         self->dmabuf_request = dmabuf_request;
         self->logged_waiting_for_frame = false;
         self->logged_waiting_for_swapchain = false;
         self->logged_empty_swapchain_handles = false;
     }
+
+    // Width and height already specify physical buffer pixels. The scale is
+    // output metadata; changing it alone preserves buffers and authored text size.
+    self->render_scale = render_scale;
 
     auto handles = swapchain->handlesSnapshot();
     if (handles.empty()) {
@@ -1221,6 +1227,7 @@ vivid_scene_producer_next_frame(VividSceneProducer*      self,
     self->frame_route.write_ready_frame(static_cast<guint32>(frame->id()),
                                         frame->id(),
                                         *out_frame);
+    out_frame->render_sequence = self->scene->exSwapchain()->presentedSequence();
     /*
      * Pipelined offscreen rendering publishes the slot before its GPU work has
      * completed and stashes the exported acquire sync-file with the slot. When

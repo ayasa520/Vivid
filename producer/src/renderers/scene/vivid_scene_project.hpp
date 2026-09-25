@@ -374,6 +374,16 @@ inline bool entry_file_is_legacy_scene_project(const std::string& entry_file) {
 }
 
 inline std::string resolve_assets_path(const std::string& project_dir) {
+    /*
+     * Projects outside a Steam library (golden-test fixture scenes generated
+     * into the build tree) cannot reach the shared Wallpaper Engine assets by
+     * walking up their own path. The environment names that directory
+     * explicitly; it is only consulted when set and existing.
+     */
+    if (const char* override_dir = g_getenv("VIVID_SCENE_ASSETS_DIR");
+        override_dir && *override_dir && std::filesystem::is_directory(override_dir)) {
+        return override_dir;
+    }
     auto dir = std::filesystem::path(project_dir);
     for (auto current = dir; current.has_parent_path(); current = current.parent_path()) {
         auto assets = current / "steamapps" / "common" / "wallpaper_engine" / "assets";

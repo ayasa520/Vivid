@@ -29,10 +29,11 @@ echo "==> Building Scene renderer worker for direct-run"
   -B "${SCENE_BUILD_DIR}" \
   -DCMAKE_BUILD_TYPE="${VIVID_CMAKE_BUILD_TYPE}"
 # VividScene is the shared library the golden-frame capture harness loads
-# (tools/producer/golden/), and scene_identity_test backs
+# (tools/producer/golden/); scene_identity_test and lockstep_contract_test back
 # `ctest --test-dir "${SCENE_BUILD_DIR}"`.
 "${CMAKE_BIN}" --build "${SCENE_BUILD_DIR}" --target "${VIVID_SCENE_TARGET}" \
-  --target VividScene --target scene_identity_test --parallel "${JOBS}" --verbose
+  --target VividScene --target scene_identity_test --target lockstep_contract_test \
+  --parallel "${JOBS}" --verbose
 
 echo "==> Building Video renderer worker for direct-run"
 "${CMAKE_BIN}" -S "${VIVID_VIDEO_SOURCE_DIR}" \

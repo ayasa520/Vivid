@@ -90,6 +90,14 @@ typedef struct
     guint64 sequence;
     guint64 target_time_usec;
     gint    acquire_sync_fd;
+    /*
+     * Renderer-side publish number of this frame (1-based, increments once per
+     * draw that reached the exported ring). Unlike `sequence`, which counts
+     * frames this producer handed out, it skips when the ring overwrote an
+     * unread slot, so consecutive values that differ by more than one prove a
+     * frame was dropped.
+     */
+    guint64 render_sequence;
 } VividSceneProducerFrame;
 
 VividSceneProducer* vivid_scene_producer_new(void);
@@ -136,6 +144,26 @@ void vivid_scene_producer_set_frame_callback(
     gpointer                        user_data);
 void vivid_scene_producer_request_frame(VividSceneProducer* self,
                                           const gchar*         reason);
+
+/*
+ * Lockstep capture support. These exist so an offscreen test driver can own the
+ * frame clock when the renderer runs with WESCENE_LOCKSTEP=1 (the periodic draw
+ * timer is disabled and every draw advances the scene by a fixed step):
+ *
+ *   step             Post exactly one draw. Returns FALSE when the previous draw
+ *                    has not finished yet, in which case nothing was queued.
+ *   flush            Block until every message queued on the renderer's main
+ *                    and render threads at call time has been handled, so input
+ *                    or property changes applied before the call take effect on
+ *                    the next stepped draw and not on a later one.
+ *   wait_scene_ready Block until the parsed scene is installed on the render
+ *                    thread (scripts initialized, first render graph compiled).
+ *                    prepare_buffers only guarantees the swapchain exists.
+ */
+gboolean vivid_scene_producer_step(VividSceneProducer* self);
+gboolean vivid_scene_producer_flush(VividSceneProducer* self, guint timeout_ms);
+gboolean vivid_scene_producer_wait_scene_ready(VividSceneProducer* self,
+                                                guint                timeout_ms);
 
 gboolean vivid_scene_producer_query_dmabuf_caps(
     VividSceneProducer*             self,
