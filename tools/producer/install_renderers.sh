@@ -53,7 +53,7 @@ report_cache_state "video" "${VIVID_FLATPAK_VIDEO_BUILD_DIR}"
 report_cache_state "web" "${VIVID_FLATPAK_WEB_BUILD_DIR}"
 
 echo "==> Building ${VIVID_SCENE_TARGET} in ${VIVID_FLATPAK_SCENE_BUILD_DIR}"
-"${CMAKE_BIN}" -S "${VIVID_SCENE_SOURCE_DIR}" \
+"${CMAKE_BIN}" -S "${VIVID_SCENE_SOURCE_DIR}" --preset release \
     -B "${VIVID_FLATPAK_SCENE_BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE="${VIVID_CMAKE_BUILD_TYPE}"
 "${CMAKE_BIN}" --build "${VIVID_FLATPAK_SCENE_BUILD_DIR}" \

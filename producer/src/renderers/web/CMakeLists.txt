@@ -33,19 +33,13 @@ endif()
 list(APPEND CMAKE_MODULE_PATH "${CEF_ROOT}/cmake")
 find_package(CEF REQUIRED)
 
-# The minimal CEF distribution ships Release binaries only; alias the Debug
-# location so the imported target stays valid in any build type, and pin the
-# runtime-file source directory (cef_variables derives it from
-# CMAKE_BUILD_TYPE, which is RelWithDebInfo here).
-if(NOT CEF_LIB_DEBUG)
-  set(CEF_LIB_DEBUG "${CEF_LIB_RELEASE}")
-endif()
-if(NOT IS_DIRECTORY "${CEF_BINARY_DIR}")
-  set(CEF_BINARY_DIR "${CEF_BINARY_DIR_RELEASE}")
-endif()
+# The packaged CEF SDK supplies Release binaries. Our worker and CEF wrapper still use the
+# selected CMake configuration; their imported library and runtime files both come from the
+# SDK's Release directory, including when the worker itself is built for debugging.
+set(CEF_BINARY_DIR "${CEF_BINARY_DIR_RELEASE}")
 
 add_subdirectory(${CEF_LIBCEF_DLL_WRAPPER_PATH} libcef_dll_wrapper)
-ADD_LOGICAL_TARGET("libcef_lib" "${CEF_LIB_DEBUG}" "${CEF_LIB_RELEASE}")
+ADD_LOGICAL_TARGET("libcef_lib" "${CEF_LIB_RELEASE}" "${CEF_LIB_RELEASE}")
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GLIB REQUIRED glib-2.0)

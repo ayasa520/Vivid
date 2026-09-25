@@ -15,6 +15,7 @@
 #include <json-glib/json-glib.h>
 
 #include "SceneWallpaper.hpp"
+#include "Utils/Logging.h"
 #include "Utils/Platform.hpp"
 #include "WPSceneScriptMedia.hpp"
 #include "WPUserProperties.hpp"
@@ -72,43 +73,6 @@ inline bool property_prefers_string(JsonObject* property) {
         ? json_object_get_string_member(property, "type")
         : "";
     return property_type_prefers_string(type);
-}
-
-inline std::string describe_user_property_value_for_log(const wallpaper::UserProperty& property) {
-    // The scene switch bug we are chasing depends on whether a combo property
-    // arrived as a string or a shader number.  Keep this formatter explicit so
-    // logs show the exact representation that the parser will evaluate.
-    if (const auto* string_value = std::get_if<std::string>(&property.value))
-        return std::string("string:") + *string_value;
-
-    const auto* shader_value = std::get_if<wallpaper::ShaderValue>(&property.value);
-    if (!shader_value)
-        return "unknown";
-
-    std::string description = "shader:[";
-    for (size_t index = 0; index < shader_value->size(); index++) {
-        if (index != 0)
-            description += ",";
-        description += std::to_string((*shader_value)[index]);
-        if (index >= 3 && shader_value->size() > 4) {
-            description += ",...";
-            break;
-        }
-    }
-    description += "]";
-    return description;
-}
-
-inline std::string describe_user_property_for_log(const wallpaper::UserPropertyMap& properties,
-                                                  const char* name) {
-    // A missing tracked property is just as important as a wrong value here:
-    // missing means the new scene will fall back to its authored default during
-    // parse, which is exactly the class of switch-only flicker we need to rule in
-    // or out from runtime logs.
-    const auto iter = properties.find(name ? name : "");
-    if (iter == properties.end())
-        return "missing";
-    return describe_user_property_value_for_log(iter->second);
 }
 
 inline std::string describe_user_property_keys_for_log(const wallpaper::UserPropertyMap& properties) {
@@ -562,11 +526,10 @@ inline void apply_user_property_overrides(SceneProject& project,
         }
     }
 
-    g_message("VividScene(%s): applied user property overrides project=%s applied=%u hrbigb2=%s",
+    LOG_INFO("VividScene(%s): applied user property overrides project=%s applied=%u",
               log_context,
               project.project_dir.c_str(),
-              applied_count,
-              describe_user_property_for_log(project.user_properties, "hrbigb2").c_str());
+              applied_count);
 }
 
 inline bool ensure_scene_wallpaper(std::unique_ptr<wallpaper::SceneWallpaper>& scene,
@@ -576,7 +539,7 @@ inline bool ensure_scene_wallpaper(std::unique_ptr<wallpaper::SceneWallpaper>& s
     if (scene || project.scene_path.empty())
         return !project.scene_path.empty();
 
-    g_message("VividScene: creating SceneWallpaper for %s", project.scene_path.c_str());
+    LOG_INFO("VividScene: creating SceneWallpaper for %s", project.scene_path.c_str());
     scene = std::make_unique<wallpaper::SceneWallpaper>();
     if (!scene->init()) {
         g_warning("VividScene(%s): failed to initialize scene wallpaper", log_context);
@@ -584,7 +547,7 @@ inline bool ensure_scene_wallpaper(std::unique_ptr<wallpaper::SceneWallpaper>& s
         return false;
     }
 
-    g_message("VividScene: SceneWallpaper initialized successfully");
+    LOG_INFO("VividScene: SceneWallpaper initialized successfully");
     scene->setPropertyString(
         wallpaper::PROPERTY_CACHE_PATH,
         wallpaper::platform::GetCachePath(cache_dir_name).string());
@@ -593,7 +556,7 @@ inline bool ensure_scene_wallpaper(std::unique_ptr<wallpaper::SceneWallpaper>& s
 
 inline void sync_scene_user_properties(wallpaper::SceneWallpaper& scene,
                                        const SceneProject& project) {
-    g_message("VividScene: forwarding live PROPERTY_USER_PROPERTIES project=%s count=%zu keys=%s",
+    LOG_INFO("VividScene: forwarding live PROPERTY_USER_PROPERTIES project=%s count=%zu keys=%s",
               project.project_dir.c_str(),
               project.user_properties.size(),
               describe_user_property_keys_for_log(project.user_properties).c_str());
@@ -789,9 +752,16 @@ get_cached_scene_media_thumbnail(const char* thumbnail_path, const char* log_con
 
 inline std::shared_ptr<wallpaper::WPSceneScriptMediaState>
 build_scene_media_state_from_json(const char* media_state_json, const char* log_context) {
-    static std::atomic<uint64_t> decode_count { 0 };
-    const uint64_t current_decode = decode_count.fetch_add(1, std::memory_order_relaxed) + 1;
-    const gint64 started_at_us = g_get_monotonic_time();
+    uint64_t current_decode = 0;
+    gint64 started_at_us = 0;
+    // Decode counters and timing exist only to rate-limit development logs. Keep both the
+    // atomic increment and clock reads outside production media updates; thumbnail contents
+    // and cache ownership below remain independent of this diagnostic bookkeeping.
+    if constexpr (wallpaper::diagnostics::Enabled) {
+        static std::atomic<uint64_t> decode_count { 0 };
+        current_decode = decode_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        started_at_us = g_get_monotonic_time();
+    }
     auto media_state = std::make_shared<wallpaper::WPSceneScriptMediaState>();
     if (!media_state_json || *media_state_json == '\0')
         return media_state;
@@ -839,27 +809,31 @@ build_scene_media_state_from_json(const char* media_state_json, const char* log_
         ? json_object_get_string_member(object, "thumbnailPath")
         : nullptr;
     bool cache_hit = false;
-    auto decoded_thumbnail = get_cached_scene_media_thumbnail(thumbnail_path, log_context, &cache_hit);
+    auto decoded_thumbnail = get_cached_scene_media_thumbnail(
+        thumbnail_path, log_context, wallpaper::diagnostics::Enabled ? &cache_hit : nullptr);
     if (decoded_thumbnail) {
         copy_decoded_thumbnail_to_media_state(decoded_thumbnail, media_state.get());
-        const gint64 elapsed_us = g_get_monotonic_time() - started_at_us;
-        if (should_log_scene_media_decode(current_decode) ||
-            elapsed_us >= SCENE_MEDIA_SLOW_OPERATION_THRESHOLD_US) {
-            g_message(
-                "VividScene(%s): media decode #%" G_GUINT64_FORMAT " path=%s title='%s' artist='%s' size=%dx%d rgba-bytes=%zu cache-hit=%s duration=%.2fms",
-                log_context,
-                current_decode,
-                thumbnail_path ? thumbnail_path : "(null)",
-                media_state->title.c_str(),
-                media_state->artist.c_str(),
-                media_state->thumbnail_width,
-                media_state->thumbnail_height,
-                media_state->thumbnail_rgba.size(),
-                cache_hit ? "true" : "false",
-                static_cast<double>(elapsed_us) / 1000.0);
+        if constexpr (wallpaper::diagnostics::Enabled) {
+            const gint64 elapsed_us = g_get_monotonic_time() - started_at_us;
+            if (should_log_scene_media_decode(current_decode) ||
+                elapsed_us >= SCENE_MEDIA_SLOW_OPERATION_THRESHOLD_US) {
+                LOG_INFO(
+                    "VividScene(%s): media decode #%" G_GUINT64_FORMAT " path=%s title='%s' artist='%s' size=%dx%d rgba-bytes=%zu cache-hit=%s duration=%.2fms",
+                    log_context,
+                    current_decode,
+                    thumbnail_path ? thumbnail_path : "(null)",
+                    media_state->title.c_str(),
+                    media_state->artist.c_str(),
+                    media_state->thumbnail_width,
+                    media_state->thumbnail_height,
+                    media_state->thumbnail_rgba.size(),
+                    cache_hit ? "true" : "false",
+                    static_cast<double>(elapsed_us) / 1000.0);
+            }
         }
-    } else if (media_state->has_thumbnail && should_log_scene_media_decode(current_decode)) {
-        g_message(
+    } else if (wallpaper::diagnostics::Enabled && media_state->has_thumbnail &&
+               should_log_scene_media_decode(current_decode)) {
+        LOG_INFO(
             "VividScene(%s): media decode #%" G_GUINT64_FORMAT " missing pixbuf path=%s title='%s' artist='%s'",
             log_context,
             current_decode,
@@ -922,10 +896,9 @@ inline void configure_scene_wallpaper(wallpaper::SceneWallpaper& scene,
     // be the single operation that asks the renderer looper to parse a new scene.
     // Keeping assets ahead of source prevents a reload from seeing a new source
     // with stale global Wallpaper Engine assets.
-    g_message("VividScene: configuring SceneWallpaper source=%s staged-user-properties=%zu hrbigb2=%s",
+    LOG_INFO("VividScene: configuring SceneWallpaper source=%s staged-user-properties=%zu",
               project.scene_path.c_str(),
-              project.user_properties.size(),
-              describe_user_property_for_log(project.user_properties, "hrbigb2").c_str());
+              project.user_properties.size());
     stage_scene_load_user_properties(scene, project);
     scene.setPropertyFloat(wallpaper::PROPERTY_VOLUME, static_cast<float>(volume));
     scene.setPropertyBool(wallpaper::PROPERTY_MUTED, muted);

@@ -4,6 +4,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../producer" && pwd)"
+# Direct-run is the development entry point; packaging uses the shared Release default.
+VIVID_CMAKE_BUILD_TYPE="${VIVID_CMAKE_BUILD_TYPE:-Debug}"
 . "${SCRIPT_DIR}/build_env.sh"
 
 BUILD_DIR="${VIVID_DIRECT_RUN_BUILD_DIR}"
@@ -25,14 +27,19 @@ PKG_CONFIG_BIN="${PKG_CONFIG:-pkg-config}"
 mkdir -p "${BUILD_DIR}"
 
 echo "==> Building Scene renderer worker for direct-run"
-"${CMAKE_BIN}" -S "${VIVID_SCENE_SOURCE_DIR}" \
+SCENE_PRESET=release
+SCENE_TARGETS=("${VIVID_SCENE_TARGET}")
+if [[ "${VIVID_CMAKE_BUILD_TYPE}" == Debug ]]; then
+  SCENE_PRESET=debug
+  SCENE_TARGETS+=(VividScene scene_identity_test lockstep_contract_test)
+fi
+"${CMAKE_BIN}" -S "${VIVID_SCENE_SOURCE_DIR}" --preset "${SCENE_PRESET}" \
   -B "${SCENE_BUILD_DIR}" \
   -DCMAKE_BUILD_TYPE="${VIVID_CMAKE_BUILD_TYPE}"
 # VividScene is the shared library the golden-frame capture harness loads
 # (tools/producer/golden/); scene_identity_test and lockstep_contract_test back
 # `ctest --test-dir "${SCENE_BUILD_DIR}"`.
-"${CMAKE_BIN}" --build "${SCENE_BUILD_DIR}" --target "${VIVID_SCENE_TARGET}" \
-  --target VividScene --target scene_identity_test --target lockstep_contract_test \
+"${CMAKE_BIN}" --build "${SCENE_BUILD_DIR}" --target "${SCENE_TARGETS[@]}" \
   --parallel "${JOBS}" --verbose
 
 echo "==> Building Video renderer worker for direct-run"

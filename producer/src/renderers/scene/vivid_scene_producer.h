@@ -145,10 +145,11 @@ void vivid_scene_producer_set_frame_callback(
 void vivid_scene_producer_request_frame(VividSceneProducer* self,
                                           const gchar*         reason);
 
+#if WESCENE_ENABLE_DIAGNOSTICS
 /*
- * Lockstep capture support. These exist so an offscreen test driver can own the
- * frame clock when the renderer runs with WESCENE_LOCKSTEP=1 (the periodic draw
- * timer is disabled and every draw advances the scene by a fixed step):
+ * Debug-only capture support. These let the offscreen driver own the frame
+ * clock in lockstep mode: the periodic timer is disabled and each requested
+ * draw advances the scene by a fixed step.
  *
  *   step             Post exactly one draw. Returns FALSE when the previous draw
  *                    has not finished yet, in which case nothing was queued.
@@ -164,6 +165,7 @@ gboolean vivid_scene_producer_step(VividSceneProducer* self);
 gboolean vivid_scene_producer_flush(VividSceneProducer* self, guint timeout_ms);
 gboolean vivid_scene_producer_wait_scene_ready(VividSceneProducer* self,
                                                 guint                timeout_ms);
+#endif
 
 gboolean vivid_scene_producer_query_dmabuf_caps(
     VividSceneProducer*             self,

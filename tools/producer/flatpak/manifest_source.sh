@@ -224,6 +224,7 @@ vivid_flatpak_render_manifest() {
         -e "s|@NATIVE_BUILD_ROOT@|$(vivid_flatpak_sed_escape_replacement "${native_build_root}")|g" \
         -e "s|@APP_VERSION@|$(vivid_flatpak_sed_escape_replacement "${app_version}")|g" \
         -e "s|@RELEASE_DATE@|$(vivid_flatpak_sed_escape_replacement "${release_date}")|g" \
+        -e "s|@CMAKE_BUILD_TYPE@|$(vivid_flatpak_sed_escape_replacement "${VIVID_CMAKE_BUILD_TYPE}")|g" \
         "${template}" > "${output}"
 
     VIVID_FLATPAK_GIT_COMMIT="${git_commit}"

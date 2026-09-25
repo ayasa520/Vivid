@@ -63,6 +63,54 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build Flatpak bundle
         run: tools/vivid.sh flatpak build
+      - name: Verify scene release configuration
+        shell: bash
+        run: |
+          ROOT_DIR="${GITHUB_WORKSPACE}/producer"
+          source tools/producer/build_env.sh
+          python3 - "${VIVID_FLATPAK_NATIVE_BUILD_ROOT}/scene" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          build = pathlib.Path(sys.argv[1])
+          cache = {}
+          for line in (build / "CMakeCache.txt").read_text().splitlines():
+              if line and not line.startswith(("#", "//")) and "=" in line:
+                  key, value = line.split("=", 1)
+                  cache[key.split(":", 1)[0]] = value
+          expected = {
+              "CMAKE_BUILD_TYPE": "Release",
+              "VIVID_BUILD_SCENE_CAPTURE": "OFF",
+              "BUILD_TESTING": "OFF",
+          }
+          for key, value in expected.items():
+              if cache.get(key) != value:
+                  sys.exit(f"Release scene configuration mismatch: {key}={cache.get(key)!r}")
+
+          commands = json.loads((build / "compile_commands.json").read_text())
+          excluded = {"Diagnostics.cpp", "FrameTraceDump.cpp", "GpuPassProfiler.cpp"}
+          for entry in commands:
+              if pathlib.Path(entry["file"]).name in excluded:
+                  sys.exit(f"Release compiles diagnostic source: {entry['file']}")
+          for name in ("VulkanRender.cpp", "ShaderDrawCore.cpp", "WPSceneScriptHost.cpp",
+                       "vivid_scene_producer.cpp", "vivid_scene_renderer_main.cpp"):
+              command = next(e["command"] for e in commands if pathlib.Path(e["file"]).name == name)
+              for flag in ("-DWESCENE_ENABLE_DIAGNOSTICS=0",
+                           "-DSPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_WARN"):
+                  if flag not in command:
+                      sys.exit(f"Release policy missing from {name}: {flag}")
+
+          # Check the built worker as well as the requested configuration. Development input
+          # names must disappear with their readers, serializers and profiler implementation.
+          worker = (build / "out/vivid-scene-renderer").read_bytes()
+          for marker in (b"WESCENE_TRACE_", b"WESCENE_DUMP_FRAME_TRACE", b"WESCENE_LOCKSTEP",
+                         b"WESCENE_FIXED_", b"WESCENE_RANDOM_SEED", b"WESCENE_VK_VALIDATION",
+                         b"VIVID_GPU_PROFILE"):
+              if marker in worker:
+                  sys.exit(f"Release scene worker contains diagnostic input: {marker.decode()}")
+          print("Scene release configuration verified; diagnostic inputs are absent.")
+          PY
       - name: Upload Flatpak bundle
         uses: actions/upload-artifact@v4
         with:

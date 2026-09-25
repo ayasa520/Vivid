@@ -30,6 +30,20 @@ build-options:
     PKG_CONFIG_PATH: /app/lib64/pkgconfig:/app/lib/pkgconfig
 
 modules:
+  - name: spdlog
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+      - -DSPDLOG_BUILD_SHARED=OFF
+      - -DSPDLOG_BUILD_EXAMPLE=OFF
+      - -DSPDLOG_BUILD_TESTS=OFF
+      - -DSPDLOG_INSTALL=ON
+    sources:
+      - type: archive
+        url: https://github.com/gabime/spdlog/archive/refs/tags/v1.17.0.tar.gz
+        sha256: d8862955c6d74e5846b3f580b1605d2428b11d97a410d86e2fb13e857cd3a744
+
   - name: unifdef
     buildsystem: simple
     build-commands:
@@ -54,6 +68,9 @@ modules:
         VIVID_FLATPAK_RENDERER_BUILD_ROOT: "@NATIVE_BUILD_ROOT@"
         VIVID_FLATPAK_APP_VERSION: "@APP_VERSION@"
         VIVID_FLATPAK_RELEASE_DATE: "@RELEASE_DATE@"
+        # The SDK build does not inherit the Actions runner's environment. Carry the
+        # selected build configuration through this sandbox boundary.
+        VIVID_CMAKE_BUILD_TYPE: "@CMAKE_BUILD_TYPE@"
     build-commands:
       - sh tools/producer/install_renderers.sh
       - sh tools/producer/install_webui.sh

@@ -3,6 +3,7 @@
 #include "vivid_renderer_frame_pump.h"
 #include "vivid_renderer_host.h"
 #include "vivid_renderer_worker_common.h"
+#include "Utils/Logging.h"
 
 #include <gio/gio.h>
 #include <json-glib/json-glib.h>
@@ -214,7 +215,7 @@ bool publish_scene_caps(SceneWorker* worker,
     const guint32 memory_hints = gpu.scene_dmabuf_n_caps > 1
         ? VIVID_RENDERER_MEMORY_HINT_DEVICE_LOCAL
         : VIVID_RENDERER_MEMORY_HINT_HOST_VISIBLE;
-    g_message("VividSceneRenderer: publishing %u GPU-filtered DMA-BUF capabilities "
+    LOG_INFO("VividSceneRenderer: publishing %u GPU-filtered DMA-BUF capabilities "
               "render-node=%s memory-hints=0x%x",
               gpu.scene_dmabuf_n_caps,
               worker->common.render_node,

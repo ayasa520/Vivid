@@ -26,6 +26,7 @@
 
 #include "SceneWallpaper.hpp"
 #include "SceneWallpaperSurface.hpp"
+#include "Utils/Logging.h"
 #include "Vulkan/include/Vulkan/VulkanExSwapchain.hpp"
 
 using vivid::scene::SceneProject;
@@ -368,6 +369,9 @@ void scene_apply_frame_ready_callback(VividSceneProducer* self)
 
 void scene_note_missing_frame(VividSceneProducer* self)
 {
+    // Missing-frame summaries are development instrumentation. A production poll must
+    // neither read the clock nor update counters when the ring has no new frame yet.
+    if constexpr (!wallpaper::diagnostics::Enabled) return;
     if (!self)
         return;
 
@@ -375,7 +379,7 @@ void scene_note_missing_frame(VividSceneProducer* self)
     self->missed_frame_count++;
 
     if (!self->logged_waiting_for_frame) {
-        g_message("VividSceneProducer: swapchain has no frame available yet");
+        LOG_INFO("VividSceneProducer: swapchain has no frame available yet");
         self->logged_waiting_for_frame = true;
         self->missed_frame_count = 0;
         self->last_missed_frame_summary_usec = now;
@@ -389,7 +393,7 @@ void scene_note_missing_frame(VividSceneProducer* self)
         SCENE_MISSED_FRAME_LOG_INTERVAL_USEC) {
         const double elapsed_sec =
             (now - self->last_missed_frame_summary_usec) / 1000000.0;
-        g_message("VividSceneProducer: still waiting for swapchain frames "
+        LOG_INFO("VividSceneProducer: still waiting for swapchain frames "
                   "missed=%" G_GUINT64_FORMAT " interval=%.2fs",
                   self->missed_frame_count,
                   elapsed_sec);
@@ -496,7 +500,7 @@ vivid_scene_producer_configure(VividSceneProducer* self,
     self->resolved_gpu = next_resolved_gpu;
     self->resolved_gpu_valid = next_resolved_gpu_valid;
 
-    g_message("VividSceneProducer: configure project=%s project-changed=%s user-properties-changed=%s runtime-properties-changed=%s gpu-changed=%s muted=%s volume=%.3f fill-mode=%d fps=%d reflections=%s volumetrics=%d shadows=%d postprocessing=%d antialiasing=%d texture-resolution=%d render-device=%s",
+    LOG_INFO("VividSceneProducer: configure project=%s project-changed=%s user-properties-changed=%s runtime-properties-changed=%s gpu-changed=%s muted=%s volume=%.3f fill-mode=%d fps=%d reflections=%s volumetrics=%d shadows=%d postprocessing=%d antialiasing=%d texture-resolution=%d render-device=%s",
               self->project_dir.c_str(),
               bool_to_string(project_changed),
               bool_to_string(user_properties_changed),
@@ -611,6 +615,9 @@ vivid_scene_producer_request_frame(VividSceneProducer* self, const gchar* reason
     self->scene->requestFrame();
 }
 
+#if WESCENE_ENABLE_DIAGNOSTICS
+// Capture entry points share the producer's scene and event plumbing, but are absent from the
+// release worker. Normal playback and paused-buffer negotiation use request_frame() above.
 gboolean
 vivid_scene_producer_step(VividSceneProducer* self)
 {
@@ -659,6 +666,8 @@ vivid_scene_producer_wait_scene_ready(VividSceneProducer* self, guint timeout_ms
     }
 }
 
+#endif
+
 void
 vivid_scene_producer_set_pointer_motion(VividSceneProducer* self,
                                          gdouble              x,
@@ -701,7 +710,7 @@ vivid_scene_producer_set_media_state_json(VividSceneProducer* self,
     if (self->scene)
         sync_scene_media_state(*self->scene, self->media_state);
 
-    g_message("VividSceneProducer: media state applied title='%s' artist='%s' "
+    LOG_INFO("VividSceneProducer: media state applied title='%s' artist='%s' "
               "has-thumbnail=%s thumbnail=%dx%d",
               self->media_state ? self->media_state->title.c_str() : "",
               self->media_state ? self->media_state->artist.c_str() : "",
@@ -772,7 +781,7 @@ vivid_scene_producer_query_dmabuf_caps(VividSceneProducer*           self,
     out_caps->memory_preference = self->resolved_gpu.scene_dmabuf_n_caps > 1
         ? VIVID_SCENE_PRODUCER_DMABUF_MEMORY_DEVICE_LOCAL
         : VIVID_SCENE_PRODUCER_DMABUF_MEMORY_HOST_VISIBLE;
-    g_message("VividSceneProducer: publishing %u GPU-filtered DMA-BUF capabilities "
+    LOG_INFO("VividSceneProducer: publishing %u GPU-filtered DMA-BUF capabilities "
               "render-node=%s memory-preference=%s",
               out_caps->n_caps,
               self->resolved_gpu.render_node,
@@ -917,7 +926,7 @@ vivid_scene_producer_prepare_buffers_with_request(
              */
         };
 
-        g_message("VividSceneProducer: initVulkan offscreen DMA-BUF %ux%u render-scale=%.3f fourcc=0x%x device=%s (%s) decoder-route=%s",
+        LOG_INFO("VividSceneProducer: initVulkan offscreen DMA-BUF %ux%u render-scale=%.3f fourcc=0x%x device=%s (%s) decoder-route=%s",
                   width,
                   height,
                   render_scale,
@@ -949,7 +958,7 @@ vivid_scene_producer_prepare_buffers_with_request(
              * message has created the offscreen swapchain; the producer should
              * keep retrying instead of binding a diagnostic GBM buffer.
              */
-            g_message("VividSceneProducer: waiting for Vulkan DMA-BUF swapchain "
+            LOG_INFO("VividSceneProducer: waiting for Vulkan DMA-BUF swapchain "
                       "after initVulkan request size=%ux%u render-scale=%.3f",
                       self->width,
                       self->height,
@@ -1009,7 +1018,7 @@ vivid_scene_producer_prepare_buffers_with_request(
             }
         }
 
-        g_message("VividSceneProducer: output contract changed %ux%u scale=%.3f "
+        LOG_INFO("VividSceneProducer: output contract changed %ux%u scale=%.3f "
                   "modifier=0x%016" G_GINT64_MODIFIER "x memory=%s -> %ux%u scale=%.3f "
                   "modifier=0x%016" G_GINT64_MODIFIER "x memory=%s; "
                   "reconfiguring exported buffers",
@@ -1167,7 +1176,7 @@ vivid_scene_producer_prepare_buffers_with_request(
         return FALSE;
     }
 
-    g_message("VividSceneProducer: prepared DMA-BUF buffer set %ux%u render-scale=%.3f "
+    LOG_INFO("VividSceneProducer: prepared DMA-BUF buffer set %ux%u render-scale=%.3f "
               "buffers=%u modifier=0x%016" G_GINT64_MODIFIER "x",
               out_set->width,
               out_set->height,

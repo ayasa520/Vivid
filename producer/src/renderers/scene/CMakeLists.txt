@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 3.20)
 project(VividScene LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -81,8 +81,8 @@ set_target_properties(vivid-scene-renderer PROPERTIES
 # directly, waits for each frame's acquire fence, and reads the host-visible DMA-BUF plane.
 # This is the pixel-level regression check for renderer refactors; parse-level tests cannot
 # see a wrong draw route, but a frame diff can.
-option(VIVID_BUILD_SCENE_CAPTURE "Build the standalone scene producer capture library" ON)
-if(VIVID_BUILD_SCENE_CAPTURE)
+option(VIVID_BUILD_SCENE_CAPTURE "Build the standalone scene producer capture library" OFF)
+if(VIVID_BUILD_SCENE_CAPTURE AND CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_library(VividScene SHARED
     ../../graphics/vivid_gpu_devices.c
     vivid_scene_producer.cpp

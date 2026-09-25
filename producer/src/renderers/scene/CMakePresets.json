@@ -1,0 +1,42 @@
+{
+  "version": 2,
+  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "debug",
+      "displayName": "Debug with scene diagnostics and golden capture",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/../../../.build/direct-run/scene-build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": true,
+        "BUILD_TESTING": "ON",
+        "VIVID_BUILD_SCENE_CAPTURE": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release scene worker",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/../../../.build/release/scene-build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": true,
+        "BUILD_TESTING": "OFF",
+        "VIVID_BUILD_SCENE_CAPTURE": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug",
+      "targets": ["vivid-scene-renderer", "VividScene", "scene_identity_test", "lockstep_contract_test"]
+    },
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "targets": ["vivid-scene-renderer"]
+    }
+  ]
+}
