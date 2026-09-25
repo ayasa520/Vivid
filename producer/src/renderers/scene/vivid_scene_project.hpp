@@ -619,7 +619,7 @@ inline bool parse_media_color(JsonObject* root,
     return true;
 }
 
-inline GdkPixbuf* load_media_thumbnail_pixbuf(const char* thumbnail_path, const char* log_context) {
+inline GBytes* load_media_thumbnail_contents(const char* thumbnail_path, const char* log_context) {
     if (!thumbnail_path || *thumbnail_path == '\0')
         return nullptr;
 
@@ -631,8 +631,8 @@ inline GdkPixbuf* load_media_thumbnail_pixbuf(const char* thumbnail_path, const 
     else
         file = g_file_new_for_path(thumbnail_path);
 
-    g_autoptr(GFileInputStream) stream = g_file_read(file, nullptr, &error);
-    if (!stream) {
+    GBytes* contents = g_file_load_bytes(file, nullptr, nullptr, &error);
+    if (!contents) {
         g_warning("VividScene(%s): failed to open media thumbnail %s: %s",
                   log_context,
                   thumbnail_path,
@@ -640,9 +640,16 @@ inline GdkPixbuf* load_media_thumbnail_pixbuf(const char* thumbnail_path, const 
         return nullptr;
     }
 
-    g_clear_error(&error);
+    return contents;
+}
+
+inline GdkPixbuf* decode_media_thumbnail_pixbuf(GBytes* contents,
+                                                const char* thumbnail_path,
+                                                const char* log_context) {
+    g_autoptr(GInputStream) stream = g_memory_input_stream_new_from_bytes(contents);
+    g_autoptr(GError) error = nullptr;
     GdkPixbuf* pixbuf =
-        gdk_pixbuf_new_from_stream_at_scale(G_INPUT_STREAM(stream), 512, 512, TRUE, nullptr, &error);
+        gdk_pixbuf_new_from_stream_at_scale(stream, 512, 512, TRUE, nullptr, &error);
     if (!pixbuf) {
         g_warning("VividScene(%s): failed to decode media thumbnail %s: %s",
                   log_context,
@@ -705,8 +712,9 @@ inline void copy_decoded_thumbnail_to_media_state(
 }
 
 inline std::shared_ptr<DecodedSceneMediaThumbnail>
-decode_scene_media_thumbnail(const char* thumbnail_path, const char* log_context) {
-    g_autoptr(GdkPixbuf) pixbuf = load_media_thumbnail_pixbuf(thumbnail_path, log_context);
+decode_scene_media_thumbnail(GBytes* contents, const char* thumbnail_path, const char* log_context) {
+    g_autoptr(GdkPixbuf) pixbuf =
+        decode_media_thumbnail_pixbuf(contents, thumbnail_path, log_context);
     if (!pixbuf)
         return nullptr;
 
@@ -727,9 +735,22 @@ get_cached_scene_media_thumbnail(const char* thumbnail_path, const char* log_con
     if (!thumbnail_path || *thumbnail_path == '\0')
         return nullptr;
 
+    /*
+     * A media source may replace a thumbnail file while keeping its path. Decode results
+     * therefore belong to the encoded image contents, not to the filename. Read one immutable
+     * snapshot and use it for both the key and decoding, so a concurrent file replacement
+     * cannot associate one revision's key with another revision's pixels. An unchanged image
+     * still returns its stored decoded result without modifying that entry or decoding again.
+     */
+    g_autoptr(GBytes) contents = load_media_thumbnail_contents(thumbnail_path, log_context);
+    if (!contents)
+        return nullptr;
+    g_autofree gchar* digest = g_compute_checksum_for_bytes(G_CHECKSUM_SHA256, contents);
+    const std::string cache_key(digest);
+
     {
         std::lock_guard<std::mutex> locker(cache_mutex);
-        auto it = cache.find(thumbnail_path);
+        auto it = cache.find(cache_key);
         if (it != cache.end()) {
             if (cache_hit)
                 *cache_hit = true;
@@ -737,16 +758,16 @@ get_cached_scene_media_thumbnail(const char* thumbnail_path, const char* log_con
         }
     }
 
-    auto decoded_thumbnail = decode_scene_media_thumbnail(thumbnail_path, log_context);
+    auto decoded_thumbnail = decode_scene_media_thumbnail(contents, thumbnail_path, log_context);
     if (!decoded_thumbnail)
         return nullptr;
 
     std::lock_guard<std::mutex> locker(cache_mutex);
-    auto [it, inserted] = cache.emplace(thumbnail_path, decoded_thumbnail);
+    auto [it, inserted] = cache.emplace(cache_key, decoded_thumbnail);
     if (!inserted)
         return it->second;
 
-    cache_order.emplace_back(thumbnail_path);
+    cache_order.emplace_back(cache_key);
     while (cache_order.size() > SCENE_MEDIA_THUMBNAIL_CACHE_LIMIT) {
         const std::string oldest_path = cache_order.front();
         cache_order.pop_front();
