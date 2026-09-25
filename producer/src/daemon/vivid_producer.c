@@ -4094,7 +4094,7 @@ output_prepare_renderer_buffers(Producer* producer, Output* output, GError** err
         vivid_producer_renderer_buffer_set_clear(&set);
         if (prepare_status == VIVID_PRODUCER_RENDERER_DMABUF_PREPARE_NOT_READY) {
             set_buffer_error(error,
-                             "renderer-owned DMA-BUF preparation failed for output=%u "
+                             "renderer-owned DMA-BUF preparation is pending for output=%u "
                              "size=%ux%u status=%u path=%s modifier=0x%016"
                              G_GINT64_MODIFIER "x",
                              output->output_id,
@@ -4406,7 +4406,15 @@ output_rebuild_buffers(Producer* producer,
         if (prepare_state &&
             renderer_status == VIVID_PRODUCER_RENDERER_DMABUF_PREPARE_NOT_READY)
             *prepare_state = OUTPUT_REBIND_PREPARE_NOT_READY;
-        if (!ok) {
+        if (renderer_status == VIVID_PRODUCER_RENDERER_DMABUF_PREPARE_NOT_READY) {
+            /*
+             * Worker lifecycle changes and buffer negotiation complete
+             * asynchronously. The caller already reports a pending output;
+             * preserve the waiting reason without turning a normal retry into
+             * an allocation-failure warning or wrapping it as a failed DMA-BUF.
+             */
+            g_propagate_error(error, g_steal_pointer(&renderer_error));
+        } else if (!ok) {
             g_warning("VividProducer: renderer DMA-BUF preparation failed for output=%u: %s",
                       output->output_id,
                       renderer_error ? renderer_error->message : "unknown renderer error");
