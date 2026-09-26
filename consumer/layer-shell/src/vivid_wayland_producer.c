@@ -708,6 +708,11 @@ handle_set_config(VividWaylandApp* app, json_object* object)
         vivid_wayland_warn("SET_CONFIG for unknown output=%u", output_id);
         return;
     }
+    /* Inactive configuration is sent after UNBIND has retired the pool. It has
+     * no live generation whose source and destination rectangles can be set. */
+    if (!json_bool_default(object, VIVID_JSON_SET_CONFIG_ACTIVE, true))
+        return;
+
     VividWaylandGeneration* generation = generation_id ? find_generation(output, generation_id)
                                                        : NULL;
     if (!generation) {

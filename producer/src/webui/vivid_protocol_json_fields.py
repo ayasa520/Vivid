@@ -142,6 +142,7 @@ J = {
         "y": "y",
     },
     "SET_CONFIG": {
+        "active": "active",
         "clearColor": "clearColor",
         "configGeneration": "configGeneration",
         "destination": "destination",

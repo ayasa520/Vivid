@@ -160,6 +160,7 @@ struct REGISTER_OUTPUT {
 };
 
 struct SET_CONFIG {
+    static inline const QString active{QStringLiteral("active")};
     static inline const QString clearColor{QStringLiteral("clearColor")};
     static inline const QString configGeneration{QStringLiteral("configGeneration")};
     static inline const QString destination{QStringLiteral("destination")};

@@ -5157,6 +5157,8 @@ build_set_config_json(Producer* producer, const Output* output)
     json_builder_add_int_value(builder, (gint64)output->generation);
     json_builder_set_member_name(builder, VIVID_JSON_SET_CONFIG_CONFIG_GENERATION);
     json_builder_add_int_value(builder, (gint64)config_generation);
+    json_builder_set_member_name(builder, VIVID_JSON_SET_CONFIG_ACTIVE);
+    json_builder_add_boolean_value(builder, output->active);
     json_builder_set_member_name(builder, VIVID_JSON_SET_CONFIG_SOURCE);
     json_builder_begin_object(builder);
     json_builder_set_member_name(builder, VIVID_JSON_RECT_X);
@@ -6155,6 +6157,14 @@ producer_rebind_all_outputs(Producer* producer)
                     send_unbind(client, output, output->generation);
                     output_release_buffers(output);
                 }
+                /*
+                 * Pool retirement also happens while replacing a renderer, so
+                 * consumers keep their independent last-frame shadow through
+                 * UNBIND. Explicitly end presentation when the output has no
+                 * wallpaper. Send this even without a current pool: a selection
+                 * can be removed while its replacement renderer is still loading.
+                 */
+                send_set_config(client, output);
                 continue;
             }
             /*

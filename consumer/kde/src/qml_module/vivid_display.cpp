@@ -3313,6 +3313,11 @@ void VividDisplay::handleSetConfig(const QJsonObject& object)
 {
     const quint32 outputId = jsonUInt32(object.value(Proto::SET_CONFIG::outputId), m_outputId);
 
+    // Inactive configuration follows pool retirement and has no live generation
+    // to configure. UNBIND already owns resource retirement and stream shutdown.
+    if (!object.value(Proto::SET_CONFIG::active).toBool(true))
+        return;
+
     const quint64 generationId = jsonUInt64(object.value(Proto::SET_CONFIG::generation));
     Generation* generationState = generationId != 0
         ? findGeneration(generationId)

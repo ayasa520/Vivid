@@ -444,6 +444,7 @@ Variable-length binary body.
 
 | Logical id | Wire name |
 | --- | --- |
+| `active` | `active` |
 | `clearColor` | `clearColor` |
 | `configGeneration` | `configGeneration` |
 | `destination` | `destination` |

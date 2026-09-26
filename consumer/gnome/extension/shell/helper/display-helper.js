@@ -2343,6 +2343,17 @@ class OutputWindow {
     }
 
     setConfig(payload) {
+        /*
+         * Output visibility is independent of buffer generations. A renderer
+         * replacement retires its pool before the next frame is ready; only an
+         * explicitly inactive output ends presentation of the retained shadow.
+         * Handle this before looking up a generation because a selection can be
+         * removed while there are no imported buffers.
+         */
+        if (payload[J.SET_CONFIG.active] === false) {
+            this.deactivate();
+            return;
+        }
         this.ensureWindow();
         const source = payload.source ?? {};
         const destination = payload.destination ?? {};
@@ -3251,8 +3262,12 @@ class DisplayConnection {
             return;
         }
         output.unbindGeneration(generation);
-        if (output._bufferGenerations.size === 0)
-            output._deactivatePresentation('unbind-last-generation');
+        /*
+         * UNBIND releases the producer's imports, not the independently copied
+         * last frame. Keep the window and native paintable alive while the next
+         * renderer loads; SET_CONFIG(active=false) and socket teardown are the
+         * explicit presentation boundaries.
+         */
         this._queueFrame(encodeJsonFrame(REQ_UNBIND_DONE, {
             [J.UNBIND_DONE.outputId]: outputId,
             [J.UNBIND_DONE.generation]: generation,
