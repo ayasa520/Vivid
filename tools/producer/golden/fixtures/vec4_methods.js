@@ -105,3 +105,65 @@ function observeVec4Methods(materials, check, label, expected) {
     console.log('Vec4Methods result', JSON.stringify(record));
     console.log('Vec4Methods verified', label, index, record.valid);
 }
+
+// This last state starts with a value read from the real material, so constructing
+// vectors in script cannot hide a missing prototype on the getter's result. The
+// literal mode supplies only the independent drawing control for an earlier DSO.
+const materialReadbackUseExpected = false;
+function observeMaterialQuadReadback(material, check, label) {
+    const seed = [0.25, 0.375, 0.5, 0.625];
+    const expected = [0.125, 0.1875, 0.25, 0.3125];
+    const record = {label, dimensions: 4};
+    const checks = [];
+    const verify = (name, value, wanted) => {
+        checks.push([name, Object.is(value, wanted)]);
+        check('material-readback-' + name, value, wanted);
+    };
+    try {
+        const first = materialReadbackUseExpected ? new Vec4(...seed) : material.quad;
+        const peer = materialReadbackUseExpected ? new Vec4(...seed) : material.quad;
+        Object.assign(record, {
+            values: vec4Components(first), instance: first instanceof Vec4,
+            prototype: Object.getPrototypeOf(first) === Vec4.prototype,
+            fresh: first !== peer, keys: Object.keys(first),
+            descriptors: vec4MethodAxes.map(axis => {
+                const item = Object.getOwnPropertyDescriptor(first, axis);
+                return [item.writable, item.enumerable, item.configurable];
+            })
+        });
+        for (const key of ['instance', 'prototype', 'fresh']) verify(key, record[key], true);
+        verify('keys', record.keys.join(' '), 'x y z w');
+        for (let i = 0; i < 4; i++) for (let flag = 0; flag < 3; flag++)
+            verify('descriptor-' + i + '-' + flag, record.descriptors[i][flag], true);
+        const copied = materialReadbackUseExpected ? new Vec4(...seed) : first.copy();
+        const product = materialReadbackUseExpected ? new Vec4(...expected) : first.multiply(0.5);
+        Object.assign(record, {
+            copied: vec4Components(copied), product: vec4Components(product),
+            resultsFresh: copied !== first && product !== first && copied !== product,
+            resultInstances: copied instanceof Vec4 && product instanceof Vec4
+        });
+        verify('results-fresh', record.resultsFresh, true);
+        verify('result-instances', record.resultInstances, true);
+        first.x = 7;
+        record.peerAfterMutation = vec4Components(peer);
+        record.copyAfterMutation = vec4Components(copied);
+        record.storageAfterMutation = vec4Components(material.quad);
+        material.quad = product;
+        record.material = vec4Components(material.quad);
+        for (const field of ['values', 'copied', 'peerAfterMutation', 'copyAfterMutation',
+                             'storageAfterMutation', 'product', 'material']) {
+            const wanted = field === 'product' || field === 'material' ? expected : seed;
+            for (let i = 0; i < 4; i++) verify(field + '-' + i, record[field][i], wanted[i]);
+        }
+    } catch (error) {
+        record.error = String(error);
+        verify('methods', false, true);
+        console.log('MaterialReadback missing', label, record.error);
+    }
+    record.checks = checks;
+    record.valid = checks.every(item => item[1]);
+    localStorage.set('material-readback-' + label, record);
+    console.log('MaterialReadback result', JSON.stringify(record));
+    console.log('MaterialReadback verified', label, record.valid);
+    return expected;
+}

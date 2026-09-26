@@ -1,5 +1,5 @@
 {
-  "_comment": "Ninety fixed bulk material states. The original forty-four states retain their timing; 46 appended Vec4 value operations drive the existing image/text scalar and quad materials.",
+  "_comment": "Ninety-one fixed bulk material states. The original ninety states retain their timing; the final material readback uses Vec4 copy and multiply to drive the existing image/text quad materials.",
   "width": 960,
   "height": 540,
   "fps": 30,
@@ -20,7 +20,7 @@
     0.5
   ],
   "audio": null,
-  "steps": 900,
+  "steps": 910,
   "user_properties": {
     "phase": 0
   },
@@ -558,6 +558,12 @@
       "properties": {
         "phase": 89
       }
+    },
+    {
+      "step": 900,
+      "properties": {
+        "phase": 90
+      }
     }
   ],
   "snapshots": [
@@ -740,7 +746,9 @@
     883,
     889,
     893,
-    899
+    899,
+    903,
+    909
   ],
   "trace_steps": [
     3,
@@ -922,6 +930,8 @@
     883,
     889,
     893,
-    899
+    899,
+    903,
+    909
   ]
 }

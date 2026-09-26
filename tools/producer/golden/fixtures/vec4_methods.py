@@ -20,16 +20,24 @@ def make_fixture(base):
     marker = '    const markers = records.map((_,index) => marker(index,expected));'
     assert script.count(marker) == 1
     script = script.replace(marker,
-        '    if (phase >= vec4Inputs.first_phase)\n'
-        '        observeVec4Methods(materials,check,label,expected);\n' + marker)
+        '    if (phase >= vec4Inputs.first_phase &&\n'
+        '        phase < vec4Inputs.first_phase + vec4Inputs.cases.length)\n'
+        '        observeVec4Methods(materials,check,label,expected);\n'
+        '    if (phase === vec4Inputs.first_phase + vec4Inputs.cases.length)\n'
+        '        expected.quad = observeMaterialQuadReadback(materials[4],check,label);\n' + marker)
     fixture['layers'][0]['text']['script'] = script
-    fixture['properties']['phase']['max'] = inputs['first_phase'] + len(inputs['cases']) - 1
+    fixture['properties']['phase']['max'] = inputs['first_phase'] + len(inputs['cases'])
     fixture['description'] += (
         ' After the original 44 states, 46 Vec4 value operations drive existing scalar'
         ' and quad image/text materials; signed zero, ownership and independent colors are observed.'
+        ' A final material readback drives the quad through its own copy and multiply methods.'
     )
     fixture['log_expectations']['INFO SceneScript log: Vec4Methods verified'] = [
         f'INFO SceneScript log: Vec4Methods verified {label} {i} true'
         for i in range(len(inputs['cases'])) for label in ['image', 'text']
+    ]
+    fixture['log_expectations']['INFO SceneScript log: MaterialReadback verified'] = [
+        f'INFO SceneScript log: MaterialReadback verified {label} true'
+        for label in ['image', 'text']
     ]
     return fixture
