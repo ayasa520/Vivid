@@ -1,5 +1,5 @@
 {
-  "_comment": "Ninety-one fixed bulk material states. The original ninety states retain their timing; the final material readback uses Vec4 copy and multiply to drive the existing image/text quad materials.",
+  "_comment": "One hundred fifty-three fixed bulk material states. The original ninety-one states retain their timing; the following Vec2/Vec3 calls drive the existing image/text scalar, pair and triple materials.",
   "width": 960,
   "height": 540,
   "fps": 30,
@@ -20,7 +20,7 @@
     0.5
   ],
   "audio": null,
-  "steps": 910,
+  "steps": 1530,
   "user_properties": {
     "phase": 0
   },
@@ -564,6 +564,378 @@
       "properties": {
         "phase": 90
       }
+    },
+    {
+      "step": 910,
+      "properties": {
+        "phase": 91
+      }
+    },
+    {
+      "step": 920,
+      "properties": {
+        "phase": 92
+      }
+    },
+    {
+      "step": 930,
+      "properties": {
+        "phase": 93
+      }
+    },
+    {
+      "step": 940,
+      "properties": {
+        "phase": 94
+      }
+    },
+    {
+      "step": 950,
+      "properties": {
+        "phase": 95
+      }
+    },
+    {
+      "step": 960,
+      "properties": {
+        "phase": 96
+      }
+    },
+    {
+      "step": 970,
+      "properties": {
+        "phase": 97
+      }
+    },
+    {
+      "step": 980,
+      "properties": {
+        "phase": 98
+      }
+    },
+    {
+      "step": 990,
+      "properties": {
+        "phase": 99
+      }
+    },
+    {
+      "step": 1000,
+      "properties": {
+        "phase": 100
+      }
+    },
+    {
+      "step": 1010,
+      "properties": {
+        "phase": 101
+      }
+    },
+    {
+      "step": 1020,
+      "properties": {
+        "phase": 102
+      }
+    },
+    {
+      "step": 1030,
+      "properties": {
+        "phase": 103
+      }
+    },
+    {
+      "step": 1040,
+      "properties": {
+        "phase": 104
+      }
+    },
+    {
+      "step": 1050,
+      "properties": {
+        "phase": 105
+      }
+    },
+    {
+      "step": 1060,
+      "properties": {
+        "phase": 106
+      }
+    },
+    {
+      "step": 1070,
+      "properties": {
+        "phase": 107
+      }
+    },
+    {
+      "step": 1080,
+      "properties": {
+        "phase": 108
+      }
+    },
+    {
+      "step": 1090,
+      "properties": {
+        "phase": 109
+      }
+    },
+    {
+      "step": 1100,
+      "properties": {
+        "phase": 110
+      }
+    },
+    {
+      "step": 1110,
+      "properties": {
+        "phase": 111
+      }
+    },
+    {
+      "step": 1120,
+      "properties": {
+        "phase": 112
+      }
+    },
+    {
+      "step": 1130,
+      "properties": {
+        "phase": 113
+      }
+    },
+    {
+      "step": 1140,
+      "properties": {
+        "phase": 114
+      }
+    },
+    {
+      "step": 1150,
+      "properties": {
+        "phase": 115
+      }
+    },
+    {
+      "step": 1160,
+      "properties": {
+        "phase": 116
+      }
+    },
+    {
+      "step": 1170,
+      "properties": {
+        "phase": 117
+      }
+    },
+    {
+      "step": 1180,
+      "properties": {
+        "phase": 118
+      }
+    },
+    {
+      "step": 1190,
+      "properties": {
+        "phase": 119
+      }
+    },
+    {
+      "step": 1200,
+      "properties": {
+        "phase": 120
+      }
+    },
+    {
+      "step": 1210,
+      "properties": {
+        "phase": 121
+      }
+    },
+    {
+      "step": 1220,
+      "properties": {
+        "phase": 122
+      }
+    },
+    {
+      "step": 1230,
+      "properties": {
+        "phase": 123
+      }
+    },
+    {
+      "step": 1240,
+      "properties": {
+        "phase": 124
+      }
+    },
+    {
+      "step": 1250,
+      "properties": {
+        "phase": 125
+      }
+    },
+    {
+      "step": 1260,
+      "properties": {
+        "phase": 126
+      }
+    },
+    {
+      "step": 1270,
+      "properties": {
+        "phase": 127
+      }
+    },
+    {
+      "step": 1280,
+      "properties": {
+        "phase": 128
+      }
+    },
+    {
+      "step": 1290,
+      "properties": {
+        "phase": 129
+      }
+    },
+    {
+      "step": 1300,
+      "properties": {
+        "phase": 130
+      }
+    },
+    {
+      "step": 1310,
+      "properties": {
+        "phase": 131
+      }
+    },
+    {
+      "step": 1320,
+      "properties": {
+        "phase": 132
+      }
+    },
+    {
+      "step": 1330,
+      "properties": {
+        "phase": 133
+      }
+    },
+    {
+      "step": 1340,
+      "properties": {
+        "phase": 134
+      }
+    },
+    {
+      "step": 1350,
+      "properties": {
+        "phase": 135
+      }
+    },
+    {
+      "step": 1360,
+      "properties": {
+        "phase": 136
+      }
+    },
+    {
+      "step": 1370,
+      "properties": {
+        "phase": 137
+      }
+    },
+    {
+      "step": 1380,
+      "properties": {
+        "phase": 138
+      }
+    },
+    {
+      "step": 1390,
+      "properties": {
+        "phase": 139
+      }
+    },
+    {
+      "step": 1400,
+      "properties": {
+        "phase": 140
+      }
+    },
+    {
+      "step": 1410,
+      "properties": {
+        "phase": 141
+      }
+    },
+    {
+      "step": 1420,
+      "properties": {
+        "phase": 142
+      }
+    },
+    {
+      "step": 1430,
+      "properties": {
+        "phase": 143
+      }
+    },
+    {
+      "step": 1440,
+      "properties": {
+        "phase": 144
+      }
+    },
+    {
+      "step": 1450,
+      "properties": {
+        "phase": 145
+      }
+    },
+    {
+      "step": 1460,
+      "properties": {
+        "phase": 146
+      }
+    },
+    {
+      "step": 1470,
+      "properties": {
+        "phase": 147
+      }
+    },
+    {
+      "step": 1480,
+      "properties": {
+        "phase": 148
+      }
+    },
+    {
+      "step": 1490,
+      "properties": {
+        "phase": 149
+      }
+    },
+    {
+      "step": 1500,
+      "properties": {
+        "phase": 150
+      }
+    },
+    {
+      "step": 1510,
+      "properties": {
+        "phase": 151
+      }
+    },
+    {
+      "step": 1520,
+      "properties": {
+        "phase": 152
+      }
     }
   ],
   "snapshots": [
@@ -748,7 +1120,131 @@
     893,
     899,
     903,
-    909
+    909,
+    913,
+    919,
+    923,
+    929,
+    933,
+    939,
+    943,
+    949,
+    953,
+    959,
+    963,
+    969,
+    973,
+    979,
+    983,
+    989,
+    993,
+    999,
+    1003,
+    1009,
+    1013,
+    1019,
+    1023,
+    1029,
+    1033,
+    1039,
+    1043,
+    1049,
+    1053,
+    1059,
+    1063,
+    1069,
+    1073,
+    1079,
+    1083,
+    1089,
+    1093,
+    1099,
+    1103,
+    1109,
+    1113,
+    1119,
+    1123,
+    1129,
+    1133,
+    1139,
+    1143,
+    1149,
+    1153,
+    1159,
+    1163,
+    1169,
+    1173,
+    1179,
+    1183,
+    1189,
+    1193,
+    1199,
+    1203,
+    1209,
+    1213,
+    1219,
+    1223,
+    1229,
+    1233,
+    1239,
+    1243,
+    1249,
+    1253,
+    1259,
+    1263,
+    1269,
+    1273,
+    1279,
+    1283,
+    1289,
+    1293,
+    1299,
+    1303,
+    1309,
+    1313,
+    1319,
+    1323,
+    1329,
+    1333,
+    1339,
+    1343,
+    1349,
+    1353,
+    1359,
+    1363,
+    1369,
+    1373,
+    1379,
+    1383,
+    1389,
+    1393,
+    1399,
+    1403,
+    1409,
+    1413,
+    1419,
+    1423,
+    1429,
+    1433,
+    1439,
+    1443,
+    1449,
+    1453,
+    1459,
+    1463,
+    1469,
+    1473,
+    1479,
+    1483,
+    1489,
+    1493,
+    1499,
+    1503,
+    1509,
+    1513,
+    1519,
+    1523,
+    1529
   ],
   "trace_steps": [
     3,
@@ -932,6 +1428,130 @@
     893,
     899,
     903,
-    909
+    909,
+    913,
+    919,
+    923,
+    929,
+    933,
+    939,
+    943,
+    949,
+    953,
+    959,
+    963,
+    969,
+    973,
+    979,
+    983,
+    989,
+    993,
+    999,
+    1003,
+    1009,
+    1013,
+    1019,
+    1023,
+    1029,
+    1033,
+    1039,
+    1043,
+    1049,
+    1053,
+    1059,
+    1063,
+    1069,
+    1073,
+    1079,
+    1083,
+    1089,
+    1093,
+    1099,
+    1103,
+    1109,
+    1113,
+    1119,
+    1123,
+    1129,
+    1133,
+    1139,
+    1143,
+    1149,
+    1153,
+    1159,
+    1163,
+    1169,
+    1173,
+    1179,
+    1183,
+    1189,
+    1193,
+    1199,
+    1203,
+    1209,
+    1213,
+    1219,
+    1223,
+    1229,
+    1233,
+    1239,
+    1243,
+    1249,
+    1253,
+    1259,
+    1263,
+    1269,
+    1273,
+    1279,
+    1283,
+    1289,
+    1293,
+    1299,
+    1303,
+    1309,
+    1313,
+    1319,
+    1323,
+    1329,
+    1333,
+    1339,
+    1343,
+    1349,
+    1353,
+    1359,
+    1363,
+    1369,
+    1373,
+    1379,
+    1383,
+    1389,
+    1393,
+    1399,
+    1403,
+    1409,
+    1413,
+    1419,
+    1423,
+    1429,
+    1433,
+    1439,
+    1443,
+    1449,
+    1453,
+    1459,
+    1463,
+    1469,
+    1473,
+    1479,
+    1483,
+    1489,
+    1493,
+    1499,
+    1503,
+    1509,
+    1513,
+    1519,
+    1523,
+    1529
   ]
 }

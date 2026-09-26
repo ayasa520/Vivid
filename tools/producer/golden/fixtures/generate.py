@@ -37,6 +37,7 @@ from init_property_write import make_fixture as make_init_property_write_fixture
 from animation_fractional_seek import make_fixture as make_animation_fractional_seek_fixture
 from mat4_methods import make_fixture as make_mat4_methods_fixture
 from vec4_methods import make_fixture as make_vec4_methods_fixture
+from vec2_vec3_methods import make_fixture as make_vec2_vec3_methods_fixture
 from model_depth_volumetrics import make_fixture as make_model_depth_volumetrics_fixture
 
 HERE = Path(__file__).resolve().parent
@@ -409,6 +410,9 @@ def expand_spec(spec, assets_dir):
                 fixtures["image-transform-blend"])
         if family["kind"] == "vec4-methods":
             fixtures["effect-material-bulk"] = make_vec4_methods_fixture(
+                fixtures["effect-material-bulk"])
+        if family["kind"] == "vec2-vec3-methods":
+            fixtures["effect-material-bulk"] = make_vec2_vec3_methods_fixture(
                 fixtures["effect-material-bulk"])
         if family["kind"] == "animation-fractional-seek":
             fixtures["animation-fractional-seek"] = make_animation_fractional_seek_fixture()

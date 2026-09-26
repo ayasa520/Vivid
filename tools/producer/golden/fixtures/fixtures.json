@@ -17,6 +17,9 @@
       "kind": "vec4-methods"
     },
     {
+      "kind": "vec2-vec3-methods"
+    },
+    {
       "kind": "general-zoom"
     },
     {
