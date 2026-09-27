@@ -519,6 +519,8 @@ def baseline_dir(wallpaper_id, scenario_name):
 
 
 def cmd_run(args):
+    if bool(args.config) != bool(args.display_key):
+        sys.exit("error: --config and --display-key must be supplied together")
     tiers = load_tiers()
     config = load_json(CONFIG_PATH, default={"wallpapers": {}})
     ids = resolve_ids(args, tiers)
@@ -527,6 +529,9 @@ def cmd_run(args):
     report = {"run": run_id, "tier": args.tier, "results": {}, "renderer": None}
     failures = 0
     capture_extra = [] if args.no_vk_validation else ["--vk-validation"]
+    if args.config:
+        capture_extra += ["--config", str(Path(args.config).expanduser().resolve()),
+                          "--display-key", args.display_key]
     for wallpaper_id in ids:
         scenario_name, scenario_path = scenario_for(wallpaper_id, tiers, override=args.scenario)
         tolerance, mask = tolerance_for(wallpaper_id, tiers, config)
@@ -818,6 +823,8 @@ def main():
 
     p = sub.add_parser("run", help="capture a tier and compare with the baseline")
     selection(p)
+    p.add_argument("--config", help="complete producer config passed to each capture")
+    p.add_argument("--display-key", help="display entry selected from --config")
     p.add_argument("--run-id")
     p.add_argument("--update-baseline", action="store_true", help="record missing baselines")
     p.add_argument("--no-vk-validation", action="store_true",
