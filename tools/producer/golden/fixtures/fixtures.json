@@ -32,6 +32,9 @@
       "kind": "copy-extents"
     },
     {
+      "kind": "effect-final-target"
+    },
+    {
       "kind": "effect-live-topology"
     },
     {
