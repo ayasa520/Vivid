@@ -12857,7 +12857,7 @@
       ]
     },
     "text-static": {
-      "description": "static text plus mixed color glyphs with independent palette, tint and alpha consumers",
+      "description": "static text plus mixed color glyphs with registered-font assignment, palette, tint and alpha consumers",
       "docs": [
         "scene/first/assets.md",
         "scene/audiovisualizer/mediainformation.md"
@@ -12979,7 +12979,10 @@
         {
           "id": 200,
           "name": "asset-glyph-color-white",
-          "text": "😀A",
+          "text": {
+            "value": "😀A",
+            "script": "'use strict';\nconst font = engine.registerAsset('fonts/TwemojiMozilla.ttf');\nexport function init(value) {\n    thisLayer.font = font;\n    return value;\n}\n"
+          },
           "font": "fonts/TwemojiMozilla.ttf",
           "pointsize": 22,
           "origin": "100 110 0",
