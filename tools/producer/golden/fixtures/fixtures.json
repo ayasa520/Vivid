@@ -411,7 +411,14 @@
           "INFO SceneScript log: Q03 parameters 7 true null undefined 雪 😀 100% %s",
           "INFO SceneScript log: Q03 conversion first second 1,2",
           "INFO SceneScript log: ",
+          "INFO SceneScript log: Q72Error checks true {\"returned\":true,\"order\":[\"first\",\"second\"],\"cases\":[{\"position\":0,\"caught\":true,\"converted\":[0]},{\"position\":1,\"caught\":true,\"converted\":[0,1]},{\"position\":2,\"caught\":true,\"converted\":[0,1,2]}]}",
           "INFO SceneScript log: Q03 update ready"
+        ],
+        "ERROR SceneScript error:": [
+          "ERROR SceneScript error: Q72 parameters 7 true null undefined 雪 😀 100% %s",
+          "ERROR SceneScript error: Q72 conversion first second 1,2",
+          "ERROR SceneScript error: ",
+          "ERROR SceneScript error: Q72 update ready"
         ]
       },
       "objects": [
@@ -420,7 +427,7 @@
           "name": "console-result",
           "text": {
             "value": "pending",
-            "script": "let done = false;\nexport function init() {\n    const result = console.log('Q03 parameters', 7, true, null, undefined, '雪', '😀', '100%', '%s');\n    const order = [];\n    console.log('Q03 conversion', {toString() { order.push('first'); return 'first'; }}, {toString() { order.push('second'); return 'second'; }}, [1, 2]);\n    console.log();\n    const failure = new Error('conversion sentinel');\n    let caught = false;\n    try { console.log('Q03 incomplete', {toString() { throw failure; }}); } catch (e) { caught = e === failure; }\n    const state = {returned: result === undefined, order: order.join(','), caught};\n    localStorage.set('console-log', state);\n    return state.returned && state.order === 'first,second' && caught ? 'Q03 PASS' : 'Q03 FAIL';\n}\nexport function update(value) {\n    if (!done) { console.log('Q03 update', 'ready'); done = true; }\n    return value;\n}\n"
+            "script": "let done = false;\nexport function init() {\n    const result = console.log('Q03 parameters', 7, true, null, undefined, '雪', '😀', '100%', '%s');\n    const order = [];\n    console.log('Q03 conversion', {toString() { order.push('first'); return 'first'; }}, {toString() { order.push('second'); return 'second'; }}, [1, 2]);\n    console.log();\n    const failure = new Error('conversion sentinel');\n    let caught = false;\n    try { console.log('Q03 incomplete', {toString() { throw failure; }}); } catch (e) { caught = e === failure; }\n    const state = {returned: result === undefined, order: order.join(','), caught};\n    localStorage.set('console-log', state);\n    const errorAccepted = checkConsoleError();\n    return state.returned && state.order === 'first,second' && caught && errorAccepted ? 'Q03 PASS' : 'Q03 FAIL';\n}\nexport function update(value) {\n    if (!done) { console.log('Q03 update', 'ready'); console.error('Q72 update', 'ready'); done = true; }\n    return value;\n}\n\nfunction checkConsoleError() {\n    const returned = console.error('Q72 parameters', 7, true, null, undefined, '雪', '😀', '100%', '%s');\n    const order = [];\n    console.error('Q72 conversion',\n        {toString() { order.push('first'); return 'first'; }},\n        {toString() { order.push('second'); return 'second'; }}, [1, 2]);\n    console.error();\n\n    const cases = [];\n    for (const position of [0, 1, 2]) {\n        const failure = new Error('conversion sentinel ' + position);\n        const converted = [];\n        const values = [0, 1, 2].map(index => ({toString() {\n            converted.push(index);\n            if (index === position) throw failure;\n            return 'argument-' + index;\n        }}));\n        let caught = false;\n        try { console.error.apply(console, values); }\n        catch (error) { caught = error === failure; }\n        cases.push({position, caught, converted});\n    }\n    const state = {returned: returned === undefined, order, cases};\n    localStorage.set('console-error', state);\n    const accepted = state.returned && order.join(',') === 'first,second'\n        && cases.every(row => row.caught && row.converted.join(',') === [0, 1, 2].slice(0, row.position + 1).join(','));\n    console.log('Q72Error checks', accepted, JSON.stringify(state));\n    return accepted;\n}\n"
           },
           "origin": "960 540 0",
           "angles": "0 0 0",
